@@ -1706,3 +1706,71 @@ mod output_cache_tests {
         assert!(Rc::ptr_eq(&first, &bundled_geometry(10504, distance).unwrap()));
     }
 }
+
+#[cfg(test)]
+mod gate_order_tests {
+    use super::*;
+
+    fn stall(gate: f64, skill_ids: &[i64]) -> Value {
+        json::obj(vec![
+            ("gateIndex", json::num(gate)),
+            ("skills", json::arr(skill_ids.iter().map(|&id|
+                json::obj(vec![("skill_id", json::num(id as f64))])).collect())),
+        ])
+    }
+
+    fn request(horses: Vec<Value>, player: usize) -> Value {
+        json::obj(vec![
+            ("experimentalRetailRuntime", Value::Bool(true)),
+            ("playerHorseIndex", json::num(player as f64)),
+            ("horses", json::arr(horses)),
+        ])
+    }
+
+    fn gates(spec: &Value) -> Vec<f64> {
+        spec.get_array("horses").unwrap().iter()
+            .map(|h| h.get("gateIndex").unwrap().as_f64().unwrap()).collect()
+    }
+
+    fn skills_at(spec: &Value, internal: usize) -> Vec<i64> {
+        spec.get_array("horses").unwrap()[internal].get_array("skills").unwrap().iter()
+            .map(|s| s.get_i64("skill_id").unwrap()).collect()
+    }
+
+    #[test]
+    fn gate_permutation_depends_on_gate_index_only() {
+        // paired_random_streams keys each runner's substreams by its position in
+        // the request's horses array, so the field this gate_order permutation
+        // produces must depend on gateIndex alone: two fields that differ only in
+        // their skill lists must land on the identical permutation, and every
+        // runner must travel with its own skills to the same position.
+        let left = gate_order(request(
+            vec![stall(12., &[101, 102]), stall(3., &[]), stall(7., &[203, 204, 205])], 0)).unwrap();
+        let right = gate_order(request(
+            vec![stall(12., &[999]), stall(3., &[1, 2, 3, 4]), stall(7., &[7])], 0)).unwrap();
+        assert_eq!(left.1, Some(vec![1, 2, 0]), "perm[internal] = request index, ascending gateIndex");
+        assert_eq!(left.1, right.1, "the skill lists must not change the permutation");
+        assert_eq!(gates(&left.0), [3., 7., 12.]);
+        assert_eq!(gates(&left.0), gates(&right.0));
+        // Runner identity follows the gate: each horse keeps its own skills.
+        assert_eq!(skills_at(&left.0, 1), vec![203, 204, 205]);
+        assert_eq!(skills_at(&right.0, 1), vec![7]);
+        // The player index follows the permutation, and the skills do not move it.
+        assert_eq!(left.0.get_i64("playerHorseIndex").unwrap(), 2);
+        assert_eq!(right.0.get_i64("playerHorseIndex").unwrap(), 2);
+    }
+
+    #[test]
+    fn gate_ordered_requests_pass_through_untouched() {
+        // The app's adapter emits horses in ascending gateIndex (pinned in
+        // umalator-global/v2/engines/globalsim/adapter.test.ts), so the reordering
+        // must be the identity for app traffic: request position k is then the
+        // same physical runner that substream(seed, k, tag) keys on, in every
+        // build over the seed -- which is what keeps two builds paired.
+        let spec = request(vec![stall(3., &[1]), stall(7., &[2, 3]), stall(12., &[])], 1);
+        let (out, perm) = gate_order(spec).unwrap();
+        assert_eq!(perm, None, "a field already in gate order is never reordered");
+        assert_eq!(gates(&out), [3., 7., 12.]);
+        assert_eq!(out.get_i64("playerHorseIndex").unwrap(), 1);
+    }
+}

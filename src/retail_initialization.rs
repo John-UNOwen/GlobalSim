@@ -652,13 +652,18 @@ mod tests {
         let seed=case.get_i64("seed").unwrap() as i32;
         let plain=case.get_array("horses").unwrap();
         assert!(plain.len()>=2);
-        // One extra entry for runner 0: more shared-stream draws, and nothing new
-        // for the runners behind it.
+        // Duplicate a skill that really draws, 200362, on runner 0: it carries a
+        // random condition term and a wisdom check, so the growth consumes extra
+        // shared-stream draws (proven below) and must move every runner behind it
+        // in shared-stream mode -- and nothing in paired mode. A skill that draws
+        // nothing would make the growth invisible and the test vacuous.
         let mut grown=plain.to_vec();
         let mut first=match &grown[0] { crate::json::Value::Object(map)=>map.clone(), _=>panic!("a horse must be an object") };
         let entries=field(&grown[0],"skills").unwrap().as_array().unwrap().clone();
+        let drawn=entries.iter().find(|e| e.get_i64("skill_id").ok()==Some(200362))
+            .expect("fixture runner 0 owns skill 200362").clone();
         let mut more=entries.clone();
-        more.push(entries[0].clone());
+        more.push(drawn);
         first.insert("skills".into(),crate::json::Value::Array(more));
         grown[0]=crate::json::Value::Object(first);
         let fingerprint=|row:&HorseInitialization| {
@@ -669,14 +674,37 @@ mod tests {
                     Windows::Distances(rows)=>rows.iter().flat_map(|(lo,hi)|[lo.to_bits(),hi.to_bits()]).collect(),
                 })).collect();
             keys.extend(row.skill_enabled.iter().map(|(sid,on)|(format!("W{sid}"),vec![u32::from(*on)])));
+            // The initialization produced at a position, not just its substream
+            // draws: the shared-stream values (force-in-move offset, start delay)
+            // must stay put too, or a skill change elsewhere still moves them.
+            keys.push(("force_in_move".into(),vec![row.force_in_move_coefficient.to_bits()]));
+            keys.push(("start_delay".into(),vec![row.start_delay.to_bits()]));
             keys
         };
-        let before=initialize(seed,plain,course,skills,parameters,true).unwrap();
-        let paired=initialize(seed,&grown,course,skills,parameters,true).unwrap();
-        let retail=initialize(seed,&grown,course,skills,parameters,false).unwrap();
+        let mut before=initialize(seed,plain,course,skills,parameters,true).unwrap();
+        let mut paired=initialize(seed,&grown,course,skills,parameters,true).unwrap();
+        let mut retail_plain=initialize(seed,plain,course,skills,parameters,false).unwrap();
+        let mut retail=initialize(seed,&grown,course,skills,parameters,false).unwrap();
         assert_eq!(fingerprint(&before.horses[1]),fingerprint(&paired.horses[1]),
             "paired mode must not move a later runner's draws");
-        assert_ne!(fingerprint(&before.horses[1]),fingerprint(&retail.horses[1]),
-            "the shared stream must still shift them when the field grows");
+        assert_ne!(fingerprint(&retail_plain.horses[1]),fingerprint(&retail.horses[1]),
+            "the growth does shift the shared stream, so the pairing holds are not vacuous");
+        // Sections and rushing continue on the same stream after initialize.
+        // Paired mode must leave the whole rest of a position's initialization --
+        // section modifiers, rushing chance and section pick -- bit for bit where it was.
+        let wisdom:Vec<_>=plain.iter().map(|h|(number(h,"base_wisdom").unwrap(),0.0)).collect();
+        for init in [&mut before,&mut paired,&mut retail_plain,&mut retail] {
+            initialize_sections_and_rushing(init,&wisdom,course,parameters).unwrap();
+        }
+        assert_eq!(before.stages,paired.stages,
+            "paired growth must not move the shared stream the sections draw from");
+        assert_ne!(retail_plain.stages,retail.stages,
+            "retail growth does move the shared stream");
+        let untouched=|a:&HorseInitialization,b:&HorseInitialization| {
+            assert_eq!(a.section_modifiers,b.section_modifiers);
+            assert_eq!(a.rushing_chance.to_bits(),b.rushing_chance.to_bits());
+            assert_eq!(a.rushing_section,b.rushing_section);
+        };
+        untouched(&before.horses[1],&paired.horses[1]);
     }
 }
