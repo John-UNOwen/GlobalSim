@@ -755,9 +755,14 @@ fn run_race(spec: &RaceSpec, conditions: &'static BTreeMap<String, activation_co
         let courses=bundled_courses()?;
         let parameters=bundled_parameters()?;
         let horses:Vec<_>=solvers.iter().map(|s|(s.horse.wisdom as f32,(s.modifiers_kakari_chance*100.0) as f32)).collect();
+        // Paired-draws mode keys each runner's rushing lottery by (seed, runner)
+        // too, like its in-race draws below; retail keeps the shared stream.
+        let rush_seed=if paired_streams {
+            Some(i32::try_from(spec.seed).map_err(|_|"Retail seed must be a signed 32-bit integer")?)
+        } else {None};
         retail_initialization::initialize_sections_and_rushing(&mut init,&horses,
             courses.get(&spec.course_id.to_string()).ok_or("Missing retail course")?,
-            parameters.get("parameters").ok_or("Missing retail parameters")?)?;
+            parameters.get("parameters").ok_or("Missing retail parameters")?,rush_seed)?;
         let runtime_config=if retail_runtime {
             let raw=courses.get(&spec.course_id.to_string()).ok_or("Missing retail course")?;
             let event_geometry = match &world_geometry {

@@ -498,11 +498,27 @@ impl PreparedInitialization {
     }
 }
 
+/// One runner's rushing lottery: the eligibility draw, then (only when it
+/// hits) the section draw.
+fn rushing_draw(chance:f32,rng:&mut RetailRandom,temptation:&Value)->Result<Option<i32>,String> {
+    Ok(if chance>rng.integer(0,100) as f32 {
+        Some(rng.integer(temptation.get_i64("TemptationLotSectionMin")? as i32,
+                         temptation.get_i64("TemptationLotSectionMax")? as i32+1))
+    } else {None})
+}
+
 /// Continue the manager's shared stream: all section values, then rushing.
 /// Wisdom is the adjusted value after starting green effects; the bonus is
 /// in percentage points. These are predicted inputs, not recorded outcomes.
+///
+/// `paired_seed` (paired-draws mode) gives each runner's rushing lottery its
+/// own (seed, runner, "RUSH") substream. On the shared stream the section
+/// draw happens only when the eligibility draw hits, and that hit depends on
+/// the runner's rushing chance, so a skill that changes the chance shifted
+/// every later runner's draws. `None` keeps the retail shared stream.
 pub fn initialize_sections_and_rushing(init:&mut Initialization, horses:&[(f32,f32)],
-                                      course:&Value,parameters:&Value)->Result<(),String> {
+                                      course:&Value,parameters:&Value,
+                                      paired_seed:Option<i32>)->Result<(),String> {
     if horses.len()!=init.horses.len() {return Err("Roster changed during initialization".into());}
     let base=20.0-(number(course,"distance")?-2000.0)/1000.0;
     let speeds=field(parameters,"BasetTargetSpeed")?;
@@ -523,15 +539,15 @@ pub fn initialize_sections_and_rushing(init:&mut Initialization, horses:&[(f32,f
     }
     init.stages.insert("after_sections".into(),init.rng.draw_count);
     let temptation=field(parameters,"Temptation")?;
-    for ((wisdom,bonus),row) in horses.iter().zip(init.horses.iter_mut()) {
+    for (runner,((wisdom,bonus),row)) in horses.iter().zip(init.horses.iter_mut()).enumerate() {
         let term=*wisdom*0.1+1.0;
         let logarithm=((term*term) as f64).log10() as f32;
         let fraction=number(temptation,"TemptationStartPerVal1")?/logarithm;
         row.rushing_chance=fraction*fraction+bonus;
-        row.rushing_section=if row.rushing_chance>init.rng.integer(0,100) as f32 {
-            Some(init.rng.integer(temptation.get_i64("TemptationLotSectionMin")? as i32,
-                                   temptation.get_i64("TemptationLotSectionMax")? as i32+1))
-        } else {None};
+        row.rushing_section=match paired_seed {
+            Some(seed)=>rushing_draw(row.rushing_chance,&mut substream(seed,runner,"RUSH"),temptation)?,
+            None=>rushing_draw(row.rushing_chance,&mut init.rng,temptation)?,
+        };
     }
     init.stages.insert("after_rushing".into(),init.rng.draw_count);
     Ok(())
@@ -632,7 +648,7 @@ mod tests {
             let mut result=initialize(case.get_i64("seed").unwrap() as i32,horses,course,
                 field(&data,"skills").unwrap(),params,false).unwrap();
             let wisdom:Vec<_>=horses.iter().map(|h|(number(h,"base_wisdom").unwrap(),0.0)).collect();
-            initialize_sections_and_rushing(&mut result,&wisdom,course,params).unwrap();
+            initialize_sections_and_rushing(&mut result,&wisdom,course,params,None).unwrap();
             for (row,expected) in result.horses.iter().zip(case.get_array("expected_rushing_sections").unwrap()) {
                 assert_eq!(row.rushing_section,expected.as_f64().map(|v|v as i32));
                 assert_eq!(row.section_modifiers.len(),24);
@@ -693,8 +709,11 @@ mod tests {
         // Paired mode must leave the whole rest of a position's initialization --
         // section modifiers, rushing chance and section pick -- bit for bit where it was.
         let wisdom:Vec<_>=plain.iter().map(|h|(number(h,"base_wisdom").unwrap(),0.0)).collect();
-        for init in [&mut before,&mut paired,&mut retail_plain,&mut retail] {
-            initialize_sections_and_rushing(init,&wisdom,course,parameters).unwrap();
+        for init in [&mut before,&mut paired] {
+            initialize_sections_and_rushing(init,&wisdom,course,parameters,Some(seed)).unwrap();
+        }
+        for init in [&mut retail_plain,&mut retail] {
+            initialize_sections_and_rushing(init,&wisdom,course,parameters,None).unwrap();
         }
         assert_eq!(before.stages,paired.stages,
             "paired growth must not move the shared stream the sections draw from");
@@ -706,5 +725,41 @@ mod tests {
             assert_eq!(a.rushing_section,b.rushing_section);
         };
         untouched(&before.horses[1],&paired.horses[1]);
+    }
+
+    #[test]
+    fn paired_mode_holds_other_runners_rushing_when_one_chance_changes() {
+        // A skill that changes runner 0's rushing chance (bonus) flips whether
+        // its section draw happens. On the shared stream that shifts every later
+        // runner's rushing lottery; paired mode must not move any of them.
+        let data=crate::json::parse(include_str!("../tests/fixtures/retail_initialization_official.json")).unwrap();
+        let (skills,parameters)=(field(&data,"skills").unwrap(),field(&data,"parameters").unwrap());
+        let mut retail_moved=false;
+        for case in data.get_array("cases").unwrap() {
+            let course=field(field(&data,"courses").unwrap(),case.get_str("course_id").unwrap()).unwrap();
+            let seed=case.get_i64("seed").unwrap() as i32;
+            let horses=case.get_array("horses").unwrap();
+            if horses.len()<2 {continue;}
+            let wisdom:Vec<(f32,f32)>=horses.iter().map(|h|(number(h,"base_wisdom").unwrap(),0.0)).collect();
+            // Runner 0 certain to rush (bonus 100) vs certain not to (bonus -100):
+            // its section draw happens in exactly one of the two.
+            let mut hot=wisdom.clone(); hot[0].1=100.0;
+            let mut cold=wisdom.clone(); cold[0].1=-100.0;
+            let run=|w:&[(f32,f32)],paired:Option<i32>| {
+                let mut init=initialize(seed,horses,course,skills,parameters,paired.is_some()).unwrap();
+                initialize_sections_and_rushing(&mut init,w,course,parameters,paired).unwrap();
+                init
+            };
+            let (ph,pc)=(run(&hot,Some(seed)),run(&cold,Some(seed)));
+            assert!(ph.horses[0].rushing_section.is_some() && pc.horses[0].rushing_section.is_none(),
+                "the bonus must flip runner 0's own lottery, or the test is vacuous");
+            for i in 1..horses.len() {
+                assert_eq!(ph.horses[i].rushing_section,pc.horses[i].rushing_section,
+                    "paired mode moved runner {i}'s rushing when runner 0's chance changed");
+            }
+            let (rh,rc)=(run(&hot,None),run(&cold,None));
+            if (1..horses.len()).any(|i| rh.horses[i].rushing_section!=rc.horses[i].rushing_section) {retail_moved=true;}
+        }
+        assert!(retail_moved,"on the shared stream the flip must move some later runner, or the fixture proves nothing");
     }
 }
