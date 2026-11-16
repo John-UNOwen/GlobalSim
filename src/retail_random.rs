@@ -87,9 +87,37 @@ impl RetailRandom {
     }
 }
 
+/// A stream keyed by (race seed, runner, tag), for paired-draws mode.
+///
+/// A key names one thing and never the field around it, so a skill's draws stay
+/// put when another skill or another runner's skills are added or removed. The
+/// tag must not contain anything that varies with the rest of the request.
+pub fn substream(seed: i32, runner: usize, tag: &str) -> RetailRandom {
+    let mut hash = 0xcbf29ce484222325u64 ^ (seed as u32 as u64);
+    hash = hash.wrapping_mul(0x100000001b3) ^ runner as u64;
+    for byte in tag.bytes() { hash = (hash ^ byte as u64).wrapping_mul(0x100000001b3); }
+    // Avalanche, so a one-character tag change moves every bit.
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xff51afd7ed558ccd);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xc4ceb9fe1a85ec53);
+    hash ^= hash >> 33;
+    RetailRandom::new((hash >> 33) as i32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn substream_is_stable_per_key_and_separated_across_keys() {
+        let draw = |seed: i32, runner: usize, tag: &str| substream(seed, runner, tag).real(0., 100.);
+        let key = "T200361:0:condition:straight_random";
+        assert_eq!(draw(7, 0, key), draw(7, 0, key));
+        assert_ne!(draw(7, 0, key), draw(7, 1, key));
+        assert_ne!(draw(7, 0, key), draw(7, 0, "T200362:0:condition:straight_random"));
+        assert_ne!(draw(7, 0, "RUN"), draw(8, 0, "RUN"));
+    }
     #[test]
     fn independent_dotnet_reference_all_signed_seed_boundaries() {
         let data=crate::json::parse(include_str!("../tests/fixtures/retail_rng_dotnet.json")

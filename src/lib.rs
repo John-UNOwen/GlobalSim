@@ -570,7 +570,7 @@ fn is_usable(
 
 fn run_race(spec: &RaceSpec, conditions: &'static BTreeMap<String, activation_conditions::Condition>,
             retail: Option<&retail_initialization::Initialization>, retail_sections:bool,
-            retail_runtime:bool, world_geometry:Option<Rc<retail_geometry::CourseGeometry>>,
+            retail_runtime:bool, paired_streams:bool, world_geometry:Option<Rc<retail_geometry::CourseGeometry>>,
             startup_pass:bool, retain_all_frames:bool, capture_frames:bool,
             replay_worker: Option<&mut replay_worker::ReplayWorker>,
             prepared_roster: &mut Option<PreparedRoster>) -> Result<Value, String> {
@@ -770,7 +770,14 @@ fn run_race(spec: &RaceSpec, conditions: &'static BTreeMap<String, activation_co
             Rc::get_mut(&mut config).unwrap().event_geometry = Some(event_geometry);
             Some(config)
         } else {None};
-        for (solver,row) in solvers.iter_mut().zip(init.horses.iter()) {
+        // Paired-draws mode gives every runner its own stream, keyed by
+        // (seed, position in the request's horses array), so a skill change on one
+        // runner cannot shift another runner's in-race draws. Parameters are
+        // parsed once and cloned; only the stream differs.
+        let paired_seed=if paired_streams && retail_runtime {
+            Some(i32::try_from(spec.seed).map_err(|_|"Retail seed must be a signed 32-bit integer")?)
+        } else {None};
+        for (runner,(solver,row)) in solvers.iter_mut().zip(init.horses.iter()).enumerate() {
             solver.section_modifier=row.section_modifiers.iter().map(|&v|v as f64).collect();
             solver.section_modifier.push(0.0);
             solver.kakari_start=match row.rushing_section {
@@ -778,7 +785,11 @@ fn run_race(spec: &RaceSpec, conditions: &'static BTreeMap<String, activation_co
                 None=>course.distance+9999.0,
             };
             if let Some(config)=&runtime_config {
-                solver.enable_retail_runtime(config.clone(),row,race_parameters::parse_ground_condition(&spec.ground)? as i32)?;
+                let config=match paired_seed {
+                    Some(seed)=>config.with_random(Rc::new(RefCell::new(retail_random::substream(seed,runner,"RUN")))),
+                    None=>config.clone(),
+                };
+                solver.enable_retail_runtime(config,row,race_parameters::parse_ground_condition(&spec.ground)? as i32)?;
             }
         }
     }
@@ -1500,6 +1511,7 @@ fn legacy_reply(spec_json: Value, capture_frames: bool,
             course_data::get_course(spec.course_id).distance as f32)?)
     } else {None};
     let retail_sections=spec_json.get("experimentalRetailSections").and_then(Value::as_bool)==Some(true);
+    let paired_streams=spec_json.get("pairedRandomStreams").and_then(Value::as_bool)==Some(true);
     let retail=if spec_json.get("experimentalRetailInitialization").and_then(Value::as_bool)==Some(true) || retail_sections || retail_runtime {
         let input_horses:Vec<_>=spec.horses.iter().map(|horse| json::obj(vec![
             ("skills",Value::Array(horse.skills.iter().map(|(sid,level,_)|json::obj(vec![
@@ -1521,13 +1533,16 @@ fn legacy_reply(spec_json: Value, capture_frames: bool,
         let seed=i32::try_from(spec.seed).map_err(|_|"Retail seed must be a signed 32-bit integer")?;
         Some(retail_initialization::initialize_cached(seed,&input_horses,
             raw_courses.get(&spec.course_id.to_string()).ok_or("Missing retail course")?,raw_skills,
-            parameters.get("parameters").ok_or("Missing retail parameters")?,skill_facts)?)
+            parameters.get("parameters").ok_or("Missing retail parameters")?,skill_facts,paired_streams)?)
     } else {None};
     let retain_all_frames = spec_json.get("retainAllFrames").and_then(Value::as_bool)==Some(true);
     let encoder = if retain_all_frames && capture_frames && gate_perm.is_none() { replay_worker } else { None };
-    let mut result=run_race(&spec, conditions,retail.as_ref(),retail_sections,retail_runtime,world_geometry,startup_pass,retain_all_frames,capture_frames,encoder,&mut None)?;
+    let mut result=run_race(&spec, conditions,retail.as_ref(),retail_sections,retail_runtime,paired_streams,world_geometry,startup_pass,retain_all_frames,capture_frames,encoder,&mut None)?;
     if let Value::Object(map)=&mut result {
         map.insert("experimentalRetailInitialization".into(),Value::Bool(retail.is_some()));
+        // Only paired replies carry the key, so default-mode replies stay
+        // byte-identical to the pinned engine.
+        if paired_streams { map.insert("pairedRandomStreams".into(),Value::Bool(true)); }
     }
     if let (Value::Object(map), Some(signature)) = (&mut result, spec_json.get("dataSignature")) {
         map.insert("dataSignature".to_string(), signature.clone());

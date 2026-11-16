@@ -22,6 +22,7 @@ pub struct PreparedRace {
     initialization: Option<retail_initialization::PreparedInitialization>,
     retail_sections: bool,
     retail_runtime: bool,
+    paired_streams: bool,
     world_geometry: Option<Rc<retail_geometry::CourseGeometry>>,
     startup_pass: bool,
     retain_all_frames: bool,
@@ -71,6 +72,7 @@ impl PreparedRace {
             Some(bundled_geometry(spec.course_id, course_data::get_course(spec.course_id).distance as f32)?)
         } else { None };
         let retail_sections = input.get("experimentalRetailSections").and_then(Value::as_bool) == Some(true);
+        let paired_streams = input.get("pairedRandomStreams").and_then(Value::as_bool) == Some(true);
         let initialization = if input.get("experimentalRetailInitialization").and_then(Value::as_bool) == Some(true)
             || retail_sections || retail_runtime {
             let horses = spec.horses.iter().map(|horse| {
@@ -85,9 +87,9 @@ impl PreparedRace {
                 ]))
             }).collect::<Result<Vec<_>, String>>()?;
             Some(retail_initialization::PreparedInitialization::new(&horses, course, raw_skills,
-                bundled_parameters()?.get("parameters").ok_or("Missing retail parameters")?)?)
+                bundled_parameters()?.get("parameters").ok_or("Missing retail parameters")?, paired_streams)?)
         } else { None };
-        Ok(Self { spec, skills, initialization, retail_sections, retail_runtime,
+        Ok(Self { spec, skills, initialization, retail_sections, retail_runtime, paired_streams,
             world_geometry, startup_pass, retain_all_frames: input.get("retainAllFrames").and_then(Value::as_bool) == Some(true),
             gate_perm, signature: input.get("dataSignature").cloned(), roster: None })
     }
@@ -108,10 +110,13 @@ impl PreparedRace {
         }).transpose()?;
         let mut value = race_solver_builder::with_skills(self.skills.clone(), || run_race(
             &self.spec, conditions(), initialization.as_ref(), self.retail_sections, self.retail_runtime,
-            self.world_geometry.clone(), self.startup_pass, self.retain_all_frames, capture_frames, None,
+            self.paired_streams, self.world_geometry.clone(), self.startup_pass, self.retain_all_frames, capture_frames, None,
             &mut self.roster))?;
         if let Value::Object(map) = &mut value {
             map.insert("experimentalRetailInitialization".into(), Value::Bool(initialization.is_some()));
+            // Only paired replies carry the key, so default-mode replies stay
+            // byte-identical to the pinned engine.
+            if self.paired_streams { map.insert("pairedRandomStreams".into(), Value::Bool(true)); }
             if let Some(signature) = &self.signature { map.insert("dataSignature".into(), signature.clone()); }
         }
         if let Some(perm) = &self.gate_perm { restore_request_order(&mut value, perm); }

@@ -2,7 +2,7 @@
 //! The normal native race backend is not switched until runtime ordering agrees.
 use std::collections::BTreeMap;
 use crate::json::Value;
-use crate::retail_random::RetailRandom;
+use crate::retail_random::{substream, RetailRandom};
 
 // RaceParameter ctor/GetMotivationCoef (3431530/3431830): integer master
 // rate scaled by float32 0.0001, then raw Wit multiplied and clamped.
@@ -40,6 +40,8 @@ pub struct Trigger {
     pub name: String,
     pub argument: i32,
     pub windows: Windows,
+    /// Shared-stream positions consumed by this trigger. In paired-draws mode the
+    /// windows come from a substream instead, so both counts stay equal.
     pub draw_start: usize,
     pub draw_end: usize,
 }
@@ -193,10 +195,28 @@ fn sample_trigger(name:&str,arg:i32,rng:&mut RetailRandom,course:&Value)->Result
     Ok(Windows::Distances(windows))
 }
 
-pub fn initialize(seed:i32,horses:&[Value],course:&Value,skills:&Value,parameters:&Value)->Result<Initialization,String> {
+/// One skill term's activation windows. Paired-draws mode samples them from the
+/// (runner, skill, term) substream, so the windows do not move when the rest of
+/// the field changes.
+fn trigger_windows(paired: bool, seed: i32, runner: usize, key: &str, name: &str, argument: i32,
+                   rng: &mut RetailRandom, course: &Value) -> Result<Windows, String> {
+    if paired {
+        let mut stream = substream(seed, runner, key);
+        sample_trigger(name, argument, &mut stream, course)
+    } else {
+        sample_trigger(name, argument, rng, course)
+    }
+}
+
+/// One skill's wisdom lottery. Paired-draws mode uses that skill's own substream.
+fn wisdom_roll(paired: bool, seed: i32, runner: usize, sid: &str, rng: &mut RetailRandom) -> f32 {
+    if paired { substream(seed, runner, &format!("W{sid}")).real(0., 100.) } else { rng.real(0., 100.) }
+}
+
+pub fn initialize(seed:i32,horses:&[Value],course:&Value,skills:&Value,parameters:&Value,paired:bool)->Result<Initialization,String> {
     let mut rng=RetailRandom::new(seed);
     let mut rows:Vec<HorseInitialization>=(0..horses.len()).map(|_|HorseInitialization::default()).collect();
-    for (horse,row) in horses.iter().zip(rows.iter_mut()) {
+    for (runner,(horse,row)) in horses.iter().zip(rows.iter_mut()).enumerate() {
         for entry in horse.get_array("skills")? {
             let sid=skill_id(entry)?;
             for (alternative,alt) in field(skills,&sid)?.get_array("alternatives")?.iter().enumerate() {
@@ -205,7 +225,7 @@ pub fn initialize(seed:i32,horses:&[Value],course:&Value,skills:&Value,parameter
                         if !name.contains("random") {continue;}
                         if operator!="==" {return Err(format!("Untraced retail random operator: {name}{operator}"));}
                         let draw_start=rng.draw_count;
-                        let windows=sample_trigger(&name,argument,&mut rng,course)?;
+                        let windows=trigger_windows(paired,seed,runner,&format!("T{sid}:{alternative}:{column}:{name}"),&name,argument,&mut rng,course)?;
                         row.triggers.push(Trigger {skill_id:sid.clone(),alternative,field:column.into(),name,argument,
                             windows,draw_start,draw_end:rng.draw_count});
                     }
@@ -223,11 +243,11 @@ pub fn initialize(seed:i32,horses:&[Value],course:&Value,skills:&Value,parameter
         row.force_in_move_coefficient=coefficient+offset;
     }
     stages.insert("after_ai".into(),rng.draw_count);
-    for (horse,row) in horses.iter().zip(rows.iter_mut()) {
+    for (runner,(horse,row)) in horses.iter().zip(rows.iter_mut()).enumerate() {
         let chance=(100.0-9000.0/number(horse,"base_wisdom")?).max(20.0);
         for entry in horse.get_array("skills")? {
             let sid=skill_id(entry)?;
-            let enabled=field(skills,&sid)?.get_i64("wisdomCheck")?!=1 || chance>rng.real(0.0,100.0);
+            let enabled=field(skills,&sid)?.get_i64("wisdomCheck")?!=1 || chance>wisdom_roll(paired,seed,runner,&sid,&mut rng);
             row.skill_enabled.insert(sid,enabled);
         }
     }
@@ -305,25 +325,25 @@ impl SkillFactsCache {
 /// arithmetic keep the same order. If any skill fails to decode, the original
 /// path runs instead so that its error, or its result, is exactly reproduced.
 pub fn initialize_cached(seed:i32,horses:&[Value],course:&Value,skills:&Value,parameters:&Value,
-    cache:&mut SkillFactsCache)->Result<Initialization,String> {
+    cache:&mut SkillFactsCache,paired:bool)->Result<Initialization,String> {
     let mut decoded = Vec::with_capacity(horses.len());
     for horse in horses {
-        let Ok(entries) = horse.get_array("skills") else { return initialize(seed,horses,course,skills,parameters) };
+        let Ok(entries) = horse.get_array("skills") else { return initialize(seed,horses,course,skills,parameters,paired) };
         let mut row = Vec::with_capacity(entries.len());
         for entry in entries {
-            let Ok(sid) = skill_id(entry) else { return initialize(seed,horses,course,skills,parameters) };
-            let Ok(facts) = cache.facts(skills, &sid) else { return initialize(seed,horses,course,skills,parameters) };
+            let Ok(sid) = skill_id(entry) else { return initialize(seed,horses,course,skills,parameters,paired) };
+            let Ok(facts) = cache.facts(skills, &sid) else { return initialize(seed,horses,course,skills,parameters,paired) };
             row.push((sid, facts));
         }
         decoded.push(row);
     }
     let mut rng=RetailRandom::new(seed);
     let mut rows:Vec<HorseInitialization>=(0..horses.len()).map(|_|HorseInitialization::default()).collect();
-    for (skills,row) in decoded.iter().zip(rows.iter_mut()) {
+    for (runner,(skills,row)) in decoded.iter().zip(rows.iter_mut()).enumerate() {
         for (sid,facts) in skills {
             for (alternative,column,name,argument) in &facts.random_terms {
                 let draw_start=rng.draw_count;
-                let windows=sample_trigger(name,*argument,&mut rng,course)?;
+                let windows=trigger_windows(paired,seed,runner,&format!("T{sid}:{alternative}:{column}:{name}"),name,*argument,&mut rng,course)?;
                 row.triggers.push(Trigger {skill_id:sid.clone(),alternative:*alternative,field:(*column).into(),
                     name:name.clone(),argument:*argument,windows,draw_start,draw_end:rng.draw_count});
             }
@@ -339,10 +359,10 @@ pub fn initialize_cached(seed:i32,horses:&[Value],course:&Value,skills:&Value,pa
         row.force_in_move_coefficient=coefficient+offset;
     }
     stages.insert("after_ai".into(),rng.draw_count);
-    for ((horse,skills),row) in horses.iter().zip(&decoded).zip(rows.iter_mut()) {
+    for (runner,((horse,skills),row)) in horses.iter().zip(&decoded).zip(rows.iter_mut()).enumerate() {
         let chance=(100.0-9000.0/number(horse,"base_wisdom")?).max(20.0);
         for (sid,facts) in skills {
-            let enabled=!facts.wisdom_checked || chance>rng.real(0.0,100.0);
+            let enabled=!facts.wisdom_checked || chance>wisdom_roll(paired,seed,runner,sid,&mut rng);
             row.skill_enabled.insert(sid.clone(),enabled);
         }
     }
@@ -382,10 +402,12 @@ pub(crate) struct PreparedInitialization {
     course: Value,
     force_span: f32,
     start_delay_max: f32,
+    paired: bool,
 }
 
 impl PreparedInitialization {
-    pub(crate) fn new(horses: &[Value], course: &Value, skills: &Value, parameters: &Value) -> Result<Self, String> {
+    pub(crate) fn new(horses: &[Value], course: &Value, skills: &Value, parameters: &Value,
+        paired: bool) -> Result<Self, String> {
         let styles = ["", "RunningOut", "Proceding", "Insertion", "Chasing"];
         let mut prepared = Vec::with_capacity(horses.len());
         for horse in horses {
@@ -430,16 +452,18 @@ impl PreparedInitialization {
         }
         Ok(Self { horses: prepared, course: course.clone(),
             force_span: number(parameters, "forceInMoveTargetSpeedAddRandomRange")?,
-            start_delay_max: number(parameters, "startDelayMax")? })
+            start_delay_max: number(parameters, "startDelayMax")?, paired })
     }
 
     pub(crate) fn initialize(&self, seed: i32) -> Result<Initialization, String> {
         let mut rng = RetailRandom::new(seed);
         let mut rows: Vec<_> = self.horses.iter().map(|_| HorseInitialization::default()).collect();
-        for (horse, row) in self.horses.iter().zip(&mut rows) {
+        for (runner, (horse, row)) in self.horses.iter().zip(&mut rows).enumerate() {
             for trigger in &horse.triggers {
                 let draw_start = rng.draw_count;
-                let windows = sample_trigger(&trigger.name, trigger.argument, &mut rng, &self.course)?;
+                let windows = trigger_windows(self.paired, seed, runner,
+                    &format!("T{}:{}:{}:{}", trigger.skill_id, trigger.alternative, trigger.field, trigger.name),
+                    &trigger.name, trigger.argument, &mut rng, &self.course)?;
                 row.triggers.push(Trigger { skill_id: trigger.skill_id.clone(), alternative: trigger.alternative,
                     field: trigger.field.clone(), name: trigger.name.clone(), argument: trigger.argument,
                     windows, draw_start, draw_end: rng.draw_count });
@@ -453,9 +477,9 @@ impl PreparedInitialization {
             row.force_in_move_coefficient = coefficient + offset;
         }
         stages.insert("after_ai".into(), rng.draw_count);
-        for (horse, row) in self.horses.iter().zip(&mut rows) {
+        for (runner, (horse, row)) in self.horses.iter().zip(&mut rows).enumerate() {
             for (sid, checked) in &horse.skills {
-                let enabled = !checked || horse.wisdom_chance > rng.real(0., 100.);
+                let enabled = !checked || horse.wisdom_chance > wisdom_roll(self.paired, seed, runner, sid, &mut rng);
                 row.skill_enabled.insert(sid.clone(), enabled);
             }
         }
@@ -526,12 +550,12 @@ mod tests {
             let horses = case.get_array("horses").unwrap();
             let skills = field(&data, "skills").unwrap();
             let parameters = field(&data, "parameters").unwrap();
-            let prepared = PreparedInitialization::new(horses, course, skills, parameters).unwrap();
+            let prepared = PreparedInitialization::new(horses, course, skills, parameters, false).unwrap();
             for seed in [i32::MIN, -71, 0, 71, i32::MAX, case.get_i64("seed").unwrap() as i32] {
               for cached in [false, true] {
-                let mut expected = initialize(seed, horses, course, skills, parameters).unwrap();
+                let mut expected = initialize(seed, horses, course, skills, parameters, false).unwrap();
                 let mut actual = if cached {
-                    initialize_cached(seed, horses, course, skills, parameters, &mut cache).unwrap()
+                    initialize_cached(seed, horses, course, skills, parameters, &mut cache, false).unwrap()
                 } else { prepared.initialize(seed).unwrap() };
                 assert_eq!(actual.stages, expected.stages);
                 for (a, b) in actual.horses.iter().zip(&expected.horses) {
@@ -559,9 +583,9 @@ mod tests {
             if let Some(crate::json::Value::Object(horse)) = broken.first_mut() {
                 horse.insert("skills".into(), crate::json::parse(r#"[{"skill_id":999999999,"level":1}]"#).unwrap());
             }
-            let error = initialize(7, &broken, course, skills, parameters).err();
+            let error = initialize(7, &broken, course, skills, parameters, false).err();
             assert!(error.is_some());
-            assert_eq!(initialize_cached(7, &broken, course, skills, parameters, &mut cache).err(), error);
+            assert_eq!(initialize_cached(7, &broken, course, skills, parameters, &mut cache, false).err(), error);
         }
     }
     #[test]
@@ -589,7 +613,7 @@ mod tests {
         for case in data.get_array("cases").unwrap() {
             let course=field(field(&data,"courses").unwrap(),case.get_str("course_id").unwrap()).unwrap();
             let result=initialize(case.get_i64("seed").unwrap() as i32,case.get_array("horses").unwrap(),course,
-                field(&data,"skills").unwrap(),field(&data,"parameters").unwrap()).unwrap();
+                field(&data,"skills").unwrap(),field(&data,"parameters").unwrap(),false).unwrap();
             for (row,expected) in result.horses.iter().zip(case.get_array("expected_start_delays").unwrap()) {
                 assert_eq!(row.start_delay as f64,expected.as_f64().unwrap());count+=1;
             }
@@ -606,7 +630,7 @@ mod tests {
             let horses=case.get_array("horses").unwrap();
             let params=field(&data,"parameters").unwrap();
             let mut result=initialize(case.get_i64("seed").unwrap() as i32,horses,course,
-                field(&data,"skills").unwrap(),params).unwrap();
+                field(&data,"skills").unwrap(),params,false).unwrap();
             let wisdom:Vec<_>=horses.iter().map(|h|(number(h,"base_wisdom").unwrap(),0.0)).collect();
             initialize_sections_and_rushing(&mut result,&wisdom,course,params).unwrap();
             for (row,expected) in result.horses.iter().zip(case.get_array("expected_rushing_sections").unwrap()) {
@@ -617,5 +641,42 @@ mod tests {
             assert_eq!(result.stages["after_sections"]-result.stages["after_delays"],24*horses.len());
         }
         assert_eq!((runners,enabled),(90,5));
+    }
+
+    #[test]
+    fn paired_mode_holds_a_skills_draws_when_the_field_grows() {
+        let data=crate::json::parse(include_str!("../tests/fixtures/retail_initialization_official.json")).unwrap();
+        let (skills,parameters)=(field(&data,"skills").unwrap(),field(&data,"parameters").unwrap());
+        let case=data.get_array("cases").unwrap().first().unwrap();
+        let course=field(field(&data,"courses").unwrap(),case.get_str("course_id").unwrap()).unwrap();
+        let seed=case.get_i64("seed").unwrap() as i32;
+        let plain=case.get_array("horses").unwrap();
+        assert!(plain.len()>=2);
+        // One extra entry for runner 0: more shared-stream draws, and nothing new
+        // for the runners behind it.
+        let mut grown=plain.to_vec();
+        let mut first=match &grown[0] { crate::json::Value::Object(map)=>map.clone(), _=>panic!("a horse must be an object") };
+        let entries=field(&grown[0],"skills").unwrap().as_array().unwrap().clone();
+        let mut more=entries.clone();
+        more.push(entries[0].clone());
+        first.insert("skills".into(),crate::json::Value::Array(more));
+        grown[0]=crate::json::Value::Object(first);
+        let fingerprint=|row:&HorseInitialization| {
+            let mut keys:Vec<(String,Vec<u32>)>=row.triggers.iter().map(|trigger|(
+                format!("{}:{}",trigger.skill_id,trigger.name),
+                match &trigger.windows {
+                    Windows::Lottery(hit)=>vec![u32::from(*hit)],
+                    Windows::Distances(rows)=>rows.iter().flat_map(|(lo,hi)|[lo.to_bits(),hi.to_bits()]).collect(),
+                })).collect();
+            keys.extend(row.skill_enabled.iter().map(|(sid,on)|(format!("W{sid}"),vec![u32::from(*on)])));
+            keys
+        };
+        let before=initialize(seed,plain,course,skills,parameters,true).unwrap();
+        let paired=initialize(seed,&grown,course,skills,parameters,true).unwrap();
+        let retail=initialize(seed,&grown,course,skills,parameters,false).unwrap();
+        assert_eq!(fingerprint(&before.horses[1]),fingerprint(&paired.horses[1]),
+            "paired mode must not move a later runner's draws");
+        assert_ne!(fingerprint(&before.horses[1]),fingerprint(&retail.horses[1]),
+            "the shared stream must still shift them when the field grows");
     }
 }

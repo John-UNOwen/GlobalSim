@@ -13,6 +13,7 @@ use crate::retail_random::RetailRandom;
 use crate::retail_spurt::SpurtState;
 use crate::retail_states::{DownhillParameters, DownhillState, RushingParameters, RushingState, SlopeState};
 
+#[derive(Clone)]
 pub(crate) struct RetailRuntimeConfig {
     pub physics: Rc<Physics>,
     pub pace: pace::Parameters,
@@ -490,6 +491,12 @@ impl RetailRuntimeConfig {
             duel_speed_coefficients: [group("CompeteFight")?.get_f64("AddParam1Coef1")? as f32, group("CompeteFight")?.get_f64("AddParam1Coef2")? as f32, group("CompeteFight")?.get_f64("AddParam1Coef3")? as f32],
             duel_accel_coefficients: [group("CompeteFight")?.get_f64("AddParam2Coef1")? as f32, group("CompeteFight")?.get_f64("AddParam2Coef2")? as f32, group("CompeteFight")?.get_f64("AddParam2Coef3")? as f32],
         }))
+    }
+
+    /// The same parsed parameters around this runner's own stream. Cloning is the
+    /// cheap path; parsing the parameter groups once per runner is not.
+    pub fn with_random(&self, random: Rc<RefCell<RetailRandom>>) -> Rc<Self> {
+        Rc::new(Self { random, ..self.clone() })
     }
 }
 
