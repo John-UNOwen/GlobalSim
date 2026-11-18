@@ -54,16 +54,16 @@
 #define IS_PREVX 6
 #define IS_PREVZ 7
 
-// Per-item output. Corner writes OS_ID and OS_FINAL, lane_max OS_A,
-// position OS_A/OS_B (world x/z), advance OS_A/OS_B/OS_C (next distance,
-// world x/z). OS_FLAG is the fallback flag: 1 where the engine returns an
+// Per-item output. Corner writes GO_ID and GO_FINAL, lane_max GO_A,
+// position GO_A/GO_B (world x/z), advance GO_A/GO_B/GO_C (next distance,
+// world x/z). GO_FLAG is the fallback flag: 1 where the engine returns an
 // error and the outputs carry the sentinel NaN instead.
-#define OS_FLAG 0
-#define OS_ID 1
-#define OS_FINAL 2
-#define OS_A 3
-#define OS_B 4
-#define OS_C 5
+#define GO_FLAG 0
+#define GO_ID 1
+#define GO_FINAL 2
+#define GO_A 3
+#define GO_B 4
+#define GO_C 5
 
 // Rust's f32::NAN bit pattern, written to result slots on the error paths.
 #define SENTINEL_BITS 0x7fc00000u
@@ -157,9 +157,81 @@ static int geo_position(__global const uint* cb, const float distance, const flo
     return 0;
 }
 
+// CourseGeometry::corner_state_at, the reverse scan of the MODE_CORNER body.
+// The first event at or before the distance from the end is the active corner;
+// an event ending exactly at the distance is active unless its closing flag is
+// set. ready=0 (the engine's events-not-yet-ready state) keeps (0, false).
+static void geo_corner_state(__global const uint* cb, __global const float* ce_b,
+    __global const float* ce_e, __global const uint* ce_i, __global const uint* ce_f,
+    const float distance, const int ready, uint* id, uint* is_final) {
+    *id = 0u;
+    *is_final = 0u;
+    if (!ready) {
+        return;
+    }
+    const int base = (int)cb[CS_CE_BASE];
+    const int end = base + (int)cb[CS_CE_COUNT];
+    for (int k = end - 1; k >= base; k--) {
+        if (distance >= ce_b[k]) {
+            const uint fl = ce_f[k];
+            const int active = (distance < ce_e[k]) || (distance == ce_e[k] && (fl & 2u) == 0u);
+            *id = active ? ce_i[k] : 0u;
+            *is_final = fl & 1u;
+            break;
+        }
+    }
+}
+
+// CourseGeometry::lane_max_at.
+static float geo_lane_max_at(__global const uint* cb, __global const float* lm_b,
+    __global const float* lm_l, const float distance) {
+    float value = as_float(cb[CS_LANE0]);
+    const int base = (int)cb[CS_LM_BASE];
+    const int end = base + (int)cb[CS_LM_COUNT];
+    for (int k = base; k < end; k++) {
+        if (distance < lm_b[k]) {
+            break;
+        }
+        value = lm_l[k];
+    }
+    return value;
+}
+
+// CourseGeometry::advance, the MODE_ADVANCE body. Returns 1 where the engine
+// returns Err. The movement check runs before position, as in Rust.
+static int geo_advance(__global const uint* cb,
+    __global const double* sg_x, __global const double* sg_xd,
+    __global const double* sg_z, __global const double* sg_zd,
+    __global const float* sg_q, __global const float* sg_qd,
+    const float distance, const float lane, float movement,
+    const float px, const float pz, float* next, float* wx, float* wz) {
+    int err = !isfinite(movement) || movement < 0.f || !isfinite(px) || !isfinite(pz);
+    float x, z;
+    if (!err) {
+        err = geo_position(cb, distance, lane, sg_x, sg_xd, sg_z, sg_zd, sg_q, sg_qd, &x, &z);
+    }
+    if (err) {
+        return 1;
+    }
+    const float ddx = x - px;
+    const float ddz = z - pz;
+    const double squared = (double)ddx * (double)ddx + (double)ddz * (double)ddz;
+    float allowed = movement * as_float(cb[CS_D2W]);
+    if (!(allowed >= 0.f && squared <= (double)allowed * (double)allowed)) {
+        const float world_distance = convert_float_rte(sqrt(squared));
+        if (world_distance > allowed) {
+            movement = convert_float_rte((double)movement * ((double)allowed / (double)world_distance));
+        }
+    }
+    *next = distance + movement;
+    *wx = x;
+    *wz = z;
+    return 0;
+}
+
 // One work item runs one query for one course. The course table, the segment,
 // lane-max and corner arrays, the item and the output are flat per-index
-// buffers. Each mode writes the slots named in the OS_* comments.
+// buffers. Each mode writes the slots named in the GO_* comments.
 __kernel void geometry(__global const uint* cs,
     __global const double* sg_x, __global const double* sg_xd,
     __global const double* sg_z, __global const double* sg_zd,
@@ -174,80 +246,43 @@ __kernel void geometry(__global const uint* cs,
     __global const uint* cb = cs + (size_t)ib[IS_COURSE] * CS_STRIDE;
     const int mode = (int)ib[IS_MODE];
     const float distance = as_float(ib[IS_DISTANCE]);
-    ob[OS_FLAG] = 0u;
-    ob[OS_ID] = 0u;
-    ob[OS_FINAL] = 0u;
-    ob[OS_A] = 0u;
-    ob[OS_B] = 0u;
-    ob[OS_C] = 0u;
+    ob[GO_FLAG] = 0u;
+    ob[GO_ID] = 0u;
+    ob[GO_FINAL] = 0u;
+    ob[GO_A] = 0u;
+    ob[GO_B] = 0u;
+    ob[GO_C] = 0u;
 
     if (mode == MODE_CORNER) {
-        // The reverse scan short-circuit is load-bearing: the first event at
-        // or before the distance from the end is the active corner.
-        if (ib[IS_READY] != 0u) {
-            const int base = (int)cb[CS_CE_BASE];
-            const int end = base + (int)cb[CS_CE_COUNT];
-            for (int k = end - 1; k >= base; k--) {
-                if (distance >= ce_b[k]) {
-                    const uint fl = ce_f[k];
-                    const int active = (distance < ce_e[k]) || (distance == ce_e[k] && (fl & 2u) == 0u);
-                    ob[OS_ID] = active ? ce_i[k] : 0u;
-                    ob[OS_FINAL] = fl & 1u;
-                    break;
-                }
-            }
-        }
+        uint id_out, final_out;
+        geo_corner_state(cb, ce_b, ce_e, ce_i, ce_f, distance, (int)ib[IS_READY], &id_out, &final_out);
+        ob[GO_ID] = id_out;
+        ob[GO_FINAL] = final_out;
     } else if (mode == MODE_LANE_MAX) {
-        float value = as_float(cb[CS_LANE0]);
-        const int base = (int)cb[CS_LM_BASE];
-        const int end = base + (int)cb[CS_LM_COUNT];
-        for (int k = base; k < end; k++) {
-            if (distance < lm_b[k]) {
-                break;
-            }
-            value = lm_l[k];
-        }
-        ob[OS_A] = as_uint(value);
+        ob[GO_A] = as_uint(geo_lane_max_at(cb, lm_b, lm_l, distance));
     } else if (mode == MODE_POSITION) {
         float x, z;
         if (geo_position(cb, distance, as_float(ib[IS_LANE]), sg_x, sg_xd, sg_z, sg_zd, sg_q, sg_qd, &x, &z)) {
-            ob[OS_FLAG] = 1u;
-            ob[OS_A] = SENTINEL_BITS;
-            ob[OS_B] = SENTINEL_BITS;
+            ob[GO_FLAG] = 1u;
+            ob[GO_A] = SENTINEL_BITS;
+            ob[GO_B] = SENTINEL_BITS;
         } else {
-            ob[OS_A] = as_uint(x);
-            ob[OS_B] = as_uint(z);
+            ob[GO_A] = as_uint(x);
+            ob[GO_B] = as_uint(z);
         }
     } else {
-        float movement = as_float(ib[IS_MOVEMENT]);
-        const float px = as_float(ib[IS_PREVX]);
-        const float pz = as_float(ib[IS_PREVZ]);
-        float x, z;
-        int err = !isfinite(movement) || movement < 0.f || !isfinite(px) || !isfinite(pz);
-        // Rust returns Err from the movement check before calling position.
-        // Whether position would also fail does not change the outcome.
-        if (!err) {
-            err = geo_position(cb, distance, as_float(ib[IS_LANE]), sg_x, sg_xd, sg_z, sg_zd, sg_q, sg_qd, &x, &z);
-        }
-        if (err) {
-            ob[OS_FLAG] = 1u;
-            ob[OS_A] = SENTINEL_BITS;
-            ob[OS_B] = SENTINEL_BITS;
-            ob[OS_C] = SENTINEL_BITS;
+        float next, x, z;
+        if (geo_advance(cb, sg_x, sg_xd, sg_z, sg_zd, sg_q, sg_qd, distance, as_float(ib[IS_LANE]),
+                as_float(ib[IS_MOVEMENT]), as_float(ib[IS_PREVX]), as_float(ib[IS_PREVZ]), &next, &x, &z)) {
+            ob[GO_FLAG] = 1u;
+            ob[GO_A] = SENTINEL_BITS;
+            ob[GO_B] = SENTINEL_BITS;
+            ob[GO_C] = SENTINEL_BITS;
         } else {
-            const float ddx = x - px;
-            const float ddz = z - pz;
-            const double squared = (double)ddx * (double)ddx + (double)ddz * (double)ddz;
-            float allowed = movement * as_float(cb[CS_D2W]);
-            if (!(allowed >= 0.f && squared <= (double)allowed * (double)allowed)) {
-                const float world_distance = convert_float_rte(sqrt(squared));
-                if (world_distance > allowed) {
-                    movement = convert_float_rte((double)movement * ((double)allowed / (double)world_distance));
-                }
-            }
-            ob[OS_A] = as_uint(distance + movement);
-            ob[OS_B] = as_uint(x);
-            ob[OS_C] = as_uint(z);
+            ob[GO_A] = as_uint(next);
+            ob[GO_B] = as_uint(x);
+            ob[GO_C] = as_uint(z);
         }
     }
 }
+

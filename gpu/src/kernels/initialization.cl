@@ -64,9 +64,10 @@
 // Output u32 slots, stride OOU. 0..59 is the RetailRandom bank, 60..119 the
 // per-runner RUSH bank (paired mode). Slot 120 is the fallback flag:
 // 0 ok, 1 a capped uniform() ran out, 2 an item input exceeded a layout bound.
-#define OOU 864
+#define OOU 992
 #define OS_BANK 0
 #define OS_RUSHBANK 60
+#define OS_BANK_FOR_RACE 928 // bank state the runtime rng clones at the after_delays point
 #define OS_FLAG 120
 // IM_INIT draw-stage counters.
 #define OS_STAGES 121
@@ -238,21 +239,15 @@ static double engine_log10(double x) {
     return val_lo + val_hi;
 }
 
-__kernel void initialization(__global const uint* in_u, __global const ulong* in_l,
-    __global uint* out_u, __global ulong* out_l) {
-    const int id = get_global_id(0);
-    __global const uint* ib = in_u + id * IIU;
-    __global const ulong* ilb = in_l + id * IIL;
-    __global uint* ob = out_u + id * OOU;
-    __global ulong* olb = out_l + id * OOL;
-    for (int i = 0; i < OOL; i++) olb[i] = 0UL;
-    for (int i = 0; i < 120; i++) ob[i] = 0u;
-    ob[OS_FLAG] = 0u;
-    const uint mode = ib[US_MODE];
+// The four mode bodies are static functions so the race kernel can run the
+// same chains over its scratch blocks. The standalone kernel dispatches, and
+// the zeroing of the output slots belongs to it; each function writes only
+// the slots its mode documents.
 
-    if (mode == IM_STATS) {
-        // build_base_stats_with_team_rank then build_adjusted_stats_for_mode
-        // with single_mode=false, the retail path in race_solver_builder.rs.
+// build_base_stats_with_team_rank then build_adjusted_stats_for_mode
+// with single_mode=false, the retail path in race_solver_builder.rs.
+static void im_stats(__global const uint* ib, __global const ulong* ilb,
+    __global uint* ob, __global ulong* olb) {
         const int mood = (int)ib[US_A];
         const int rank = (int)ib[US_B];
         const int surface = (int)ib[US_C];
@@ -339,10 +334,13 @@ __kernel void initialization(__global const uint* in_u, __global const ulong* in
         olb[9] = as_ulong(adj_power);
         olb[10] = as_ulong(adj_guts);
         olb[11] = as_ulong(adj_wisdom);
-    } else if (mode == IM_R30) {
-        // The per-solver Rule30 seeding chain, race_solver_builder.rs prepare()
-        // and build() plus the rng-consuming part of RaceSolver::new through
-        // init_hills(), the kakari draws and the 24 section draws.
+}
+
+// The per-solver Rule30 seeding chain, race_solver_builder.rs prepare()
+// and build() plus the rng-consuming part of RaceSolver::new through
+// init_hills(), the kakari draws and the 24 section draws.
+static void im_r30(__global const uint* ib, __global const ulong* ilb,
+    __global uint* ob, __global ulong* olb) {
         const uint seed_lo_bits = ib[US_A];
         const uint seed_hi_bits = ib[US_B];
         const uint runner = ib[US_C];
@@ -439,7 +437,10 @@ __kernel void initialization(__global const uint* in_u, __global const ulong* in
         // The continuing solver_rng state, which the tick loop inherits.
         ob[O3_SOLVER_HI] = s_hi;
         ob[O3_SOLVER_LO] = s_lo;
-    } else if (mode == IM_INIT) {
+}
+
+static void im_init(__global const uint* ib, __global const ulong* ilb,
+    __global uint* ob, __global ulong* olb) {
         const int seed = (int)ib[US_A];
         const int n = (int)ib[US_B];
         const int paired = (int)ib[US_C];
@@ -550,11 +551,18 @@ __kernel void initialization(__global const uint* in_u, __global const ulong* in
         }
         ob[OS_STAGES + 5] = bank[BANK_DC]; // after_rushing (shared stream)
 
+        // enable_retail_runtime clones the manager rng after sections and the
+        // rushing lottery; anything drawn later stays out of the race stream.
+        for (int i = 0; i < BANK_WORDS; i++) ob[OS_BANK_FOR_RACE + i] = bank[i];
+
         for (int i = 0; i < 8; i++) ob[OS_CONT_I + i] = r128_next_int(bank);
         for (int i = 0; i < 8; i++) olb[32 + i] = as_ulong(r128_next_double(bank));
-    } else {
-        // GameHpState::with_retail + init() from race_solver_retail.rs,
-        // hp_policy.rs and retail_physics.rs (the retail branch).
+}
+
+// GameHpState::with_retail + init() from race_solver_retail.rs,
+// hp_policy.rs and retail_physics.rs (the retail branch).
+static void im_hp(__global const uint* ib, __global const ulong* ilb,
+    __global uint* ob, __global ulong* olb) {
         const int strategy = (int)ib[US_A];
         const int surface = (int)ib[US_B];
         const int ground = (int)ib[US_C];
@@ -595,5 +603,27 @@ __kernel void initialization(__global const uint* in_u, __global const ulong* in
         olb[0] = as_ulong(hp_ground[surface][ground]);
         olb[1] = as_ulong(base_speed);
         olb[2] = as_ulong((double)max_hp);
+}
+
+__kernel void initialization(__global const uint* in_u, __global const ulong* in_l,
+    __global uint* out_u, __global ulong* out_l) {
+    const int id = get_global_id(0);
+    __global const uint* ib = in_u + id * IIU;
+    __global const ulong* ilb = in_l + id * IIL;
+    __global uint* ob = out_u + id * OOU;
+    __global ulong* olb = out_l + id * OOL;
+    for (int i = 0; i < OOL; i++) olb[i] = 0UL;
+    for (int i = 0; i < 120; i++) ob[i] = 0u;
+    ob[OS_FLAG] = 0u;
+    const uint mode = ib[US_MODE];
+    if (mode == IM_STATS) {
+        im_stats(ib, ilb, ob, olb);
+    } else if (mode == IM_R30) {
+        im_r30(ib, ilb, ob, olb);
+    } else if (mode == IM_INIT) {
+        im_init(ib, ilb, ob, olb);
+    } else {
+        im_hp(ib, ilb, ob, olb);
     }
 }
+

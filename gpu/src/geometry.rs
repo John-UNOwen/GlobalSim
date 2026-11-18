@@ -197,17 +197,31 @@ fn buffer<T: ocl::OclPrm>(queue: &ocl::Queue, data: &[T]) -> Result<ocl::Buffer<
     Ok(buffer)
 }
 
-/// Runs every item against every course's flattened tables on the gated
-/// device. Segment buffers are one main block per course followed by one
-/// overrun block per course. Lane-max and corner arrays are concatenated
-/// spans addressed through the course table.
+/// The flat kernel tables for a set of courses, exactly the buffer contents
+/// the geometry kernel's cs/sg/lm/ce arguments are built from.
 #[cfg(feature = "gpu")]
-pub fn run(courses: &[FlatCourse], items: &[GeometryItem]) -> Result<GeometryOutput, String> {
-    let spike = crate::gpu::Spike::open()?;
-    let program = spike.build_program(crate::gpu::GEOMETRY_KERNEL_SOURCE)?;
-    let queue = spike.queue();
-    let n_courses = courses.len();
+pub struct CourseTables {
+    pub cs: Vec<u32>,
+    pub lm_b: Vec<f32>,
+    pub lm_l: Vec<f32>,
+    pub ce_b: Vec<f32>,
+    pub ce_e: Vec<f32>,
+    pub ce_i: Vec<u32>,
+    pub ce_f: Vec<u32>,
+    pub sg_x: Vec<f64>,
+    pub sg_xd: Vec<f64>,
+    pub sg_z: Vec<f64>,
+    pub sg_zd: Vec<f64>,
+    pub sg_q: Vec<f32>,
+    pub sg_qd: Vec<f32>,
+}
 
+/// Flattens courses into kernel tables. Segment buffers are one main block
+/// per course followed by one overrun block per course. Lane-max and corner
+/// arrays are concatenated spans addressed through the course table.
+#[cfg(feature = "gpu")]
+pub fn course_tables(courses: &[FlatCourse]) -> CourseTables {
+    let n_courses = courses.len();
     let mut cs: Vec<u32> = vec![0; n_courses * CS_STRIDE];
     let mut lm_b: Vec<f32> = Vec::new();
     let mut lm_l: Vec<f32> = Vec::new();
@@ -264,6 +278,18 @@ pub fn run(courses: &[FlatCourse], items: &[GeometryItem]) -> Result<GeometryOut
         sg_q.extend_from_slice(&co.seg_q[4 * NSEG..8 * NSEG]);
         sg_qd.extend_from_slice(&co.seg_qd[4 * NSEG..8 * NSEG]);
     }
+    CourseTables { cs, lm_b, lm_l, ce_b, ce_e, ce_i, ce_f, sg_x, sg_xd, sg_z, sg_zd, sg_q, sg_qd }
+}
+
+/// Runs every item against every course's flattened tables on the gated
+/// device.
+#[cfg(feature = "gpu")]
+pub fn run(courses: &[FlatCourse], items: &[GeometryItem]) -> Result<GeometryOutput, String> {
+    let spike = crate::gpu::Spike::open()?;
+    let program = spike.build_program(crate::gpu::GEOMETRY_KERNEL_SOURCE)?;
+    let queue = spike.queue();
+    let t = course_tables(courses);
+    let CourseTables { cs, lm_b, lm_l, ce_b, ce_e, ce_i, ce_f, sg_x, sg_xd, sg_z, sg_zd, sg_q, sg_qd } = t;
     let it: Vec<u32> = items.iter().flat_map(|item| item.words()).collect();
 
     let b_cs = buffer(&queue, &cs)?;

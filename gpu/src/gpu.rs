@@ -17,6 +17,19 @@ pub const INITIALIZATION_KERNEL_SOURCE: &str = concat!(
     include_str!("kernels/initialization.cl")
 );
 pub const GEOMETRY_KERNEL_SOURCE: &str = include_str!("kernels/geometry.cl");
+// The race kernel reuses the RNG, initialization and geometry ports, so its
+// source is those files concatenated ahead of race.cl.
+pub const RACE_KERNEL_SOURCE: &str = concat!(
+    include_str!("kernels/rng_core.cl"),
+    "\n",
+    include_str!("kernels/initialization.cl"),
+    "\n",
+    include_str!("kernels/geometry.cl"),
+    "\n",
+    include_str!("kernels/retail_core.cl"),
+    "\n",
+    include_str!("kernels/race.cl")
+);
 pub const BUILD_OPTIONS: &str = "-cl-fp32-correctly-rounded-divide-sqrt";
 
 // cl.h values, as raw ids through Device::info_raw.

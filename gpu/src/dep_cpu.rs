@@ -12,6 +12,9 @@ pub struct CpuRace {
     pub runners: usize,
     /// Runners whose last-tick position has reached the course distance.
     pub finishers: usize,
+    /// Each runner's `finishTimeRaw` in roster order, exactly as the result
+    /// JSON reports it (the loop end time for a runner that never finished).
+    pub finish_times: Vec<f64>,
 }
 
 pub fn course_id(request: &str) -> Result<i32, String> {
@@ -58,6 +61,13 @@ pub fn run_cpu_race(request: &str, seed: i64) -> Result<CpuRace, String> {
     let distance = course_distance(course_id(request)?)? as f64;
     let mut prepared = globalsim::PreparedRace::new(&with_retain_all_frames(request)?)?;
     let simulation = prepared.run(seed)?;
+    let mut reply = String::new();
+    simulation.write_json(&mut reply);
+    let finish_times = json::parse(&reply)?
+        .get_array("results")?
+        .iter()
+        .map(|row| row.get_f64("finishTimeRaw"))
+        .collect::<Result<Vec<_>, _>>()?;
     let frames = simulation.frames();
     let runners = frames.horse_count();
     let decoded: Vec<TickFrame> =
@@ -65,5 +75,5 @@ pub fn run_cpu_race(request: &str, seed: i64) -> Result<CpuRace, String> {
     let finishers = decoded
         .last()
         .map_or(0, |last| last.iter().filter(|row| row[0] >= distance).count());
-    Ok(CpuRace { frames: decoded, runners, finishers })
+    Ok(CpuRace { frames: decoded, runners, finishers, finish_times })
 }

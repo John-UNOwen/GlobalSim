@@ -43,6 +43,11 @@ pub mod retail_initialization;
 #[cfg(all(feature = "initialization", not(test)))]
 pub mod initialization;
 
+// The whole-race host reads the geometry and initialization hosts, so it
+// shares their not(test) gating (see the notes above).
+#[cfg(all(feature = "race", not(test)))]
+pub mod race_exec;
+
 pub mod rng;
 
 pub mod reference;

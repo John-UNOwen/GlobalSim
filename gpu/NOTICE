@@ -25,4 +25,11 @@ The restricted tick chain ported here mirrors the Rust oracle
 (also AGPL-3.0-only), which extracted it from the same engine code; the fixture
 it is checked against is that repo's `tests/fixtures/restricted_trace.json`.
 
+`gpu/src/kernels/race.cl` and `gpu/src/kernels/retail_core.cl` are OpenCL
+ports written from the engine's `race_solver_retail.rs`, `race_field.rs`,
+`race_field_retail.rs`, `retail_lane.rs`, `retail_position_keep.rs`,
+`retail_states.rs`, `retail_spurt.rs` and `starting_grid.rs`, alongside the
+already-listed vendored modules. No engine code is copied into them and no
+engine file is modified for them.
+
 No binary artifacts are copied from either repo.

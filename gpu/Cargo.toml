@@ -20,6 +20,10 @@ geometry = []
 # vendored retail_initialization host and its kernel. Gated out of the lib's
 # test target, see src/lib.rs.
 initialization = []
+# Whole-race no-skill kernel host (handoff step 6, race slice). Needs the
+# initialization and geometry hosts plus the device. Gated out of the lib's
+# test target, see src/lib.rs.
+race = ["gpu", "initialization", "geometry"]
 
 [dependencies]
 ocl = { version = "=0.19.7", optional = true }

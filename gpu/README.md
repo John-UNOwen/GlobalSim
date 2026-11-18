@@ -51,6 +51,7 @@ Suites:
 | `rng_gate` (gpu only) | See "RNG port" below |
 | `geometry_gate` (gpu + geometry only) | See "Geometry port" below |
 | `race_diff` (gpu only) | The whole comparison pipeline on `examples/v77-race.jsonl` line 1 with geometry 10504 and seed 7: the CPU engine runs the whole race (1463 ticks), the stub's ticks diverge, and the outcome carries the fallback flag |
+| `solo_race_gate` (gpu + initialization + geometry + race) | See "Race loop port" below |
 
 ### What the gate proves
 
@@ -378,7 +379,7 @@ arrays travel as raw bits, f64 slots as raw bits):
 | --- | --- | --- |
 | `in_u` | u32[96] | mode at 0, scalars at 1..6 (seed, n, paired flag, paired seed, lot min, lot max), css at 7..10, per-runner triple (style, adjusted-wisdom bits, bonus bits) from 16, stride 3 |
 | `in_l` | u64[48] | per mode: stats raws 0..4, r30 first-slope start, value and adjusted wisdom 0..2, init distance at 0, per-runner base wisdom 8..31, parameters 32..41, hp stamina..`hp_drain[4]` 0..14 |
-| `out_u` | u32[864] | RetailRandom bank 0..59, paired RUSH bank 60..119, fallback flag at 120, six stage counters 121..126, r30 scalars 128..159, runner rows at `128 + 30 * r` (force, chance, delay, rush chance, lot section, rush present, 24 sections), continuation `next_int` at 848..855, hp guts and wisdom factors at 170..171 |
+| `out_u` | u32[992] | RetailRandom bank 0..59, paired RUSH bank 60..119, fallback flag at 120, six stage counters 121..126, r30 scalars 128..159, runner rows at `128 + 30 * r` (force, chance, delay, rush chance, lot section, rush present, 24 sections), continuation `next_int` at 848..855, hp guts and wisdom factors at 170..171, race-rng bank snapshot at 928..987 (see "Race loop port") |
 | `out_l` | u64[64] | continuation `next_double` bits at 32..39, init `kakari_start` feed 0..23, hp ground modifier, base speed and max hp at 0..2 |
 
 The first version used a 27-slot row stride, which silently overlapped each
@@ -432,24 +433,80 @@ All comparisons run on the gated B580, and every value is compared through
 - The gate pins only the reply fields listed above. Everything a tick writes
   belongs to the loop slice (handoff step 6, remaining).
 
+## Race loop port (handoff step 6, no-skill races, field of one)
+
+`src/kernels/race.cl` holds the whole-race kernel, `race`, one work item per
+race, with the tick loop inside the kernel (up to `RACE_MAX_TICKS` 6144). The
+translation unit is `rng_core.cl`, then `initialization.cl`, then
+`geometry.cl`, then `src/kernels/retail_core.cl`, then `race.cl`, concatenated
+as `RACE_KERNEL_SOURCE` in `src/gpu.rs`, so the gated RNG, initialization and
+geometry code is shared untouched. `retail_core.cl` carries the ported per-
+runner state columns (f64 physics state, u32 flags, f32 scratch) and the
+ported logic: phase-boundary and section targets, the slope-event physics with
+the downhill branch, the rushing state machine per strategy (Nige/Sashi/Senkou
+rules and the end-check lottery), the position-keep modes with their wisdom
+and exit-gap draws, the spurt plan (30 m candidate grid, speed grid in 0.1
+steps under `maximum_spurt_speed`, time-diff sort, per-candidate dice), the
+lane target chain (final-corner outward roll, side room, block parameter
+pick), lane movement and overlap resolution, the front-blocker sample and
+speed cap, the HP rate table with the rush and downhill multipliers, and the
+finish step with the `finishTimeRaw` interpolation. The Rust reference side is
+the engine through its public API (`src/dep_cpu.rs`).
+
+Host side is `src/race_exec.rs` behind the `race` feature. `run` takes one
+spec per race (course id, distance, geometry, seed, horse, ground) and returns
+frames plus finish data; `GpuRace` implements `race::RaceRunner`. Domain gates
+run before any launch: skills, multi-runner fields (duel ranking and spot
+struggle), paired mode, the startup pass and grid mode each return the race
+flagged with its reason instead of launching wrong numbers.
+
+The race's dice stream is the manager RNG cloned at `lib.rs:773`, which is
+after `initialize()` and `initialize_sections_and_rushing()` have consumed
+their draws. `initialization.cl` snapshots the bank at that point (`out_u`
+slots 928..987) and `race.cl` restores it as the loop's stream, so the section
+and rushing lottery draws never touch race dice and the later continuation
+draws (which exist only to pin the stream in `initialization_gate`) stay out.
+The one `powf` in the loop (`maximum_spurt_speed`'s guts term) is computed
+host-side in an `IM_STATS` pre-pass and passed as raw f32 bits in parameter
+slot 84.
+
+### What `solo_race_gate` pins
+
+Verified 2026-11-19 on the gated B580 (`single_fp_config 0xbf`,
+`double_fp_config 0x3f`), one kernel launch for all 24 races.
+
+- 24 no-skill v77-style races: courses 10504, 10604 and 11004 (distances
+  2000, 2000, 2600) x seeds 1..8, field of one (strategy Senkou, skills
+  empty). Every tick, every runner, every frame column (pos, speed, hp, lane,
+  rush mode, blocker) compared through `to_bits()` against the CPU engine's
+  frames, plus identical tick counts and identical `finishTimeRaw` bits, with
+  zero fallback flags on every race.
+- `v77_multi_runner_race_stays_flagged` (`#[ignore]`): the 9-runner sample
+  request returns flagged ("multi-runner duel and spot are not ported"),
+  documenting where the multi-runner port resumes.
+
+### Rounding traps this port hit
+
+- The `maximum_spurt_speed` guts term indexes the adjusted stats by GUTS
+  (layout index 3). Reading index 0 (speed) instead shifts every spurt plan
+  by a constant +0.0582 m/s.
+- `hp_per_second_with_guts_factor` computes `(gap*gap)/hp_drain[1]` in f32 in
+  Rust and only then widens. Doing that divide in f64 moves the per-tick cost
+  by one f32 ulp once the rush rate multiplier is in play, visible within a
+  few hundred ticks.
+- The engine clones the shared RNG after the rushing lottery, not after
+  `initialize()` alone, so the snapshot point sits after the per-runner
+  section and rush draws.
+
 ## Not covered (step 6 blockers)
 
-Engine calls the restricted chain never reaches, each needing its own port and
-gate:
+Engine behavior the race loop port does not reach, each needing its own port
+and gate:
 
-- RNG: ported and gated for step 6.1 (see "RNG port" below), but the whole-race
-  loop still consumes it through paths not yet in the kernel
-- Retail simulation start: the initialization chain (adjusted stats, seeding,
-  start delay, sections and rushing, initial HP) is ported and gated (see
-  "Initialization port"); the `ReplayConfig` to `Simulation` field
-  construction and the initial `Runner` states are not
-- Geometry queries: the four runtime queries are ported and gated (see
-  "Geometry port"); ground and terrain lookups are not
-- Lane and field queries: lane occupancy, `blocking_speed_cap`
-- Pacing engine: section/pace sources and target-speed changes mid-race
-- Spurt plan: `maximum_spurt_speed`, the only `powf` in the physics module
-- Skill tables and additive modifiers (`&[f32]` slices into `acceleration` and
-  `target_speed`)
-- `hp_state_rate` and the hp style tables
-- Replay frame encoding (`ReplayFrames` rows and the frame codec)
-- The full `Simulation` loop: paired streams, race pacing, skills, finish order
+- Skills and their rng streams (trigger windows, additive modifiers into
+  `acceleration` and `target_speed`, activation hooks)
+- Multi-runner field interactions: duel ranking, spot struggle, field-level
+  oikomi and oonige effects
+- Paired mode, the experimental startup pass and grid mode (flagged, gated)
+- Ground and terrain lookups beyond the slope and corner geometry events
+- Replay frame encoding outside the gate's frame comparison

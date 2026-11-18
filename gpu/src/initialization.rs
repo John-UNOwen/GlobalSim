@@ -34,7 +34,7 @@ pub fn engine_parse(text: &str) -> Result<EngineValue, String> {
 // Kernel layout, mirrors gpu/src/kernels/initialization.cl.
 pub const IN_U_STRIDE: usize = 96;
 pub const IN_L_STRIDE: usize = 48;
-pub const OUT_U_STRIDE: usize = 864;
+pub const OUT_U_STRIDE: usize = 992;
 pub const OUT_L_STRIDE: usize = 64;
 
 pub const MODE_STATS: u32 = 0;
@@ -970,3 +970,4 @@ pub fn v77_reference(request: &str, seeds: &[i64]) -> Result<Vec<V77Pin>, String
     }
     Ok(pins)
 }
+
