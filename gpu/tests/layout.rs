@@ -5,6 +5,49 @@ use globalsim_gpu::reference;
 use globalsim_gpu::retail_physics::{Acceleration, TargetSpeed};
 
 #[test]
+fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
+    // The kernel's retail_core.cl scratch map grows by the skill regions, and
+    // the host mirror must keep the same layout the work item reads.
+    use globalsim_gpu::race_exec as re;
+    assert_eq!(re::SK_STRIDE, 4480);
+    // The full scratch mirrors: stat rows, race state, banks, then the skill
+    // state block, three token orders, the substream bank and the staging.
+    assert_eq!(re::SCR_U_WORDS, 28540);
+    assert_eq!(re::SRL_WORDS, 7288);
+    // Table areas stay inside the stride, header first, then course lists,
+    // records, effects, programs, regions, tags and random-term entries.
+    assert!(16 <= globalsim_gpu::skills_compile::SK_STRAIGHTS);
+    assert!(
+        globalsim_gpu::skills_compile::SK_TERMS
+            + globalsim_gpu::skills_compile::SK_MSTRIDE * globalsim_gpu::skills_compile::SK_MMAX
+            <= globalsim_gpu::skills_compile::SK_STRIDE
+    );
+    assert_eq!(
+        globalsim_gpu::skills_compile::SK_RECORDS + globalsim_gpu::skills_compile::SK_RSTRIDE
+            * globalsim_gpu::skills_compile::SK_RMAX,
+        globalsim_gpu::skills_compile::SK_EFFECTS
+    );
+    assert_eq!(
+        globalsim_gpu::skills_compile::SK_EFFECTS + globalsim_gpu::skills_compile::SK_ESTRIDE
+            * globalsim_gpu::skills_compile::SK_EMAX,
+        globalsim_gpu::skills_compile::SK_PROGRAMS
+    );
+    assert_eq!(
+        globalsim_gpu::skills_compile::SK_PROGRAMS + globalsim_gpu::skills_compile::SK_PSTRIDE
+            * globalsim_gpu::skills_compile::SK_PMAX,
+        globalsim_gpu::skills_compile::SK_REGIONS
+    );
+    assert_eq!(
+        globalsim_gpu::skills_compile::SK_REGIONS + 4 * globalsim_gpu::skills_compile::SK_GMAX,
+        globalsim_gpu::skills_compile::SK_TAGS
+    );
+    assert_eq!(
+        globalsim_gpu::skills_compile::SK_TAGS + globalsim_gpu::skills_compile::SK_TMAX,
+        globalsim_gpu::skills_compile::SK_TERMS
+    );
+}
+
+#[test]
 fn kernel_structs_have_the_c_layout() {
     // repr(C) of plain f32/i32 fields has no padding on x86, so each struct's
     // size is the field count times four.

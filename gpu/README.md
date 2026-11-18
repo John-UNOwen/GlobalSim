@@ -53,6 +53,7 @@ Suites:
 | `race_diff` (gpu only) | The whole comparison pipeline on `examples/v77-race.jsonl` line 1 with geometry 10504 and seed 7: the CPU engine runs the whole race (1463 ticks), the stub's ticks diverge, and the outcome carries the fallback flag |
 | `solo_race_gate` (gpu + initialization + geometry + race) | See "Race loop port" below |
 | `paired_race_gate` (gpu + initialization + geometry + race) | See "Paired mode" below |
+| `skills_gate` (gpu + initialization + geometry + race) | See "Skills port" below |
 
 ### What the gate proves
 
@@ -464,10 +465,12 @@ returns frames plus finish data. `GpuRace` implements `race::RaceRunner`. The
 tick loop runs the runners sequentially in roster order inside one work item,
 so the shared race dice are consumed in the same order the engine's field
 moves them. Paired mode gives every runner its own stream instead (see
-"Paired mode" below). Domain gates run before any launch: skills, the startup
-pass, non-retail runtime and a roster outside the kernel's 1..24 range each
-return the race flagged with its reason instead of launching wrong numbers. A
-no-skill field of up to `RACE_MAXR` (24) runners launches unflagged.
+"Paired mode" below). Domain gates run before any launch: the startup pass,
+non-retail runtime and a roster outside the kernel's 1..24 range each return
+the race flagged with its reason instead of launching wrong numbers, and
+skill-bearing fields are gated by the skill compiler (see "Skills port"). A
+field of up to `RACE_MAXR` (24) runners launches unflagged when it has no
+skills or only skills the compiler accepts.
 
 The race's dice stream is the manager RNG cloned at `lib.rs:773`, which is
 after `initialize()` and `initialize_sections_and_rushing()` have consumed
@@ -558,15 +561,87 @@ Verified 2026-11-18 on the gated B580 (`single_fp_config 0xbf`,
   fired on the GPU and the CPU's final-straight duel target bump had no GPU
   match. Set them from the course's straights and corners.
 
+## Skills port (handoff step 7)
+
+Skills ride the same race kernel, and the kernel does not change with the
+skill set. The host compiles every skill of a race into one flat numeric table
+(`src/skills_compile.rs`, `uint[4480]` per race) and the kernel interprets it:
+init pass in `src/kernels/skills.cl` (trigger samplers, wisdom lottery, region
+intersection) inside `im_init` before the existing rushing and section draws,
+runtime in `src/kernels/retail_core.cl` (timer step and cooldown start, then
+the priority 1 and 0 fire passes, then the receiver folds). Encoding, the
+condition-support matrix, and the unsupported-construct rule are in
+`SKILLS_DESIGN.md`.
+
+The per-tick order mirrors `step_all_retail`: `skills_advance` (timers, expiry,
+cooldown start), `skills_scan` x2 (the fire gate: trigger and window check over
+the record's final window list, cooldown readiness, then the program over the
+six dynamic leaves), `sk_columns` (fold the receiver lists into the live
+columns), and only then the blocking sample that feeds duel and field. The
+modifiers land in the engine's `AdditiveReceiver` folds at the exact physics
+application points (target chain, accel chain, current speed), so the tick
+chain from "Race loop port" is unchanged.
+
+An unsupported construct never reaches the kernel. The compiler refuses the
+table and the host flags the whole race with the construct named in the reason.
+
+### What `skills_gate` pins
+
+Verified 2026-11-18 on the gated B580 (`single_fp_config 0xbf`,
+`double_fp_config 0x3f`), one kernel launch per batch, every frame column
+compared through `to_bits()` against the CPU engine with all frames retained,
+equal tick counts, zero fallback.
+
+- `six_skills_on_horse_zero_replay_bit_exact`: six real skills (200361,
+  200341, 200333, 10071, 100401, 110591) on horse 0 of the 9-horse v77
+  roster, courses 10504 and 10510 x seeds 1..4, one batch of 8 races. The set
+  carries sampled trigger windows (`all_corner_random`, four rounds each),
+  wisdom rolls, the retain-for-random rule, and a 300000 ms cooldown scaled
+  by course distance. The same batch without the skills differs in all 8
+  replays, so the comparison is not vacuous.
+- `one_skill_per_race_over_the_matrix_bit_exact`: 6 skills x 2 courses x 2
+  seeds, one skill per race, as one 24-race batch. Batching is a tested
+  dimension: the stride bug pinned below stayed invisible in solo batches and
+  only crossed race boundaries inside one launch. The engine's
+  `skillDetailEvents` reply records a horse-0 activation in 12 of the 24
+  races, the other three skills replay as never activated on these courses,
+  and both outcomes are pinned bit-exact.
+- `unsupported_construct_flags_the_whole_race`: one skill's `durationUsage`
+  patched to 4 (the delayed running-instance path) flags the race before any
+  launch, and the reason names `duration_usage 4`.
+
+### Cost
+
+`cargo run --features gpu,initialization,geometry,race --release --bin skills_bench -- --runners 4096`
+prepares and uploads once, then times kernel-only launches of the same buffers
+(warm 2 plus 5 timed, no frames read back). At the 4096-runner budget (456
+races of the 9-horse v77 roster, courses 10504/10510, seeds 1..4) on the
+B580: no skills 1.90 us per race tick, 6 skills on 1 runner 2.18 us (+14%),
+6 skills on 2 runners 2.39 us (+25%). Six skills on all nine runners would
+need 54 records, and even five runners (30 skills) already overflow the
+table's 512-byte tag block, so the stress case stops at two runners.
+
+### One sharp edge found
+
+The init pass chained a record's region lists through `sk_chain`, which read
+the list argument at stride 4 words while every caller fills dense f64 pairs
+at stride 2. With one list entry the bug hides (entry 0 is at offset 0); with
+four sampled windows it read the wrong pairs and then past the end of the
+private array, where the B580 hands back stack memory an earlier work item
+left behind. The symptoms moved with batch composition: window lists from a
+neighboring race, exact-duplicate windows in solo batches, and a bogus refire
+around tick 1433 that looked like a cooldown bug. The fix is the stride 2 read,
+and the 24-race matrix test above pins the class of it.
+
 ## Not covered (step 6 blockers)
 
 Engine behavior the race loop port does not reach, each needing its own port
 and gate:
 
-- Skills and their rng streams (trigger windows, additive modifiers into
-  `acceleration` and `target_speed`, activation hooks). Skills stay host-gated,
-  so a skill-bearing field is flagged and the field kernel only carries the
-  no-skill conserve/asitame release
+- Skills outside the ported subset: the stateful time machines, activation
+  counters, roster reads beyond rank and rank rate, effects outside 27/31/21,
+  and the other constructs named in the `SKILLS_DESIGN.md` matrix. Each flags
+  its race with the construct named
 - The experimental startup pass (flagged, gated)
 - Grid mode (`experimentalGrid`): not ported, host-gated. The engine enables
   it whenever the key is present (21 to 120 horses), so `prepare` flags any

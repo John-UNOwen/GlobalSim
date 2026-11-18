@@ -253,6 +253,7 @@
 #define SI_SPOT_TOKEN SI_SLOT(59)  // retail target token 1 is registered
 #define SI_DUEL_TOKEN SI_SLOT(60)  // retail target and accel token 4 is registered
 #define SI_CPFLAGS SI_SLOT(62)     // conserve power and asitame bit flags
+#define SI_LS_TICK SI_SLOT(61)     // last_straight_entry_tick of this tick
 #define CP_UNSUPPORTED 1u
 #define CP_CUTOFF 2u
 #define CP_WASBLK 4u
@@ -348,7 +349,22 @@
 #define RS_LORDER 144         // 24: resolve-overlaps scan order
 #define RS_ADV 168            // 24: stepped (not gated) flags of the tick
 #define SCR_BANKS (SCR_RACE + 192) // paired mode: one RUN bank per runner
-#define SCR_U_WORDS (SCR_BANKS + 24 * BANK_WORDS)
+// Skill runtime scratch: one state word block per table record, the three
+// per-runner receiver token orders, then the keyed-substream bank. The token
+// orders mirror the engine's AdditiveReceiver entry vectors, 0 is the empty
+// sentinel and registration order is append order.
+#define SCR_SK (SCR_BANKS + 24 * BANK_WORDS)
+#define SK_SEQN 40
+#define SK_TOK_SPOT 1u
+#define SK_TOK_DUEL 4u
+#define SK_TOK_SKILL 16u
+#define SK_TSEQ (SCR_SK + SK_RMAX * SKR_STRIDE)
+#define SK_ASEQ (SK_TSEQ + SK_RMAX * SK_SEQN)
+#define SK_CSEQ (SK_ASEQ + SK_RMAX * SK_SEQN)
+#define SK_SUB (SK_CSEQ + SK_RMAX * SK_SEQN)
+#define SK_STAGED (SK_SUB + BANK_WORDS)   // chain-staging float values
+#define SCR_SK_WORDS (SK_STAGED + SK_RMAX)
+#define SCR_U_WORDS SCR_SK_WORDS
 
 // Per-race scratch f64, one 24-wide column per slot (field base + runner
 // index). Array fields keep 24 slots per element: base + element * 24 + r.
@@ -362,6 +378,7 @@
 #define SD_LCT SD_SLOT(4)         // move_lane_continue_time
 #define SD_CS SD_SLOT(5)          // current_speed
 #define SD_TS SD_SLOT(6)          // target_speed
+#define SD_TSWSK SD_SLOT(13)      // target speed folded with current-speed skills
 #define SD_MS SD_SLOT(7)          // min_speed
 #define SD_LSS SD_SLOT(8)         // last_spurt_speed
 #define SD_BTS SD_SLOT(9)         // base_target_speed[3], element stride 24
@@ -391,7 +408,8 @@
 #define SRL_INIT_OUT_L (SRL_INIT_IN_L + IIL)       // OOL
 #define SRL_HP_IN_L (SRL_INIT_OUT_L + OOL)         // 24 * IIL
 #define SRL_HP_OUT_L (SRL_HP_IN_L + 24 * IIL)      // 24 * OOL
-#define SRL_WORDS (SRL_HP_OUT_L + 24 * OOL)
+#define SRL_SKD (SRL_HP_OUT_L + 24 * OOL)          // per-record skill doubles
+#define SRL_WORDS (SRL_SKD + SK_RMAX * SKD_STRIDE)
 
 // SectionModifier length.
 #define SEC_MOD 25
@@ -1420,7 +1438,7 @@ static void lane_collect(__global uint* si, __global float* sf, __global uint* l
         cached[4 * (LIST_STRIDE * r + k)] = convert_float_rte(sd[SD_POS + k]);
         cached[4 * (LIST_STRIDE * r + k) + 1] = convert_float_rte(sd[SD_LANE + k]);
         cached[4 * (LIST_STRIDE * r + k) + 2] = sf0[SF_OBSERVED + k];
-        cached[4 * (LIST_STRIDE * r + k) + 3] = convert_float_rte(sd[SD_TS + k]);
+        cached[4 * (LIST_STRIDE * r + k) + 3] = convert_float_rte(sd[SD_TSWSK + k]);
         k += 1;
     }
     si[SI_L_CANIN + r] = (uint)can_in;
@@ -1448,7 +1466,7 @@ static int lane_eligible(__global float* cached, __global const double* sd,
     const float speed_gap = owner_speed - cached[4 * (LIST_STRIDE * r + k) + 2];
     const int directly = (front == k);
     const float other_speed = sf0[SF_OBSERVED + k];
-    const float other_target = convert_float_rte(sd[SD_TS + k]);
+    const float other_target = convert_float_rte(sd[SD_TSWSK + k]);
     const float gap_f = convert_float_rte((double)gap);
     const float speed_gap_f = convert_float_rte((double)speed_gap);
     int res;
@@ -2665,4 +2683,434 @@ static void asitame_release(__global uint* si, __global float* sf,
     sf[SF_AS_VALUE + r] = convert_float_rte(modifier);
     sd[SD_AS_TIMER + r] = -cp_release_duration(si, sd, r, distance, dtype);
     si[SI_CPFLAGS + r] = flags;
+}
+
+// ---------------------------------------------------------------------------
+// The skill runtime (handoff step 7): the timer step, effect expiry, the
+// retail cooldown machine, the whole-field priority scan with its fire gate,
+// and the receiver token orders the physics chains fold. skills.cl carries the
+// table layout, and the engine counterparts are race_solver.rs (scan gate,
+// fire_pending_skill, cooldowns, apply_activation) and race_solver_retail.rs
+// (timer step, receiver folds).
+
+static __global uint* sk_seq(__global uint* scr, const int kind) {
+    return scr + (kind == SK_EFF_TARGET ? SK_TSEQ
+        : (kind == SK_EFF_ACCEL ? SK_ASEQ : SK_CSEQ));
+}
+
+static int sk_seq_find(__global const uint* q, const uint tok) {
+    for (int i = 0; i < SK_SEQN; i++) {
+        if (q[i] == tok) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void sk_seq_push(__global uint* q, const uint tok) {
+    for (int i = 0; i < SK_SEQN; i++) {
+        if (q[i] == 0u) {
+            q[i] = tok;
+            return;
+        }
+    }
+}
+
+static void sk_seq_remove(__global uint* q, const uint tok) {
+    for (int i = 0; i < SK_SEQN; i++) {
+        if (q[i] == tok) {
+            for (int j = i; j + 1 < SK_SEQN; j++) {
+                q[j] = q[j + 1];
+            }
+            q[SK_SEQN - 1] = 0u;
+            return;
+        }
+    }
+}
+
+// The registered value of a record token: the record's effect of this kind,
+// f32-rounded the way the engine registers modifier as f32.
+static float sk_tok_value(__global const uint* sk, const uint tok, const int kind) {
+    __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * (int)(tok - SK_TOK_SKILL);
+    const int base = (int)rd[6];
+    for (int e = 0; e < (int)rd[5]; e++) {
+        const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * (base + e);
+        if ((int)ef[0] == kind) {
+            return convert_float_rte(as_double((ulong)ef[6] | ((ulong)ef[7] << 32)));
+        }
+    }
+    return 0.f;
+}
+
+// The scan gate's live predicate values, one FEAT_* code per dynamic leaf.
+static double sk_feat_value(const uint code, __global const uint* si,
+    __global const double* shl, const int r) {
+    const uint feat = code >> 3;
+    switch (feat) {
+    case FEAT_ORDER:
+    case FEAT_ORDER_RATE:
+        return (double)(int)si[SI_RANKCOL + r];
+    case FEAT_HP_PER: {
+        const __global const double* hr = shl + r * SH_STRIDE;
+        const float ratio = convert_float_rte(hr[SH_HP]) / convert_float_rte(hr[SH_MAX]);
+        return (double)(int)((double)ratio * 100.0);
+    }
+    case FEAT_IS_OVERTAKE:
+        return (int)si[SI_L_TGTN + r] != 0 ? 1.0 : 0.0;
+    case FEAT_IS_TEMPTATION:
+        return (int)si[SI_KAKARI + r] != 0 ? 1.0 : 0.0;
+    case FEAT_LS_ENTRY:
+        return (int)si[SI_LS_TICK + r] != 0 ? 1.0 : 0.0;
+    default:
+        return 0.0;
+    }
+}
+
+// The order_rate threshold comes from the field size, the engine's
+// `(n as f64 * (rate / 100.0)).round()` with half-away rounding.
+static int sk_feat_cmp(const uint code, const double v, const double arg, const int n) {
+    double b = arg;
+    if ((code >> 3) == FEAT_ORDER_RATE) {
+        b = round((double)n * (arg / 100.0));
+    }
+    switch (code & 7u) {
+    case 0u: return v == b;
+    case 1u: return v != b;
+    case 2u: return v < b;
+    case 3u: return v <= b;
+    case 4u: return v > b;
+    default: return v >= b;
+    }
+}
+
+// The record's postfix condition program over the live leaves, evaluated
+// after the static windows and the cooldown gate already passed.
+static int sk_eval(__global const uint* sk, __global const uint* rd,
+    __global const uint* si, __global const double* shl, const int r, const int n) {
+    int top = 0;
+    char stack[64];
+    const int base = (int)rd[8];
+    for (int i = 0; i < (int)rd[7]; i++) {
+        const __global const uint* nd = sk + SK_PROGRAMS + SK_PSTRIDE * (base + i);
+        const uint op = nd[0];
+        if (op == OP_AND) {
+            stack[top - 2] = (char)(stack[top - 2] && stack[top - 1]);
+            top -= 1;
+        } else if (op == OP_OR) {
+            stack[top - 2] = (char)(stack[top - 2] || stack[top - 1]);
+            top -= 1;
+        } else if (op == OP_TRUE) {
+            stack[top++] = (char)(nd[1] != 0u);
+        } else {
+            const double v = sk_feat_value(nd[1], si, shl, r);
+            stack[top++] = (char)sk_feat_cmp(nd[1], v,
+                as_double((ulong)nd[2] | ((ulong)nd[3] << 32)), n);
+        }
+    }
+    return top > 0 && stack[top - 1];
+}
+
+// SkillEffect::duration_coefficient: the leader-gap ramp, the HP tiers, or
+// the flat one. hp is the frozen pre-activation ledger value.
+static double sk_coeff(const uint du, const double hp, const double gap) {
+    if (du == 2u) {
+        const float ratio = convert_float_rte(fmax(gap, 0.0)) / 62.5f;
+        return (double)fmin(0.8f + ratio, 1.6f);
+    }
+    if (du == 3u) {
+        if (hp < 2000.0) { return 1.; }
+        if (hp < 2400.0) { return 1.5; }
+        if (hp < 2600.0) { return 2.; }
+        if (hp < 2800.0) { return 2.200000047683716; }
+        if (hp < 3000.0) { return 2.5; }
+        if (hp < 3200.0) { return 3.; }
+        if (hp < 3500.0) { return 3.5; }
+        return 4.;
+    }
+    if (du == 7u) {
+        if (hp < 1500.0) { return 1.; }
+        if (hp < 1800.0) { return 1.5; }
+        if (hp < 2000.0) { return 2.; }
+        if (hp < 2100.0) { return 2.5; }
+        return 3.;
+    }
+    return 1.;
+}
+
+// prepare_retail_tick's timer pass plus expire_skill_effects plus
+// start_expired_skill_cooldowns for one whole field, after the per-runner
+// prepare loop. Dead records keep stepping because the engine's timer map is
+// keyed by the firing, not by the pending record's life.
+static void skills_advance(__global const uint* sk, __global uint* sks,
+    __global double* skd, __global uint* scr, const float dt, const int n,
+    const float dist_f) {
+    const int nrec = (int)sk[SK_NREC];
+    for (int rec = 0; rec < nrec; rec++) {
+        const uint state = sks[SKR_STRIDE * rec + SKR_STATE];
+        if (state < (uint)SK_S_WAITING) {
+            continue;
+        }
+        __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
+        const int runner = (int)rd[1];
+        __global double* wd = skd + SKD_STRIDE * rec;
+        for (int w = 0; w <= 2; w++) {
+            wd[w] = (double)(convert_float_rte((float)wd[w]) + dt);
+        }
+        wd[SKD_INSTANCE] = (double)(convert_float_rte((float)wd[SKD_INSTANCE]) + dt);
+        wd[SKD_COOLDOWN] = (double)(convert_float_rte((float)wd[SKD_COOLDOWN]) + dt);
+        // expire_skill_effects: an active token whose duration timer reached
+        // zero leaves the receiver order.
+        const int eff_base = (int)rd[6];
+        const int n_eff = (int)rd[5];
+        for (int e = 0; e < n_eff; e++) {
+            const int kind = (int)(sk + SK_EFFECTS)[SK_ESTRIDE * (uint)(eff_base + e)];
+            const int wslot = kind == SK_EFF_TARGET ? SKD_T_TIMER
+                : (kind == SK_EFF_ACCEL ? SKD_A_TIMER : SKD_C_TIMER);
+            if (wd[wslot] >= 0.0) {
+                __global uint* q = sk_seq(scr, kind) + runner * SK_SEQN;
+                sk_seq_remove(q, SK_TOK_SKILL + (uint)rec);
+            }
+        }
+        // start_expired_skill_cooldowns: the waiting cooldown starts once the
+        // (skill, detail) instance duration ran out.
+        if (state == (uint)SK_S_WAITING && wd[SKD_INSTANCE] >= 0.0) {
+            const double cd = as_double((ulong)rd[13] | ((ulong)rd[14] << 32));
+            wd[SKD_COOLDOWN] = -(double)(convert_float_rte(cd) * (dist_f / 1000.0f));
+            sks[SKR_STRIDE * rec + SKR_STATE] = (uint)SK_S_COOLDOWN;
+        }
+    }
+}
+
+// The fire bookkeeping of fire_pending_skill and apply_activation for one
+// record: register every kind's duration timer and receiver token, keep the
+// largest scaled duration as the (skill, detail) instance timer, then hand
+// the record to the cooldown machine. cd <= 0 marks the record dead forever
+// (engine: cooldown map entry +INF and the pending record removed).
+static void skills_fire(__global const uint* sk, __global uint* sks,
+    __global double* skd, __global uint* scr, const int rec, const int r,
+    const double hp, const double gap, const float dist_f) {
+    __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
+    __global double* wd = skd + SKD_STRIDE * rec;
+    const int eff_base = (int)rd[6];
+    const int n_eff = (int)rd[5];
+    double runtime = 0.0;
+    for (int e = 0; e < n_eff; e++) {
+        const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * (eff_base + e);
+        const int kind = (int)ef[0];
+        const int wslot = kind == SK_EFF_TARGET ? SKD_T_TIMER
+            : (kind == SK_EFF_ACCEL ? SKD_A_TIMER : SKD_C_TIMER);
+        const double base = as_double((ulong)ef[8] | ((ulong)ef[9] << 32));
+        const double coeff = sk_coeff(ef[3], hp, gap);
+        const float m1 = convert_float_rte(base) * (dist_f / 1000.0f);
+        const float m2 = m1 * convert_float_rte(coeff);
+        const double scaled = (double)(m2 * 1.0f);
+        runtime = fmax(runtime, scaled);
+        const double dur = convert_float_rte(scaled);
+        wd[wslot] = dur < 0.0 ? -INFINITY : -dur;
+        __global uint* q = sk_seq(scr, kind) + r * SK_SEQN;
+        const uint tok = SK_TOK_SKILL + (uint)rec;
+        if (sk_seq_find(q, tok) < 0) {
+            sk_seq_push(q, tok);
+        }
+    }
+    wd[SKD_INSTANCE] = runtime > 0.0 ? -runtime : 0.0;
+    const double cd = as_double((ulong)rd[13] | ((ulong)rd[14] << 32));
+    sks[SKR_STRIDE * rec + SKR_STATE] =
+        (uint)(cd <= 0.0 ? SK_S_DEAD : SK_S_WAITING);
+}
+
+// process_skill_priority for one priority pass: the whole field in roster
+// order, records in wire order, with the compact scan gate. The engine
+// removal for pos past the trigger only fires for non-retained primaries,
+// and the reserved and pending-removal paths belong to rejected constructs.
+static void skills_scan(__global const uint* sk, __global uint* sks,
+    __global double* skd, __global uint* scr, __global const uint* si,
+    __global const double* sd, __global const double* shl, __global const uint* rs,
+    const int p, const int n, const float dist_f) {
+    const int nrec = (int)sk[SK_NREC];
+    for (int r = 0; r < n; r++) {
+        const double pos = sd[SD_POS + r];
+        for (int rec = 0; rec < nrec; rec++) {
+            __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
+            if ((int)rd[1] != r || (int)rd[3] != p) {
+                continue;
+            }
+            uint state = sks[SKR_STRIDE * rec + SKR_STATE];
+            if (state == (uint)SK_S_DEAD || state == (uint)SK_S_DISABLED) {
+                continue;
+            }
+            __global double* wd = skd + SKD_STRIDE * rec;
+            if (pos >= wd[SKD_TRIG1]) {
+                if (!(rd[2] & SK_FLAG_RETAIN)) {
+                    sks[SKR_STRIDE * rec + SKR_STATE] = (uint)SK_S_DEAD;
+                }
+                continue;
+            }
+            if (state == (uint)SK_S_COOLDOWN && wd[SKD_COOLDOWN] >= 0.0) {
+                state = (uint)SK_S_READY;
+                sks[SKR_STRIDE * rec + SKR_STATE] = state;
+            }
+            if (state != (uint)SK_S_READY || pos < wd[SKD_TRIG0]) {
+                continue;
+            }
+            if (!sks[SKR_STRIDE * rec + SKR_SINGLE]) {
+                int hit = 0;
+                for (int w = 0; w < SK_WINMAX; w++) {
+                    const double s = wd[SKD_WINDOWS + 2 * w];
+                    const double e = wd[SKD_WINDOWS + 2 * w + 1];
+                    if (e > s && s <= pos && pos < e) {
+                        hit = 1;
+                        break;
+                    }
+                }
+                if (!hit) {
+                    continue;
+                }
+            }
+            if (!sk_eval(sk, rd, si, shl, r, n)) {
+                continue;
+            }
+            const double gap = sd[SD_POS + (int)rs[RS_ORDER + 0]] - pos;
+            skills_fire(sk, sks, skd, scr, rec, r, shl[r * SH_STRIDE + SH_HP],
+                fmax(gap, 0.0), dist_f);
+        }
+    }
+}
+
+// Duel and spot competition register or drop their fixed receiver tokens
+// during the field-condition passes; the token orders catch up once per tick
+// after them, duel first, matching the engine's duel-start registration
+// before the spot pass. A cleared flag skips its token in every fold even
+// before this sync, so the same-tick expiry reads stay exact.
+static void sk_token_sync(__global uint* scr, __global const uint* si, const int n) {
+    for (int r = 0; r < n; r++) {
+        __global uint* tq = scr + SK_TSEQ + r * SK_SEQN;
+        __global uint* aq = scr + SK_ASEQ + r * SK_SEQN;
+        if ((int)si[SI_DUEL_TOKEN + r]) {
+            if (sk_seq_find(tq, SK_TOK_DUEL) < 0) {
+                sk_seq_push(tq, SK_TOK_DUEL);
+            }
+            if (sk_seq_find(aq, SK_TOK_DUEL) < 0) {
+                sk_seq_push(aq, SK_TOK_DUEL);
+            }
+        } else {
+            sk_seq_remove(tq, SK_TOK_DUEL);
+            sk_seq_remove(aq, SK_TOK_DUEL);
+        }
+        if ((int)si[SI_SPOT_TOKEN + r]) {
+            if (sk_seq_find(tq, SK_TOK_SPOT) < 0) {
+                sk_seq_push(tq, SK_TOK_SPOT);
+            }
+        } else {
+            sk_seq_remove(tq, SK_TOK_SPOT);
+        }
+    }
+}
+
+// retail_target_speed_with_current_skills: the live Horse row target, the
+// non-natural current-speed values folded over f32 target_speed in push
+// order. Written after every skill pass and after each runner's physics
+// update, read by the lane caches, the blocking sample and the lane calls.
+static void sk_columns(__global const uint* sk, __global const uint* scr,
+    __global double* sd, const int n) {
+    for (int r = 0; r < n; r++) {
+        float acc = convert_float_rte(sd[SD_TS + r]);
+        const __global uint* q = scr + SK_CSEQ + r * SK_SEQN;
+        for (int i = 0; i < SK_SEQN; i++) {
+            const uint tok = q[i];
+            if (tok == 0u) {
+                break;
+            }
+            acc = acc + sk_tok_value(sk, tok, SK_EFF_CURRENT);
+        }
+        sd[SD_TSWSK + r] = (double)acc;
+    }
+}
+
+static void sk_column_one(__global const uint* sk, __global const uint* scr,
+    __global double* sd, const int r) {
+    float acc = convert_float_rte(sd[SD_TS + r]);
+    const __global uint* q = scr + SK_CSEQ + r * SK_SEQN;
+    for (int i = 0; i < SK_SEQN; i++) {
+        const uint tok = q[i];
+        if (tok == 0u) {
+            break;
+        }
+        acc = acc + sk_tok_value(sk, tok, SK_EFF_CURRENT);
+    }
+    sd[SD_TSWSK + r] = (double)acc;
+}
+
+// pace_cancel_current_speed() > 0. || retail_target_modifiers.apply(0.) > 0.
+// The fixed tokens fold at their pd values while their flags stay set; the
+// engine's receiver dropped an expired token before this context is built
+// mid-race_step, which is the same instant the flag clears.
+static int sk_has_speed(__global const uint* sk, __global const uint* scr,
+    __global const uint* si, const int r, const __global double* pd) {
+    float ordinary = 0.f;
+    const __global uint* cq = scr + SK_CSEQ + r * SK_SEQN;
+    for (int i = 0; i < SK_SEQN; i++) {
+        const uint tok = cq[i];
+        if (tok == 0u) {
+            break;
+        }
+        ordinary = ordinary + sk_tok_value(sk, tok, SK_EFF_CURRENT);
+    }
+    float target = 0.f;
+    const __global uint* tq = scr + SK_TSEQ + r * SK_SEQN;
+    for (int i = 0; i < SK_SEQN; i++) {
+        const uint tok = tq[i];
+        if (tok == 0u) {
+            break;
+        }
+        if (tok == SK_TOK_SPOT) {
+            if ((int)si[SI_SPOT_TOKEN + r]) {
+                target = target + convert_float_rte(
+                    pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_SPOT_M]);
+            }
+        } else if (tok == SK_TOK_DUEL) {
+            if ((int)si[SI_DUEL_TOKEN + r]) {
+                target = target + convert_float_rte(
+                    pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_DUEL_T]);
+            }
+        } else {
+            target = target + sk_tok_value(sk, tok, SK_EFF_TARGET);
+        }
+    }
+    return ((double)ordinary > 0. || target > 0.f) ? 1 : 0;
+}
+
+// The ordinary (token-excluded) receiver values for one physics chain, in
+// registration order, so the existing mods arguments keep the engine chain.
+static int sk_mods(__global const uint* sk, __global const uint* scr, const int r,
+    const int kind, __global float* out) {
+    const __global uint* q = scr + (kind == SK_EFF_TARGET ? SK_TSEQ : SK_ASEQ)
+        + r * SK_SEQN;
+    int m = 0;
+    for (int i = 0; i < SK_SEQN; i++) {
+        const uint tok = q[i];
+        if (tok == 0u) {
+            break;
+        }
+        if (tok == SK_TOK_SPOT || tok == SK_TOK_DUEL) {
+            continue;
+        }
+        out[m++] = sk_tok_value(sk, tok, kind);
+    }
+    return m;
+}
+
+// retail_current_speed: (natural + ordinary) + f32(speed), natural empty.
+static float sk_current_fold(__global const uint* sk, __global const uint* scr,
+    const int r) {
+    float acc = 0.f;
+    const __global uint* q = scr + SK_CSEQ + r * SK_SEQN;
+    for (int i = 0; i < SK_SEQN; i++) {
+        const uint tok = q[i];
+        if (tok == 0u) {
+            break;
+        }
+        acc = acc + sk_tok_value(sk, tok, SK_EFF_CURRENT);
+    }
+    return acc;
 }

@@ -440,7 +440,8 @@ static void im_r30(__global const uint* ib, __global const ulong* ilb,
 }
 
 static void im_init(__global const uint* ib, __global const ulong* ilb,
-    __global uint* ob, __global ulong* olb) {
+    __global uint* ob, __global ulong* olb, __global const uint* sk,
+    __global uint* sks, __global double* skd, __global uint* sub) {
         const int seed = (int)ib[US_A];
         const int n = (int)ib[US_B];
         const int paired = (int)ib[US_C];
@@ -455,9 +456,12 @@ static void im_init(__global const uint* ib, __global const ulong* ilb,
         __global uint* rush_bank = ob + OS_RUSHBANK;
         const double distance = as_double(ilb[IL_DISTANCE]);
         const float dist_f = convert_float_rte(distance);
+        const int sk_on = (sk != 0) && (int)sk[SK_NREC] > 0;
+        double sk_mult[MAXR];
 
         r128_new(bank, seed);
-        ob[OS_STAGES + 0] = bank[BANK_DC]; // after_triggers: no skills, no draws
+        if (sk_on) sk_init_triggers(sk, sks, skd, bank, sub, paired, seed, n, distance);
+        ob[OS_STAGES + 0] = bank[BANK_DC]; // after_triggers
 
         // force-in-move pass
         const float force_style[4] = {
@@ -479,19 +483,24 @@ static void im_init(__global const uint* ib, __global const ulong* ilb,
         }
         ob[OS_STAGES + 1] = bank[BANK_DC]; // after_ai
 
-        // wisdom chance (skill-free: computed, never drawn against)
+        // wisdom chance, then the skill lottery on the shared stream when the
+        // race carries a skill table
+        if (sk_on) sk_init_wisdom(sk, sks, bank, sub, ilb, sk_mult, paired, seed, n,
+            IL_RUNNER0);
+        else for (int r = 0; r < n; r++) sk_mult[r] = 1.0;
         for (int r = 0; r < n; r++) {
             const float base_wisdom = convert_float_rte(as_double(ilb[IL_RUNNER0 + r]));
             float chance = 100.0f - 9000.0f / base_wisdom;
             if (chance < 20.0f) chance = 20.0f;
             ob[OS_RUN0 + IRS_STRIDE * r + OR_CHANCE] = as_uint(chance);
         }
-        ob[OS_STAGES + 2] = bank[BANK_DC]; // after_wisdom: no skills, no draws
+        ob[OS_STAGES + 2] = bank[BANK_DC]; // after_wisdom
 
-        // start-delay pass
+        // start-delay pass, scaled by the enabled always-alternative factors
         const float delay_max = convert_float_rte(as_double(ilb[IL_DELAY_MAX]));
         for (int r = 0; r < n; r++) {
-            ob[OS_RUN0 + IRS_STRIDE * r + OR_DELAY] = as_uint(r128_real(bank, 0.0f, delay_max) * 1.0f);
+            ob[OS_RUN0 + IRS_STRIDE * r + OR_DELAY] = as_uint(
+                r128_real(bank, 0.0f, delay_max) * convert_float_rte(sk_mult[r]));
         }
         ob[OS_STAGES + 3] = bank[BANK_DC]; // after_delays
 
@@ -621,7 +630,7 @@ __kernel void initialization(__global const uint* in_u, __global const ulong* in
     } else if (mode == IM_R30) {
         im_r30(ib, ilb, ob, olb);
     } else if (mode == IM_INIT) {
-        im_init(ib, ilb, ob, olb);
+        im_init(ib, ilb, ob, olb, 0, 0, 0, 0);
     } else {
         im_hp(ib, ilb, ob, olb);
     }

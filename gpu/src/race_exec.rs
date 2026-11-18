@@ -18,8 +18,21 @@ pub const RACE_MAX_TICKS: usize = 6144;
 pub const RI_STRIDE: usize = 320;
 pub const RIL_STRIDE: usize = 576;
 pub const ST_STRIDE: usize = 112;
-pub const SCR_U_WORDS: usize = SCR_BANKS + 24 * BANK_WORDS;
-pub const SRL_WORDS: usize = SRL_HP_OUT_L + 24 * 64;
+// Skill scratch mirrors of retail_core.cl and skills.cl.
+pub const SK_STRIDE: usize = crate::skills_compile::SK_STRIDE;
+const SK_RMAX: usize = 32;
+const SKR_STRIDE: usize = 8;
+const SK_SEQN: usize = 40;
+const SKD_STRIDE: usize = 44;
+const SCR_SK: usize = SCR_BANKS + 24 * BANK_WORDS;
+const SK_TSEQ: usize = SCR_SK + SK_RMAX * SKR_STRIDE;
+const SK_ASEQ: usize = SK_TSEQ + SK_RMAX * SK_SEQN;
+const SK_CSEQ: usize = SK_ASEQ + SK_RMAX * SK_SEQN;
+const SK_SUB: usize = SK_CSEQ + SK_RMAX * SK_SEQN;
+const SK_STAGED: usize = SK_SUB + BANK_WORDS;
+pub const SCR_U_WORDS: usize = SK_STAGED + SK_RMAX;
+pub const SRL_SKD: usize = SRL_HP_OUT_L + 24 * 64;
+pub const SRL_WORDS: usize = SRL_SKD + SK_RMAX * SKD_STRIDE;
 pub const DT: f32 = 0.0666;
 
 // Slot bases, mirrors of retail_core.cl.
@@ -408,6 +421,7 @@ struct Prepared {
     host_fallback: Option<String>,
     geometry: Option<retail_geometry::FlatCourse>,
     seed: i32,
+    sk: Vec<u32>,
 }
 
 /// Parses one request into kernel inputs. A domain the kernel cannot answer
@@ -428,6 +442,7 @@ fn prepare(request: &str, seed: i64, globals: &Value, grids: &Value, courses: &V
         host_fallback: Some(reason.into()),
         geometry: None,
         seed: seed_i32,
+        sk: Vec::new(),
     });
     if horses.is_empty() || horses.len() > RACE_MAXR {
         return flagged("roster size outside the kernel's range");
@@ -511,11 +526,15 @@ fn prepare(request: &str, seed: i64, globals: &Value, grids: &Value, courses: &V
     gate_order.sort_by_key(|&i| horses[i].get_i64("gateIndex").unwrap_or(0));
     let track = course.get_i64("raceTrackId")? as i32;
 
+    // Hand the skill set to the kernel's numeric table. One unsupported
+    // construct flags the whole race rather than approximating the engine.
+    let sk_plan = crate::skills_compile::plan(&root, course);
+    if let Some(reason) = &sk_plan.reason {
+        return flagged(reason);
+    }
+
     for (r, horse) in horses.iter().enumerate() {
         let strategy = strategy_id(horse.get_str("strategy")?)?;
-        if horse.get("skills").and_then(Value::as_array).is_some_and(|s| !s.is_empty()) {
-            return flagged("skills are not ported");
-        }
         let rank = gate_order.iter().position(|&i| i == r).unwrap_or(0);
         let lane = retail_starting_lane(rank, track, horses.len(), grids);
         let b = RI_RUN0 + RI_RUN_STRIDE * r;
@@ -552,12 +571,37 @@ fn prepare(request: &str, seed: i64, globals: &Value, grids: &Value, courses: &V
             css: css.clone(),
         });
     }
-    Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32 })
+    Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words })
 }
 
 /// Runs every request end to end on the gated device. Races whose domain the
 /// kernel cannot answer stay flagged without a launch.
 pub fn run(requests: &[(String, i64)]) -> Result<RaceRun, String> {
+    Ok(run_inner(requests, None)?.0)
+}
+
+/// Kernel-only cost probe: prepare and upload once, then warm the launch and
+/// time `timed` further launches of the same buffers. No frames read-back,
+/// so launch_ms is device execution plus per-launch sync only.
+pub struct KernelBench {
+    pub device: String,
+    pub build_ms: f64,
+    pub races: usize,
+    pub runners: usize,
+    /// Race ticks summed over the batch for one launch.
+    pub total_ticks: usize,
+    pub launch_ms: f64,
+}
+
+pub fn run_kernel_only(requests: &[(String, i64)], warm: usize, timed: usize) -> Result<KernelBench, String> {
+    let (_, bench) = run_inner(requests, Some((warm.max(1), timed.max(1))))?;
+    bench.ok_or_else(|| "kernel-only run found no launchable race".into())
+}
+
+fn run_inner(
+    requests: &[(String, i64)],
+    timing: Option<(usize, usize)>,
+) -> Result<(RaceRun, Option<KernelBench>), String> {
     let globals = initialization::engine_parameters_value()?;
     let grids = json::parse(&dep_cpu::engine_data("starting_grids.json")?)?;
     let courses = initialization::engine_json("data/course_data.json")?;
@@ -661,12 +705,14 @@ pub fn run(requests: &[(String, i64)]) -> Result<RaceRun, String> {
             seg_zd: zeros(2 * crate::geometry::NSEG),
             seg_q: vec![0f32; 8 * crate::geometry::NSEG],
             seg_qd: vec![0f32; 8 * crate::geometry::NSEG],
-            lm_boundary: Vec::new(),
-            lm_limit: Vec::new(),
-            ce_start: Vec::new(),
-            ce_end: Vec::new(),
-            ce_id: Vec::new(),
-            ce_flags: Vec::new(),
+            lm_boundary: vec![0f32],
+            lm_limit: vec![0f32],
+            // OpenCL rejects empty buffers, and a count of zero keeps the
+            // kernel from ever reading these rows.
+            ce_start: vec![0f32],
+            ce_end: vec![0f32],
+            ce_id: vec![0i32],
+            ce_flags: vec![0u32],
         });
     }
     let tables = crate::geometry::course_tables(&table_sets);
@@ -678,12 +724,17 @@ pub fn run(requests: &[(String, i64)]) -> Result<RaceRun, String> {
     let m = launched.len();
     let mut ri_all = vec![0u32; m.max(1) * RI_STRIDE];
     let mut pd_all = vec![0f64; m.max(1) * RIL_STRIDE];
+    let mut sk_all = vec![0u32; m.max(1) * SK_STRIDE];
     for (slot, &i) in launched.iter().enumerate() {
         ri_all[slot * RI_STRIDE..][..RI_STRIDE].copy_from_slice(&prepared[i].ri);
         pd_all[slot * RIL_STRIDE..][..RIL_STRIDE].copy_from_slice(&prepared[i].pd);
+        if !prepared[i].sk.is_empty() {
+            sk_all[slot * SK_STRIDE..][..SK_STRIDE].copy_from_slice(&prepared[i].sk);
+        }
     }
     let b_ri = read_write(&queue, &ri_all)?;
     let b_pd = read_write(&queue, &pd_all)?;
+    let b_sk = read_only(&queue, &sk_all)?;
     let b_scr_u = read_write(&queue, &vec![0u32; m.max(1) * SCR_U_WORDS])?;
     let b_scr_d = read_write(&queue, &vec![0f64; m.max(1) * SRL_WORDS])?;
     let b_frames = read_write(&queue, &vec![0f64; m.max(1) * RACE_MAX_TICKS * n * 6])?;
@@ -702,6 +753,7 @@ pub fn run(requests: &[(String, i64)]) -> Result<RaceRun, String> {
     let b_ce_i = read_only(&queue, &tables.ce_i)?;
     let b_ce_f = read_only(&queue, &tables.ce_f)?;
 
+    let mut bench: Option<KernelBench> = None;
     if m > 0 {
         let kernel = ocl::Kernel::builder()
             .program(&program)
@@ -727,15 +779,41 @@ pub fn run(requests: &[(String, i64)]) -> Result<RaceRun, String> {
             .arg(&b_ce_e)
             .arg(&b_ce_i)
             .arg(&b_ce_f)
+            .arg(&b_sk)
             .build()
             .map_err(|e| e.to_string())?;
-        unsafe { kernel.enq().map_err(|e| e.to_string())? };
+        if let Some((warm, timed)) = timing {
+            for _ in 0..warm {
+                unsafe { kernel.enq().map_err(|e| e.to_string())? };
+            }
+            queue.finish().map_err(|e| e.to_string())?;
+            let mut probe = vec![0u32; m * ST_STRIDE];
+            b_status.cmd().read(&mut probe).enq().map_err(|e| e.to_string())?;
+            queue.finish().map_err(|e| e.to_string())?;
+            let total_ticks = probe.chunks(ST_STRIDE).map(|s| s[ST_TICKS] as usize).sum();
+            let start = std::time::Instant::now();
+            for _ in 0..timed {
+                unsafe { kernel.enq().map_err(|e| e.to_string())? };
+                queue.finish().map_err(|e| e.to_string())?;
+            }
+            let launch_ms = start.elapsed().as_secs_f64() * 1e3 / timed as f64;
+            bench = Some(KernelBench {
+                device: spike.device.name.clone(),
+                build_ms: spike.build_ms,
+                races: m,
+                runners: m * n,
+                total_ticks,
+                launch_ms,
+            });
+        } else {
+            unsafe { kernel.enq().map_err(|e| e.to_string())? };
+        }
     }
     queue.finish().map_err(|e| e.to_string())?;
 
     let mut status = vec![0u32; m.max(1) * ST_STRIDE];
-    let mut frames_all = vec![0f64; m.max(1) * RACE_MAX_TICKS * n * 6];
-    if m > 0 {
+    let mut frames_all = if timing.is_some() { Vec::new() } else { vec![0f64; m.max(1) * RACE_MAX_TICKS * n * 6] };
+    if m > 0 && timing.is_none() {
         b_status.cmd().read(&mut status).enq().map_err(|e| e.to_string())?;
         b_frames.cmd().read(&mut frames_all).enq().map_err(|e| e.to_string())?;
     }
@@ -755,7 +833,7 @@ pub fn run(requests: &[(String, i64)]) -> Result<RaceRun, String> {
             finish_raw_all: Vec::new(),
             loop_end: 0.,
         };
-        if race.host_fallback.is_none() {
+        if race.host_fallback.is_none() && timing.is_none() {
             let st = &status[slot * ST_STRIDE..][..ST_STRIDE];
             slot += 1;
             out.kernel_flag = st[ST_FALLBACK];
@@ -790,7 +868,7 @@ pub fn run(requests: &[(String, i64)]) -> Result<RaceRun, String> {
         races.push(out);
     }
 
-    Ok(RaceRun { device: spike.device, build_ms: spike.build_ms, races })
+    Ok((RaceRun { device: spike.device, build_ms: spike.build_ms, races }, bench))
 }
 
 /// The finish bits the kernel stored, or None for a runner that never
@@ -858,6 +936,61 @@ pub fn paired_request(request: &str, course: i32, seed: i64) -> Result<String, S
     map.insert("courseId".into(), Value::Number(f64::from(course)));
     map.insert("seed".into(), Value::Number(seed as f64));
     map.insert("pairedRandomStreams".into(), Value::Bool(true));
+    let mut out = String::new();
+    json::to_string_into(&value, &mut out);
+    Ok(out)
+}
+
+/// `multi_request` with these skill ids attached to one horse at level 1.
+/// `usage_patch` rewrites one skillData entry's alternatives[0].durationUsage
+/// so the gate can also build a request the compiler must reject.
+pub fn skills_request(
+    request: &str,
+    course: i32,
+    seed: i64,
+    horse: usize,
+    skill_ids: &[i64],
+    usage_patch: Option<(i64, i64)>,
+) -> Result<String, String> {
+    let mut value = json::parse(request)?;
+    let Value::Object(map) = &mut value else { return Err("request is not a JSON object".into()) };
+    map.insert("courseId".into(), Value::Number(f64::from(course)));
+    map.insert("seed".into(), Value::Number(seed as f64));
+    {
+        let Value::Array(horses) = map.get_mut("horses").ok_or("request has no horses array")? else {
+            return Err("request has no horses array".into());
+        };
+        let Some(Value::Object(hm)) = horses.get_mut(horse) else {
+            return Err("requested horse is out of range".into());
+        };
+        hm.insert(
+            "skills".into(),
+            json::arr(skill_ids.iter().map(|&id| {
+                json::obj(vec![
+                    ("skillId", Value::Number(id as f64)),
+                    ("level", Value::Number(1.)),
+                ])
+            }).collect()),
+        );
+    }
+    if let Some((skill_id, usage)) = usage_patch {
+        let Value::Object(sd) = map.get_mut("skillData").ok_or("request has no skillData")? else {
+            return Err("request has no skillData".into());
+        };
+        let Value::Object(entry) = sd
+            .get_mut(&skill_id.to_string())
+            .ok_or("skillData lacks the patched skill")?
+        else {
+            return Err("skillData lacks the patched skill".into());
+        };
+        let Value::Array(alts) = entry.get_mut("alternatives").ok_or("entry has no alternatives")? else {
+            return Err("entry has no alternatives".into());
+        };
+        let Some(Value::Object(alt)) = alts.get_mut(0) else {
+            return Err("entry has no alternatives".into());
+        };
+        alt.insert("durationUsage".into(), Value::Number(usage as f64));
+    }
     let mut out = String::new();
     json::to_string_into(&value, &mut out);
     Ok(out)

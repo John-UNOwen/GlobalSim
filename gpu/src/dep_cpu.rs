@@ -15,6 +15,9 @@ pub struct CpuRace {
     /// Each runner's `finishTimeRaw` in roster order, exactly as the result
     /// JSON reports it (the loop end time for a runner that never finished).
     pub finish_times: Vec<f64>,
+    /// Skill activations as the reply reports them: (horse, skillId,
+    /// detailIndex, t). t is the accumulatetime at the fire pass.
+    pub detail_events: Vec<(usize, i64, i64, f64)>,
 }
 
 pub fn course_id(request: &str) -> Result<i32, String> {
@@ -68,6 +71,18 @@ pub fn run_cpu_race(request: &str, seed: i64) -> Result<CpuRace, String> {
         .iter()
         .map(|row| row.get_f64("finishTimeRaw"))
         .collect::<Result<Vec<_>, _>>()?;
+    let detail_events = json::parse(&reply)?
+        .get_array("skillDetailEvents")?
+        .iter()
+        .map(|row| {
+            Ok::<_, String>((
+                row.get_f64("horseIndex")? as usize,
+                row.get_f64("skillId")? as i64,
+                row.get_f64("detailIndex")? as i64,
+                row.get_f64("t")?,
+            ))
+        })
+        .collect::<Result<Vec<(usize, i64, i64, f64)>, _>>()?;
     let frames = simulation.frames();
     let runners = frames.horse_count();
     let decoded: Vec<TickFrame> =
@@ -75,5 +90,5 @@ pub fn run_cpu_race(request: &str, seed: i64) -> Result<CpuRace, String> {
     let finishers = decoded
         .last()
         .map_or(0, |last| last.iter().filter(|row| row[0] >= distance).count());
-    Ok(CpuRace { frames: decoded, runners, finishers, finish_times })
+    Ok(CpuRace { frames: decoded, runners, finishers, finish_times, detail_events })
 }

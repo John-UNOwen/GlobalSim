@@ -69,7 +69,7 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
     __global uint* bank, __global float* c_start, __global float* c_speed,
     __global float* c_time, __global const double* pd, __global const double* rd,
     const int r, const int n, const int empty_move, const float dt,
-    const double course_distance) {
+    const double course_distance, __global const uint* skt) {
     const int strategy = (int)si[SI_STRATEGY + r];
     const float dist_f = convert_float_rte(course_distance);
     const int finished = (int)si[SI_FINISHED + r];
@@ -133,7 +133,7 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
                 convert_float_rte(sd[SD_POS + pm] - sd[SD_POS + r]), pm == r,
                 (int)rs[RS_STYLE + r] > field_style(strategy),
                 (int)rs[RS_COUNTS + 1], has_behind, behind_gap,
-                (int)si[SI_SPOT_TOKEN + r] || (int)si[SI_DUEL_TOKEN + r]);
+                sk_has_speed(skt, scr, si, r, pd));
             si[SI_PACEDOWN + r] = ((int)si[SI_PS_MODE + r] == 3) ? 1u : 0u;
             sd[SD_PKCOEF + r] = (double)sf[SF_PS_COEF + r];
         }
@@ -163,11 +163,11 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
     const float position_f = convert_float_rte(sd[SD_POS + r]);
     const float lane_f = convert_float_rte(sd[SD_LANE + r]);
     lane_update_targets(si, sf, lists, cached, sd, sf, r, n, pd, dt,
-        position_f, lane_f, sf[SF_OBSERVED + r], convert_float_rte(sd[SD_TS + r]));
+        position_f, lane_f, sf[SF_OBSERVED + r], convert_float_rte(sd[SD_TSWSK + r]));
     if (empty_move && sf[SF_AFTER_GOAL + r] < 1.f) {
         const float target = lane_target(si, sf, lists, cached, sd, sf, pd, bank,
             r, n, position_f, lane_f, sf[SF_OBSERVED + r],
-            convert_float_rte(sd[SD_TS + r]), phase, (int)(shl_r[SH_HP] > 0.),
+            convert_float_rte(sd[SD_TSWSK + r]), phase, (int)(shl_r[SH_HP] > 0.),
             (int)si[SI_PACEDOWN + r]);
         sd[SD_LANET + r] = (double)target;
     }
@@ -237,12 +237,15 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
         : convert_float_rte(sd[SD_SECMOD + section_index * RACE_MAXR + r]);
     if (!finished) {
         const float slope = convert_float_rte(slope_per / 10000.);
+        __global float* tmods = (__global float*)(scr + SK_STAGED);
+        const int ntm = sk_mods(skt, scr, r, SK_EFF_TARGET, tmods);
         sd[SD_TS + r] = (double)phys_target_speed(pd, base, section,
             convert_float_rte(sd[SD_PKCOEF + r]),
             (int)si[SI_L_FORCEIN + r] ? sf[SF_FORCE_IN + r] : 0.f,
             power, slope, (int)si[SI_DOWNHILL + r], minimum,
-            (int)(shl_r[SH_HP] > 0.), (__global const float*)0, 0,
+            (int)(shl_r[SH_HP] > 0.), tmods, ntm,
             spot_token, duel_t_token);
+        sk_column_one(skt, scr, sd, r);
     }
     float cap = 30.f;
     if (blocker >= 0) {
@@ -279,8 +282,10 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
             race_apt_ground((int)si[SI_SUAPT + r]),
             race_apt_distance((int)si[SI_DISTAPT + r]),
             strategy, phase, slope_per > 0.);
+        __global float* amods = (__global float*)(scr + SK_STAGED);
+        const int nam = sk_mods(skt, scr, r, SK_EFF_ACCEL, amods);
         acceleration = phys_acceleration_from_base(pd, base_accel,
-            (int)si[SI_DASH + r], (__global const float*)0, 0,
+            (int)si[SI_DASH + r], amods, nam,
             convert_float_rte(pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_DUEL_A]),
             (int)si[SI_DUEL_TOKEN + r],
             sf[SF_AS_VALUE + r], (int)si[SI_CPFLAGS + r] & CP_ASIT);
@@ -293,8 +298,10 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
     }
     speed = fmax(fmin(speed, cap), minimum);
     sd[SD_CS + r] = (double)speed;
-    // retail_current_speed adds zeros without skills, so it narrows to speed.
-    const float observed = fmin(fmax(speed, minimum), cap);
+    // retail_current_speed: the natural sum (empty here, no such effect is
+    // ported) plus the ordinary current-skill sum, over f32 speed.
+    const float observed = fmin(fmax(sk_current_fold(skt, scr, r) + speed,
+        minimum), cap);
     sf[SF_OBSERVED + r] = observed;
     float advance_distance = observed * dt;
     if (gate_fraction != 1.0) {
@@ -337,7 +344,8 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
     __global const double* sg_zd, __global const float* sg_q,
     __global const float* sg_qd, __global const float* lm_b,
     __global const float* lm_l, __global const float* ce_b, __global const float* ce_e,
-    __global const uint* ce_i, __global const uint* ce_f) {
+    __global const uint* ce_i, __global const uint* ce_f,
+    __global const uint* sk_all) {
     const int id = get_global_id(0);
     __global const uint* ri = ri_all + id * RI_STRIDE;
     __global const double* pd = rd_all + id * RIL_STRIDE;
@@ -347,6 +355,14 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
     st[ST_FALLBACK] = 0u;
     st[ST_ARG] = 0u;
     st[ST_TICKS] = 0u;
+
+    // The skill table block for this race, zero-filled (NREC 0) when the
+    // host compiled no skills. Views over it stay live for every race.
+    __global const uint* skt = sk_all + (long)id * SK_STRIDE;
+    const int sk_on = (int)skt[SK_NREC] > 0;
+    __global uint* sks = scr + SCR_SK;
+    __global double* skd = scr_d + SRL_SKD;
+    __global uint* sub = scr + SK_SUB;
 
     const int n = (int)ri[RI_N];
     if (n < 1 || n > RACE_MAXR) {
@@ -458,7 +474,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         __global uint* ob = scr + SCR_INIT_OUT;
         for (int s = 0; s < 121; s++) ob[s] = 0u;
         __global ulong* olb = (__global ulong*)(scr_d + SRL_INIT_OUT_L);
-        im_init(ib, ilb, ob, olb);
+        im_init(ib, ilb, ob, olb, skt, sk_on ? sks : 0, sk_on ? skd : 0, sub);
         if (ob[OS_FLAG] != 0u) {
             race_fb(st, FB_INIT);
             return;
@@ -680,6 +696,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         sd[SD_TS + r] = (double)convert_float_rte(
             convert_float_rte(sd[SD_BTS + r])
             + convert_float_rte(as_float(scr[runb + OR_SECTIONS + 0])));
+        sd[SD_TSWSK + r] = sd[SD_TS + r];
         const float minimum_speed = phys_minimum_speed(pd, guts, dist_f);
         sd[SD_MS + r] = (double)minimum_speed;
         sf[SF_BMIN_VAL + r] = minimum_speed;
@@ -784,7 +801,24 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
                 slope_update(si, sf, r, (int)ri[RI_NSLOPES], pd,
                     convert_float_rte(sd[SD_POS + r]));
             }
+            if ((int)si[SI_EVENTS_READY + r] && (int)si[SI_FINALE + r]
+                && !(int)si[SI_LS_ENTERED + r] && (int)ri[RI_NSTR]
+                && sd[SD_POS + r] >= pd[PC_LAST_STRAIGHT_START]) {
+                si[SI_LS_TICK + r] = 1u;
+                si[SI_LS_ENTERED + r] = 1u;
+            } else {
+                si[SI_LS_TICK + r] = 0u;
+            }
             si[SI_EVENTS_READY + r] = 1u;
+        }
+        // The skill runtime sits where prepare_retail_tick ends: timer step,
+        // expiry and cooldown start, then the priority passes with their
+        // fire gate, then the live Horse rows the sample below reads.
+        if (sk_on) {
+            skills_advance(skt, sks, skd, scr, dt, n, dist_f);
+            skills_scan(skt, sks, skd, scr, si, sd, shl, rs, 1, n, dist_f);
+            skills_scan(skt, sks, skd, scr, si, sd, shl, rs, 0, n, dist_f);
+            sk_columns(skt, scr, sd, n);
         }
         // blocking_sample over the post-skill rows, which skills left alone.
         for (int r = 0; r < n; r++) {
@@ -802,7 +836,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
                 paired ? scr + SCR_BANKS + r * BANK_WORDS : bank;
             const float advance_distance = race_step(si, scr, sf, sd, shl, lists,
                 cached, runner_bank, c_start, c_speed, c_time, pd, rds, r, n,
-                empty_move, dt, course_distance);
+                empty_move, dt, course_distance, skt);
             rs[RS_ADV + r] = 0u;
             if (advance_distance < 0.f) {
                 continue;  // gated rest: no movement, dash or goal test
@@ -862,6 +896,9 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             duel_update(si, sf, sd, shl, r, n, course_distance,
                 has_corner_events);
         }
+        // The duel and spot receivers catch up with the flag columns after
+        // the competition passes, in the engine's registration order.
+        sk_token_sync(scr, si, n);
         // update(): ranks, order and the pacemaker, read next tick.
         field_update(scr, si, sd, n, dist_f, pace_end_f, course_distance,
             pm_range, pm_notfwd);

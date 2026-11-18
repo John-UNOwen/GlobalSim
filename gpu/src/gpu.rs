@@ -14,6 +14,8 @@ pub const RNG_KERNEL_SOURCE: &str =
 pub const INITIALIZATION_KERNEL_SOURCE: &str = concat!(
     include_str!("kernels/rng_core.cl"),
     "\n",
+    include_str!("kernels/skills.cl"),
+    "\n",
     include_str!("kernels/initialization.cl")
 );
 pub const GEOMETRY_KERNEL_SOURCE: &str = include_str!("kernels/geometry.cl");
@@ -21,6 +23,8 @@ pub const GEOMETRY_KERNEL_SOURCE: &str = include_str!("kernels/geometry.cl");
 // source is those files concatenated ahead of race.cl.
 pub const RACE_KERNEL_SOURCE: &str = concat!(
     include_str!("kernels/rng_core.cl"),
+    "\n",
+    include_str!("kernels/skills.cl"),
     "\n",
     include_str!("kernels/initialization.cl"),
     "\n",

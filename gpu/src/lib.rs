@@ -55,6 +55,7 @@ pub mod reference;
 pub mod comparator;
 pub mod dep_cpu;
 pub mod race;
+pub mod skills_compile;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
