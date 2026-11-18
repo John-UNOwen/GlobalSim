@@ -6,9 +6,10 @@ timing against a 20-thread Rust baseline. See `docs/GPU_HANDOFF.md` in the
 engine repo for the plan this spike implements.
 
 The crate is standalone (empty `[workspace]` table) and vendors the engine's
-`src/retail_physics.rs`, `src/json.rs` and `src/replay_frames.rs` in place
-through `#[path]` includes in `src/lib.rs`. The engine files are never edited
-to make the GPU pass. License and provenance: `NOTICE`.
+`src/retail_physics.rs`, `src/json.rs`, `src/replay_frames.rs`, `src/random_gen.rs`
+and `src/retail_random.rs` in place through `#[path]` includes in `src/lib.rs`.
+The engine files are never edited to make the GPU pass. License and provenance:
+`NOTICE`.
 
 ## Prerequisites
 
@@ -45,6 +46,7 @@ Suites:
 | `layout` | The three `repr(C)` kernel structs are 104/36/244 bytes with the exact field offsets, and `kernel_params()` equals the engine's `Parameters` public methods for every scalar the kernel reads |
 | `comparator` | No device needed: one injected wrong value in a fake GPU outcome reports exactly the injected tick, runner, field and both raw bit patterns, equal frames with a flag are not parity |
 | `gpu_gate` | See below |
+| `rng_gate` (gpu only) | See "RNG port" below |
 | `race_diff` (gpu only) | The whole comparison pipeline on `examples/v77-race.jsonl` line 1 with geometry 10504 and seed 7: the CPU engine runs the whole race (1463 ticks), the stub's ticks diverge, and the outcome carries the fallback flag |
 
 ### What the gate proves
@@ -141,12 +143,67 @@ cannot guarantee exactness. The comparator and the tool's summary and flag
 handling need no change. `RaceOutcome` carries no tick timestamps; a kernel
 that emits its own timeline will need the outcome extended.
 
+## RNG port (handoff step 6.1)
+
+`src/kernels/rng.cl` holds one kernel, `rng`, and one work item per chain, with
+a per-item `mode` selecting Rule30, Retail, or substream. `src/rng.rs` builds the
+input and output buffers, runs the kernel through the `gpu::Spike` device gate
+(`Spike::build_program` compiles `rng.cl` with the same exactness options), and
+exposes pure-Rust reference wrappers over the `#[path]`-included engine RNGs. The
+reference wrappers call `crate::random_gen::Rule30CARng` and
+`crate::retail_random::RetailRandom` directly. Only `uniform_guarded` (the
+capped rejection loop) and `substream_key` (the FNV-1a plus murmur3 hash) mirror
+a loop or a hash, because the engine exposes no capped-uniform entry point and
+returns no intermediate hash. `uniform_guarded` still draws from the engine's
+`int32()`, so no stream is reimplemented.
+
+### What `rng_gate` pins
+
+All comparisons run on the gated B580, and every float is compared through
+`to_bits()`.
+
+- Engine parity: 1024 Rule30 chains (splitmix-spread `u32x2` seeds) match the
+  pure-Rust chain, including final `hi`/`lo`, the `int32()` and `random()` draws,
+  and `uniform()` over fractional, exactly-1, 0, and tiny-negative uppers. 8040
+  retail series over 1005 seeds (the signed boundaries plus a splitmix spread)
+  match, across `next_int`, `next_double`, `integer` narrow and wide, and `real`
+  and `real_distance` with swapped bounds. 256 substream keys (seed, runner 0 to
+  7, four tags including `RUN` and a skill-style tag) match the derived seed, the
+  hash, and the derived retail chain.
+- Fixture tie-in: for the six seeds in `tests/fixtures/retail_rng_dotnet.json`
+  (independent .NET `System.Random` values), the kernel's `next_int`,
+  `next_double`, and `integer(i32::MIN, i32::MAX)` sequences equal the fixture's
+  `integers`, `doubles`, and `wide` arrays. This pins the kernel, not just the
+  Rust reference, to that external reference.
+
+### Two sharp edges handled
+
+- RetailRandom state math. Rust's `state` is `[i32; 56]` with `wrapping_sub` and
+  `wrapping_add(i32::MAX)`, and a `value == i32::MAX` special case. The kernel
+  stores the state as `uint`, runs `+` and `-` as the u32 wraps Rust performs, and
+  casts to `int` only for the `< 0` sign tests. `wrapping_add(i32::MAX)` becomes
+  `+ 0x7FFFFFFF` and `value == i32::MAX` becomes `== 0x7FFFFFFF`. No signed add in
+  the kernel can overflow, so there is no undefined behavior on the device.
+- `uniform()` runs an uncapped rejection loop, and on a degenerate upper (below
+  `i32::MIN`) it never returns. The kernel caps the loop at `UNIFORM_CAP` 4096 and
+  writes a sentinel with the item's fallback flag set (the handoff step 5
+  mechanism) instead of hanging. `rng_gate` forces one such item (`upper -3e9`) and
+  checks the sentinel equals a guarded Rust run within the cap. The tiny-negative
+  uppers take the signed return without hitting the cap, so the guard and the
+  engine's `uniform` are asserted equal for every non-cap case.
+
+`next_double` multiplies by a compile-time constant. The engine computes
+`1.0/i32::MAX as f64` (raw bits `0x3e00000000200000`); the kernel embeds it as the
+hex literal `0x1.0000000200000p-31`, and `rng_gate` ties that literal to the Rust
+value through the bits assertion.
+
 ## Not covered (step 6 blockers)
 
 Engine calls the restricted chain never reaches, each needing its own port and
 gate:
 
-- RNG: the Rule30 `SeededRng` stream feeding spurt noise and decisions
+- RNG: ported and gated for step 6.1 (see "RNG port" below), but the whole-race
+  loop still consumes it through paths not yet in the kernel
 - Retail simulation start: case construction (entry, `ReplayConfig` to
   `Simulation` fields, initial `Runner` states)
 - Geometry queries: arc versus straight, ground and terrain lookups

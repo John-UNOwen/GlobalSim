@@ -13,6 +13,15 @@ mod json;
 #[path = "../../src/retail_physics.rs"]
 pub mod retail_physics;
 
+// The RNG includes stand apart from the json trio above. Neither file names
+// crate::replay_frames, so they carry no dependency on Value::ReplayFrames.
+#[path = "../../src/random_gen.rs"]
+pub mod random_gen;
+#[path = "../../src/retail_random.rs"]
+pub mod retail_random;
+
+pub mod rng;
+
 pub mod reference;
 
 pub mod comparator;

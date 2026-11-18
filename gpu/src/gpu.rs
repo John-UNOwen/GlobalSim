@@ -7,6 +7,7 @@ use std::cell::Cell;
 use std::time::Instant;
 
 pub const KERNEL_SOURCE: &str = include_str!("kernels/restricted_tick.cl");
+pub const RNG_KERNEL_SOURCE: &str = include_str!("kernels/rng.cl");
 pub const BUILD_OPTIONS: &str = "-cl-fp32-correctly-rounded-divide-sqrt";
 
 // cl.h values, as raw ids through Device::info_raw.
@@ -89,6 +90,7 @@ fn candidates() -> Result<(Vec<Candidate>, Vec<(String, String)>), String> {
 
 pub struct Spike {
     queue: Queue,
+    context: ocl::Context,
     program: Program,
     pub device: DeviceReport,
     pub build_ms: f64,
@@ -123,6 +125,7 @@ impl Spike {
         let build_ms = started.elapsed().as_secs_f64() * 1000.;
         Ok(Spike {
             queue,
+            context,
             program,
             device: report,
             build_ms,
@@ -130,8 +133,22 @@ impl Spike {
         })
     }
 
+    /// Builds an extra kernel program (for example rng.cl) on the already
+    /// gated device, with the same exactness build options.
+    pub fn build_program(&self, source: &str) -> Result<Program, String> {
+        Program::builder()
+            .cmplr_opt(BUILD_OPTIONS)
+            .source(source)
+            .build(&self.context)
+            .map_err(|e| e.to_string())
+    }
+
     pub fn kernel_build_failures(&self) -> u32 {
         self.build_failures.get()
+    }
+
+    pub fn queue(&self) -> Queue {
+        self.queue.clone()
     }
 
     /// Buffers for `count` cases plus the shared parameter struct. Parameter

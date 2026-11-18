@@ -5,11 +5,11 @@ engine (`race_engine_rs`, upstream `daftuyda/GlobalSim`, pin `paired-draws` at
 `00d79fa`).
 
 Engine dependency: `gpu/src/lib.rs` includes the engine's `retail_physics.rs`,
-`json.rs` and `replay_frames.rs` in place via `#[path]`. Those files remain part
-of the engine (AGPL-3.0-only, Copyright the engine's authors); this crate is
-therefore AGPL-3.0-only as well. The engine's source is the authority on
-semantics and is never modified to make GPU code pass (see
-`docs/GPU_HANDOFF.md`, "Rules").
+`json.rs`, `replay_frames.rs`, `random_gen.rs` and `retail_random.rs` in place via
+`#[path]`. Those files remain part of the engine (AGPL-3.0-only, Copyright the
+engine's authors); this crate is therefore AGPL-3.0-only as well. The engine's
+source is the authority on semantics and is never modified to make GPU code pass
+(see `docs/GPU_HANDOFF.md`, "Rules").
 
 The restricted tick chain ported here mirrors the Rust oracle
 `tools/restricted_oracle.rs` in the JAX port repo `John-UNOwen/GlobalSim-Jax`
