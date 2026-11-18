@@ -170,6 +170,8 @@
 #define PD_PM_RANGE 408        // PaseMakerChangeForwardRunningStyleRange
 #define PD_PM_NOTFWD 409
 #define PD_DTYPE 410               // course distance_type, the asitame coefficient row       // PaseMakerChangeTopHorseNotMostForwardStyleCount
+#define PD_FC_HALF0 411            // final_corner_half start, NaN when the course has none
+#define PD_FC_HALF1 412            // final_corner_half end
 #define PD_RUN0 448            // per runner, stride 5
 #define PD_RUN_STRIDE 5
 #define PRD_POWF 0             // per-runner spurt powf bits as the integer value
@@ -193,7 +195,7 @@
 #define SCR_HP_OUT (SCR_HP_IN + 24 * IIU)        // 24 * 180, ob 172 then olb
 #define SCR_STATE (SCR_HP_OUT + 24 * 180)
 // Integer state, one 24-wide column per slot (field base + runner index).
-#define SI_SLOTS 64
+#define SI_SLOTS 68
 #define SI_STRIDE (SI_SLOTS * 24)
 #define SI_SLOT(n) ((n) * 24)
 #define SI_STRATEGY SI_SLOT(0)
@@ -260,6 +262,10 @@
 #define SI_CPFLAGS SI_SLOT(62)     // conserve power and asitame bit flags
 #define SI_LS_TICK SI_SLOT(61)     // last_straight_entry_tick of this tick
 #define SI_TEMPT SI_SLOT(63)       // temptation_count: rush starts (rushingStartCount)
+#define SI_ACT0 SI_SLOT(64)        // activate_count[0], bumped at fire
+#define SI_ACT1 SI_SLOT(65)        // activate_count[1], bumped at fire
+#define SI_BND50 SI_SLOT(66)       // out-50 order band cell: 0 None, 1 timer, 2 NaN
+#define SI_L_MOVED SI_SLOT(67)     // moved_lane_this_tick from the previous tick
 #define CP_UNSUPPORTED 1u
 #define CP_CUTOFF 2u
 #define CP_WASBLK 4u
@@ -275,7 +281,7 @@
 // Integer slots end.
 #define SCR_SF (SCR_STATE + SI_STRIDE)
 // f32 state (raw-bit floats), one 24-wide column per slot.
-#define SF_SLOTS 52
+#define SF_SLOTS 56
 #define SF_STRIDE (SF_SLOTS * 24)
 #define SF_SLOT(n) ((n) * 24)
 #define SF_LANEMAX SF_SLOT(0)
@@ -371,14 +377,15 @@
 #define SK_TSEQ (SCR_SK + SK_RMAX * SKR_STRIDE)
 #define SK_ASEQ (SK_TSEQ + SK_RMAX * SK_SEQN)
 #define SK_CSEQ (SK_ASEQ + SK_RMAX * SK_SEQN)
-#define SK_SUB (SK_CSEQ + SK_RMAX * SK_SEQN)
+#define SK_LSEQ (SK_CSEQ + SK_RMAX * SK_SEQN)
+#define SK_SUB (SK_LSEQ + SK_RMAX * SK_SEQN)
 #define SK_STAGED (SK_SUB + BANK_WORDS)   // chain-staging float values
-#define SCR_SK_WORDS (SK_STAGED + SK_RMAX)
+#define SCR_SK_WORDS (SK_STAGED + 2 * SK_RMAX)
 #define SCR_U_WORDS SCR_SK_WORDS
 
 // Per-race scratch f64, one 24-wide column per slot (field base + runner
 // index). Array fields keep 24 slots per element: base + element * 24 + r.
-#define SD_SLOTS 71
+#define SD_SLOTS 78
 #define SD_STRIDE (SD_SLOTS * 24)
 #define SD_SLOT(n) ((n) * 24)
 #define SD_POS SD_SLOT(0)
@@ -389,6 +396,7 @@
 #define SD_CS SD_SLOT(5)          // current_speed
 #define SD_TS SD_SLOT(6)          // target_speed
 #define SD_TSWSK SD_SLOT(13)      // target speed folded with current-speed skills
+#define SD_OFA SD_SLOT(14)        // modifiers_one_frame_accel, the expiry impulse
 #define SD_MS SD_SLOT(7)          // min_speed
 #define SD_LSS SD_SLOT(8)         // last_spurt_speed
 #define SD_BTS SD_SLOT(9)         // base_target_speed[3], element stride 24
@@ -402,6 +410,13 @@
 #define SD_CP_ACC SD_SLOT(68)     // legacy cp_acc accumulate
 #define SD_AS_TIMER SD_SLOT(69)   // asitame effect duration timer, counts up to zero
 #define SD_RAWPW SD_SLOT(70)      // horse raw_power from initialization output 2
+#define SD_CLOCK SD_SLOT(71)      // accumulatetime race clock, f64 (f32-rounded steps)
+#define SD_BSIDE SD_SLOT(72)      // blocked_side_continuetime, f64
+#define SD_IFNEAR SD_SLOT(73)     // infront_near_lane_time, f64
+#define SD_BHNEAR SD_SLOT(74)     // behind_near_lane_time, f64
+#define SD_BHNEAR1 SD_SLOT(75)    // behind_near_lane_time_set1, f64
+#define SD_HPS SD_SLOT(76)        // retail_stat_values[0] accumulator, f64 bits of f32
+#define SD_PENDING_HP SD_SLOT(77) // recovery HP banked for the next step head
 #define SRL_RUNNER 0
 #define SRL_HP SD_STRIDE          // hp columns, SH_STRIDE per runner
 #define SH_STRIDE 8
@@ -598,9 +613,15 @@ static float apply_additive_modifiers(float base, __global const float* mods, co
 static float phys_target_speed(__global const double* pd, const float base,
     const float section, const float pace, const float force_in, const float power,
     const float slope, const int downhill, const float minimum, const int hp_remaining,
-    __global const float* mods, const int nmods, const float spot, const float duel) {
+    __global const float* mods, const int nmods, const float spot, const float duel,
+    const int moving_lane_skill) {
     float speed = (base + section) * pace + force_in;
     speed = apply_additive_modifiers(speed, mods, nmods);
+    if (moving_lane_skill) {
+        // The lane-speed skill late term, evaluated right after the skill
+        // modifiers and before the slope correction (retail_physics.rs).
+        speed = speed + phys_root(bounded_stat(power) * 0.0002f);
+    }
     // The slope correction evaluates at double and rounds once (doc 13.186).
     float correction;
     if (slope > 0.) {
@@ -1929,12 +1950,13 @@ static float lane_target(__global uint* si, __global float* sf, __global uint* l
     return lane;
 }
 
-// MoveState::step, empty modifiers (no lane-move skills). The x87-style
+// MoveState::step with the lane-speed skill modifiers. The x87-style
 // lateral-speed chain follows retail_lane.rs exactly.
 static int lane_move_step(__global uint* si, __global float* sf, const int r,
     __global const double* pd, const int after_goal, const float position,
     const float power, const int phase, const int rank, const float first_move_point,
-    const float max_lane, const int can_in, const int can_out, const float dt) {
+    const float max_lane, const int can_in, const int can_out, const float dt,
+    __global const float* mods, const int nmods) {
     sf[SF_MV_TARGET + r] = clamp(sf[SF_MV_TARGET + r], 0.f, max_lane);
     if (lane_approximately(sf[SF_MV_TARGET + r], sf[SF_MV_LANE + r])) {
         sf[SF_MV_TIME + r] = 0.f;
@@ -1970,7 +1992,8 @@ static int lane_move_step(__global uint* si, __global float* sf, const int r,
         } else {
             speed_next = fmax(convert_float_rte((double)speed_next - acceleration), rate);
         }
-        speed = clamp(fmax(speed_next, 0.f), 0.f, 0.6f);
+        speed = clamp(apply_additive_modifiers(fmax(speed_next, 0.f), mods, nmods),
+            0.f, 0.6f);
         if (lane_approximately(speed, 0.f)) {
             return 0;
         }
@@ -2362,6 +2385,22 @@ static void field_update(__global uint* scr, __global uint* si,
             m -= 1;
         }
         order[m] = (uint)i;
+    }
+    // Order-band "continue" tracking runs on the previous rank pass, before
+    // the new rank publishes. Only the out-50 cell feeds a ported condition.
+    const double band_thr = round(0.5 * (double)n);
+    for (int r = 0; r < n; r++) {
+        if (sd[SD_CLOCK + r] < 5.0) {
+            continue;
+        }
+        const uint cell = si[SI_BND50 + r];
+        const int in_band = (double)(int)rs[RS_PREVRANK + r] >= band_thr;
+        if (cell == 2u) {
+        } else if (!in_band) {
+            si[SI_BND50 + r] = 2u;
+        } else if (cell == 0u) {
+            si[SI_BND50 + r] = 1u;
+        }
     }
     for (int r = 0; r < n; r++) si[SI_RANKCOL + (int)order[r]] = (uint)(r + 1);
     int highest = 0;
@@ -2794,8 +2833,21 @@ static void asitame_release(__global uint* si, __global float* sf,
 // (timer step, receiver folds).
 
 static __global uint* sk_seq(__global uint* scr, const int kind) {
+    // Recovery, the runtime no-op and the raw stat bump hold no duration
+    // token: their fire writes state directly.
     return scr + (kind == SK_EFF_TARGET ? SK_TSEQ
-        : (kind == SK_EFF_ACCEL ? SK_ASEQ : SK_CSEQ));
+        : (kind == SK_EFF_ACCEL ? SK_ASEQ
+            : (kind == SK_EFF_LANESPEED ? SK_LSEQ : SK_CSEQ)));
+}
+
+static int sk_queued_kind(const int kind) {
+    return kind == SK_EFF_TARGET || kind == SK_EFF_ACCEL || kind == SK_EFF_CURRENT
+        || kind == SK_EFF_CURRENT_NAT || kind == SK_EFF_LANESPEED;
+}
+
+// active_lane_speed_skills non-empty, the moving-lane late term's gate.
+static int sk_lane_active(__global const uint* scr, const int r) {
+    return (scr + SK_LSEQ + r * SK_SEQN)[0] != 0u;
 }
 
 static int sk_seq_find(__global const uint* q, const uint tok) {
@@ -2842,9 +2894,15 @@ static float sk_tok_value(__global const uint* sk, const uint tok, const int kin
     return 0.f;
 }
 
+// A value the engine reports as unavailable: every comparison against it
+// answers false, which the isnan guard in sk_feat_cmp enforces.
+#define SK_NAN ((double)as_float(0x7fc00000u))
+
 // The scan gate's live predicate values, one FEAT_* code per dynamic leaf.
 static double sk_feat_value(const uint code, __global const uint* si,
-    __global const double* shl, const int r) {
+    __global const double* shl, __global const double* sd, __global const double* pd,
+    __global const float* sf, __global const uint* rs, const int r, const int n,
+    const double distance) {
     const uint feat = code >> 3;
     switch (feat) {
     case FEAT_ORDER:
@@ -2861,6 +2919,79 @@ static double sk_feat_value(const uint code, __global const uint* si,
         return (int)si[SI_KAKARI + r] != 0 ? 1.0 : 0.0;
     case FEAT_LS_ENTRY:
         return (int)si[SI_LS_TICK + r] != 0 ? 1.0 : 0.0;
+    case FEAT_PHASE:
+        return (double)(int)si[SI_PHASE + r];
+    case FEAT_CORNER:
+        return (double)(int)si[SI_CORNER + r];
+    case FEAT_FINALE:
+        return (double)(int)si[SI_FINALE + r];
+    case FEAT_FC_HALF: {
+        if (isnan(pd[PD_FC_HALF0])) return SK_NAN;
+        const float pos = convert_float_rte(sd[SD_POS + r]);
+        return (pos >= (float)pd[PD_FC_HALF0] && pos <= (float)pd[PD_FC_HALF1])
+            ? 1.0 : 0.0;
+    }
+    case FEAT_DIST_RATE:
+        return (double)(int)sd[SD_POS + r];
+    case FEAT_REMAIN:
+        return distance - floor(sd[SD_POS + r]);
+    case FEAT_CLOCK:
+        return floor((double)convert_float_rte((float)sd[SD_CLOCK + r]));
+    case FEAT_TEMPT:
+        return (double)(int)si[SI_TEMPT + r];
+    case FEAT_ACT0:
+        return (double)(int)si[SI_ACT0 + r];
+    case FEAT_ACT1:
+        return (double)(int)si[SI_ACT1 + r];
+    case FEAT_BSIDE:
+        return trunc(sd[SD_BSIDE + r]);
+    case FEAT_IFNEAR:
+        return floor(sd[SD_IFNEAR + r]);
+    case FEAT_BHNEAR:
+        return floor(sd[SD_BHNEAR + r]);
+    case FEAT_BHNEAR1:
+        return floor(sd[SD_BHNEAR1 + r]);
+    case FEAT_ORDER_DELTA:
+        return (double)((int)si[SI_RANKCOL + r] - (int)rs[RS_PREVRANK + r]);
+    case FEAT_OUT50:
+        return (double)(int)si[SI_BND50 + r];
+    case FEAT_NEAR: {
+        const double pos = sd[SD_POS + r];
+        const double lane = sd[SD_LANE + r];
+        const double lane_lim = (double)0.16666f;
+        int c = 0;
+        for (int j = 0; j < n; j++) {
+            if (j == r) continue;
+            if (fabs(sd[SD_POS + j] - pos) <= 3.0
+                && fabs(sd[SD_LANE + j] - lane) <= lane_lim) {
+                c++;
+            }
+        }
+        return (double)c;
+    }
+    case FEAT_BASH_BEHIND:
+    case FEAT_BASH_INFRONT: {
+        const int rank = (int)si[SI_RANKCOL + r];
+        if (feat == FEAT_BASH_INFRONT ? rank <= 1 : rank >= n) return SK_NAN;
+        const int j =
+            (int)rs[RS_ORDER + (feat == FEAT_BASH_INFRONT ? rank - 2 : rank)];
+        const double d = feat == FEAT_BASH_INFRONT
+            ? fmax(sd[SD_POS + j] - sd[SD_POS + r], 0.0)
+            : fmax(sd[SD_POS + r] - sd[SD_POS + j], 0.0);
+        return d / 2.5;
+    }
+    case FEAT_LASTSPURT: {
+        if ((int)si[SI_SP_ACTIVE + r]) return 1.0;
+        const int res = (int)si[SI_SP_RESULT + r];
+        if ((int)si[SI_PHASE + r] < 2 || (res != 1 && res != 2)
+            || (int)si[SI_SP_PENDING + r] || !(sf[SF_SP_START + r] > 0.0f)) {
+            return 0.0;
+        }
+        return convert_float_rte(sd[SD_POS + r]) >= sf[SF_SP_START + r] ? 1.0 : 0.0;
+    }
+    case FEAT_SLOPE:
+        return sf[SF_SL_VALUE + r] > 0.f
+            ? 1.0 : (sf[SF_SL_VALUE + r] < 0.f ? 2.0 : 0.0);
     default:
         return 0.0;
     }
@@ -2869,6 +3000,9 @@ static double sk_feat_value(const uint code, __global const uint* si,
 // The order_rate threshold comes from the field size, the engine's
 // `(n as f64 * (rate / 100.0)).round()` with half-away rounding.
 static int sk_feat_cmp(const uint code, const double v, const double arg, const int n) {
+    if (isnan(v)) {
+        return 0;
+    }
     double b = arg;
     if ((code >> 3) == FEAT_ORDER_RATE) {
         b = round((double)n * (arg / 100.0));
@@ -2883,31 +3017,97 @@ static int sk_feat_cmp(const uint code, const double v, const double arg, const 
     }
 }
 
-// The record's postfix condition program over the live leaves, evaluated
-// after the static windows and the cooldown gate already passed.
-static int sk_eval(__global const uint* sk, __global const uint* rd,
-    __global const uint* si, __global const double* shl, const int r, const int n) {
+// One record's postfix condition program, evaluated over the live leaves by
+// the scan gate. Programs hold AND markers only; the '@' structure lives in
+// the arms table, so sk_eval_arms folds the membership and program results.
+static int sk_eval(__global const uint* sk, const int prog_base, const int prog_len,
+    __global const uint* si, __global const double* shl, __global const double* sd,
+    __global const double* pd, __global const float* sf, __global const uint* rs,
+    const int r, const int n, const double distance) {
     int top = 0;
     char stack[64];
-    const int base = (int)rd[8];
-    for (int i = 0; i < (int)rd[7]; i++) {
-        const __global const uint* nd = sk + SK_PROGRAMS + SK_PSTRIDE * (base + i);
+    for (int i = 0; i < prog_len; i++) {
+        const __global const uint* nd = sk + SK_PROGRAMS + SK_PSTRIDE * (prog_base + i);
         const uint op = nd[0];
         if (op == OP_AND) {
             stack[top - 2] = (char)(stack[top - 2] && stack[top - 1]);
             top -= 1;
-        } else if (op == OP_OR) {
-            stack[top - 2] = (char)(stack[top - 2] || stack[top - 1]);
-            top -= 1;
         } else if (op == OP_TRUE) {
             stack[top++] = (char)(nd[1] != 0u);
         } else {
-            const double v = sk_feat_value(nd[1], si, shl, r);
+            const double v = sk_feat_value(nd[1], si, shl, sd, pd, sf, rs, r, n, distance);
             stack[top++] = (char)sk_feat_cmp(nd[1], v,
                 as_double((ulong)nd[2] | ((ulong)nd[3] << 32)), n);
         }
     }
     return top > 0 && stack[top - 1];
+}
+
+// Membership in a runtime window list, the engine's region any() check.
+static int sk_win_any(__global const double* wd, const int base, const int m,
+    const double pos) {
+    for (int i = 0; i < m; i++) {
+        if (wd[base + 2 * i] <= pos && pos < wd[base + 2 * i + 1]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static double sk_word_f64(__global const uint* w) {
+    return as_double((ulong)w[0] | ((ulong)w[1] << 32));
+}
+
+// The Or closure the engine's apply builds for a multi-arm condition: one
+// arm passes when the position sits in its runtime chain and its program
+// holds. Single records keep the plain program path (the engine's
+// extra_condition has no membership closures without an Or node).
+static int sk_eval_arms(__global const uint* sk, __global const uint* rd,
+    __global double* wd, __global uint* sks, const int rec,
+    __global const uint* si, __global const double* shl, __global const double* sd,
+    __global const double* pd, __global const float* sf, __global const uint* rs,
+    const int r, const int n, const double distance) {
+    const int narms = (int)rd[20];
+    for (int a = 0; a < narms; a++) {
+        const __global uint* ar = sk + SK_ARMS + SK_ASTRIDE * ((int)rd[21] + a);
+        const int nwin = (int)sks[SKR_STRIDE * rec + SKR_AWIN0 + a];
+        if (nwin == 0) {
+            continue;
+        }
+        const double pos = sd[SD_POS + r];
+        if (!sk_win_any(wd, SKD_ARMS + 2 * SK_WINMAX * a, nwin, pos)) {
+            continue;
+        }
+        if (sk_eval(sk, (int)ar[1], (int)ar[0], si, shl, sd, pd, sf, rs, r, n, distance)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// The prerequisite watch: membership in the compiled precondition region
+// list plus the precondition program, latched once true for the record's
+// lifetime, exactly like the engine's per-tick watch loop.
+static int sk_prereq_check(__global const uint* sk, __global const uint* rd,
+    __global const uint* si, __global const double* shl, __global const double* sd,
+    __global const double* pd, __global const float* sf, __global const uint* rs,
+    const int r, const int n, const double distance) {
+    const double pos = sd[SD_POS + r];
+    const int npre = (int)rd[22];
+    const __global uint* rg = sk + SK_REGIONS + SK_GSTRIDE * (int)rd[23];
+    int member = 0;
+    for (int i = 0; i < npre; i++) {
+        const double s = sk_word_f64(rg + SK_GSTRIDE * i);
+        const double e = sk_word_f64(rg + SK_GSTRIDE * i + 2);
+        if (s <= pos && pos < e) {
+            member = 1;
+            break;
+        }
+    }
+    if (!member) {
+        return 0;
+    }
+    return sk_eval(sk, (int)rd[25], (int)rd[24], si, shl, sd, pd, sf, rs, r, n, distance);
 }
 
 // SkillEffect::duration_coefficient: the leader-gap ramp, the HP tiers, or
@@ -2938,12 +3138,44 @@ static double sk_coeff(const uint du, const double hp, const double gap) {
 }
 
 // prepare_retail_tick's timer pass plus expire_skill_effects plus
+// The current-speed expiries, drained from the tail of the activation order so
+// a natural effect's impulse sums in the engine's reverse list order. The
+// token leaves the order once, so the impulse lands exactly once.
+static void skills_expire_current(__global const uint* sk, __global uint* scr,
+    __global double* skd, __global double* sd, const int n) {
+    for (int r = 0; r < n; r++) {
+        __global uint* q = sk_seq(scr, SK_EFF_CURRENT) + r * SK_SEQN;
+        for (int i = SK_SEQN - 1; i >= 0; i--) {
+            const uint tok = q[i];
+            if (tok == 0u) {
+                continue;
+            }
+            const int rec = (int)(tok - SK_TOK_SKILL);
+            if (skd[SKD_STRIDE * rec + SKD_C_TIMER] < 0.0) {
+                continue;
+            }
+            __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
+            const int eff_base = (int)rd[6];
+            for (int e = 0; e < (int)rd[5]; e++) {
+                const __global const uint* ef
+                    = sk + SK_EFFECTS + SK_ESTRIDE * (eff_base + e);
+                if ((int)ef[0] == SK_EFF_CURRENT_NAT) {
+                    // expire_skill_effects hands a natural current speed to
+                    // modifiers_one_frame_accel, a one-tick speed offset.
+                    sd[SD_OFA + r] += as_double((ulong)ef[6] | ((ulong)ef[7] << 32));
+                }
+            }
+            sk_seq_remove(q, tok);
+        }
+    }
+}
+
 // start_expired_skill_cooldowns for one whole field, after the per-runner
 // prepare loop. Dead records keep stepping because the engine's timer map is
 // keyed by the firing, not by the pending record's life.
 static void skills_advance(__global const uint* sk, __global uint* sks,
-    __global double* skd, __global uint* scr, const float dt, const int n,
-    const float dist_f) {
+    __global double* skd, __global uint* scr, __global double* sd, const float dt,
+    const int n, const float dist_f) {
     const int nrec = (int)sk[SK_NREC];
     for (int rec = 0; rec < nrec; rec++) {
         const uint state = sks[SKR_STRIDE * rec + SKR_STATE];
@@ -2953,19 +3185,24 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
         __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
         const int runner = (int)rd[1];
         __global double* wd = skd + SKD_STRIDE * rec;
-        for (int w = 0; w <= 2; w++) {
+        for (int w = SKD_T_TIMER; w <= SKD_L_TIMER; w++) {
             wd[w] = (double)(convert_float_rte((float)wd[w]) + dt);
         }
         wd[SKD_INSTANCE] = (double)(convert_float_rte((float)wd[SKD_INSTANCE]) + dt);
         wd[SKD_COOLDOWN] = (double)(convert_float_rte((float)wd[SKD_COOLDOWN]) + dt);
         // expire_skill_effects: an active token whose duration timer reached
-        // zero leaves the receiver order.
+        // zero leaves the receiver order. The current-speed kinds drain in
+        // their own reverse pass, which owns the natural expiry impulse.
         const int eff_base = (int)rd[6];
         const int n_eff = (int)rd[5];
         for (int e = 0; e < n_eff; e++) {
             const int kind = (int)(sk + SK_EFFECTS)[SK_ESTRIDE * (uint)(eff_base + e)];
+            if (!sk_queued_kind(kind) || kind == SK_EFF_CURRENT
+                || kind == SK_EFF_CURRENT_NAT) {
+                continue;
+            }
             const int wslot = kind == SK_EFF_TARGET ? SKD_T_TIMER
-                : (kind == SK_EFF_ACCEL ? SKD_A_TIMER : SKD_C_TIMER);
+                : (kind == SK_EFF_ACCEL ? SKD_A_TIMER : SKD_L_TIMER);
             if (wd[wslot] >= 0.0) {
                 __global uint* q = sk_seq(scr, kind) + runner * SK_SEQN;
                 sk_seq_remove(q, SK_TOK_SKILL + (uint)rec);
@@ -2979,15 +3216,19 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
             sks[SKR_STRIDE * rec + SKR_STATE] = (uint)SK_S_COOLDOWN;
         }
     }
+    skills_expire_current(sk, scr, skd, sd, n);
 }
 
 // The fire bookkeeping of fire_pending_skill and apply_activation for one
-// record: register every kind's duration timer and receiver token, keep the
-// largest scaled duration as the (skill, detail) instance timer, then hand
-// the record to the cooldown machine. cd <= 0 marks the record dead forever
-// (engine: cooldown map entry +INF and the pending record removed).
+// record: the duration-timer kinds register a receiver token, recovery and
+// the raw stat bump write state directly, the largest scaled duration becomes
+// the (skill, detail) instance timer, and the phase counter bumps. cd <= 0
+// marks the record dead forever (engine: cooldown map entry +INF and the
+// pending record removed).
 static void skills_fire(__global const uint* sk, __global uint* sks,
-    __global double* skd, __global uint* scr, const int rec, const int r,
+    __global double* skd, __global uint* scr, __global uint* si,
+    __global const double* shl, __global double* sd, __global const double* pd,
+    __global float* sf, const int rec, const int r,
     const double hp, const double gap, const float dist_f,
     __global uint* ev, __global uint* st) {
     __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
@@ -3002,14 +3243,39 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
     for (int e = 0; e < n_eff; e++) {
         const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * (eff_base + e);
         const int kind = (int)ef[0];
-        const int wslot = kind == SK_EFF_TARGET ? SKD_T_TIMER
-            : (kind == SK_EFF_ACCEL ? SKD_A_TIMER : SKD_C_TIMER);
+        const double modifier = as_double((ulong)ef[6] | ((ulong)ef[7] << 32));
         const double base = as_double((ulong)ef[8] | ((ulong)ef[9] << 32));
         const double coeff = sk_coeff(ef[3], hp, gap);
         const float m1 = convert_float_rte(base) * (dist_f / 1000.0f);
         const float m2 = m1 * convert_float_rte(coeff);
         const double scaled = (double)(m2 * 1.0f);
         runtime = fmax(runtime, scaled);
+        if (kind == SK_EFF_RECOVERY) {
+            sd[SD_PENDING_HP + r] += (double)(convert_float_rte(shl[r * SH_STRIDE + SH_MAX])
+                * convert_float_rte(modifier));
+            continue;
+        }
+        if (kind == SK_EFF_SPEEDUP) {
+            // add_stat_modifier(0): the f32 accumulator never clamps, the
+            // horse field sees the clamped value, and the spurt plan then
+            // samples maximum speed from it at its next recalculation.
+            const float value = (float)sd[SD_HPS + r] + convert_float_rte(modifier);
+            sd[SD_HPS + r] = (double)value;
+            const float speed = convert_float_rte(fmin(fmax((double)value, 1.0), 2000.0));
+            const int table[8] = {10500, 10000, 9000, 8000, 6000, 4000, 2000, 1000};
+            const float aptitude =
+                convert_float_rte((float)table[(int)si[SI_DISTAPT + r]]) * 0.0001f;
+            sf[SF_SPURT_MAX + r] = convert_float_rte(phys_maximum_spurt_speed(pd, speed,
+                (int)si[SI_STRATEGY + r], aptitude, dist_f,
+                pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_POWF]));
+            continue;
+        }
+        if (!sk_queued_kind(kind)) {
+            continue;
+        }
+        const int wslot = kind == SK_EFF_TARGET ? SKD_T_TIMER
+            : (kind == SK_EFF_ACCEL ? SKD_A_TIMER
+                : (kind == SK_EFF_LANESPEED ? SKD_L_TIMER : SKD_C_TIMER));
         const double dur = convert_float_rte(scaled);
         wd[wslot] = dur < 0.0 ? -INFINITY : -dur;
         __global uint* q = sk_seq(scr, kind) + r * SK_SEQN;
@@ -3019,6 +3285,12 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
         }
     }
     wd[SKD_INSTANCE] = runtime > 0.0 ? -runtime : 0.0;
+    const int phase = (int)si[SI_PHASE + r];
+    if (phase == 0) {
+        si[SI_ACT0 + r] += 1u;
+    } else if (phase == 1) {
+        si[SI_ACT1 + r] += 1u;
+    }
     const double cd = as_double((ulong)rd[13] | ((ulong)rd[14] << 32));
     sks[SKR_STRIDE * rec + SKR_STATE] =
         (uint)(cd <= 0.0 ? SK_S_DEAD : SK_S_WAITING);
@@ -3029,11 +3301,28 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
 // removal for pos past the trigger only fires for non-retained primaries,
 // and the reserved and pending-removal paths belong to rejected constructs.
 static void skills_scan(__global const uint* sk, __global uint* sks,
-    __global double* skd, __global uint* scr, __global const uint* si,
-    __global const double* sd, __global const double* shl, __global const uint* rs,
+    __global double* skd, __global uint* scr, __global uint* si,
+    __global double* sd, __global const double* shl, __global const uint* rs,
+    __global const double* pd, __global float* sf, const double distance,
     const int p, const int n, const float dist_f,
     __global uint* ev, __global uint* st) {
     const int nrec = (int)sk[SK_NREC];
+    // The prerequisite watch pass runs before the gate, over the records of
+    // this priority only, latching each one the first time it holds.
+    for (int rec = 0; rec < nrec; rec++) {
+        const __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
+        if ((int)rd[3] != p || rd[22] == 0u || sks[SKR_STRIDE * rec + SKR_LATCH] != 0u) {
+            continue;
+        }
+        const uint state = sks[SKR_STRIDE * rec + SKR_STATE];
+        if (state == (uint)SK_S_DEAD || state == (uint)SK_S_DISABLED) {
+            continue;
+        }
+        const int r = (int)rd[1];
+        if (sk_prereq_check(sk, rd, si, shl, sd, pd, sf, rs, r, n, distance)) {
+            sks[SKR_STRIDE * rec + SKR_LATCH] = 1u;
+        }
+    }
     for (int r = 0; r < n; r++) {
         const double pos = sd[SD_POS + r];
         for (int rec = 0; rec < nrec; rec++) {
@@ -3059,27 +3348,58 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
             if (state != (uint)SK_S_READY || pos < wd[SKD_TRIG0]) {
                 continue;
             }
-            if (!sks[SKR_STRIDE * rec + SKR_SINGLE]) {
-                int hit = 0;
-                for (int w = 0; w < SK_WINMAX; w++) {
-                    const double s = wd[SKD_WINDOWS + 2 * w];
-                    const double e = wd[SKD_WINDOWS + 2 * w + 1];
-                    if (e > s && s <= pos && pos < e) {
-                        hit = 1;
-                        break;
-                    }
-                }
-                if (!hit) {
-                    continue;
-                }
+            if (rd[22] != 0u && sks[SKR_STRIDE * rec + SKR_LATCH] == 0u) {
+                continue;
             }
-            if (!sk_eval(sk, rd, si, shl, r, n)) {
+            if (!sks[SKR_STRIDE * rec + SKR_SINGLE] && !sk_win_any(wd, SKD_WINDOWS,
+                (int)sks[SKR_STRIDE * rec + SKR_NWIN], pos)) {
+                continue;
+            }
+            if (!sk_eval_arms(sk, rd, wd, sks, rec, si, shl, sd, pd, sf, rs, r, n,
+                distance)) {
                 continue;
             }
             const double gap = sd[SD_POS + (int)rs[RS_ORDER + 0]] - pos;
-            skills_fire(sk, sks, skd, scr, rec, r, shl[r * SH_STRIDE + SH_HP],
-                fmax(gap, 0.0), dist_f, ev, st);
+            skills_fire(sk, sks, skd, scr, si, shl, sd, pd, sf, rec, r,
+                shl[r * SH_STRIDE + SH_HP], fmax(gap, 0.0), dist_f, ev, st);
         }
+    }
+}
+
+// update_near_lane_timers: a rank change resets the three near-lane timers,
+// otherwise the published order's neighbors accumulate them with the plain
+// f64 dt. Runs on post-movement rows, before the competition pass.
+static void near_lane_timers(__global uint* si, __global double* sd,
+    __global const uint* rs, const int r, const int n, const double dt) {
+    if ((int)si[SI_RANKCOL + r] != (int)rs[RS_PREVRANK + r]) {
+        sd[SD_IFNEAR + r] = 0.0;
+        sd[SD_BHNEAR + r] = 0.0;
+        sd[SD_BHNEAR1 + r] = 0.0;
+        return;
+    }
+    const double pos = sd[SD_POS + r];
+    const double lane = sd[SD_LANE + r];
+    const int rank = (int)si[SI_RANKCOL + r];
+    if (rank > 1) {
+        const int j = (int)rs[RS_ORDER + rank - 2];
+        const double gap = fmax(sd[SD_POS + j] - pos, 0.0);
+        const double lgap = fabs(sd[SD_LANE + j] - lane);
+        sd[SD_IFNEAR + r] =
+            (gap <= 2.5 && lgap <= (double)0.0556f) ? sd[SD_IFNEAR + r] + dt : 0.0;
+    } else {
+        sd[SD_IFNEAR + r] = 0.0;
+    }
+    if (rank < n) {
+        const int j = (int)rs[RS_ORDER + rank];
+        const double gap = fmax(pos - sd[SD_POS + j], 0.0);
+        const double lgap = fabs(lane - sd[SD_LANE + j]);
+        sd[SD_BHNEAR + r] =
+            (gap <= 2.5 && lgap <= (double)0.0556f) ? sd[SD_BHNEAR + r] + dt : 0.0;
+        sd[SD_BHNEAR1 + r] =
+            (gap <= 5.0 && lgap <= (double)0.15f) ? sd[SD_BHNEAR1 + r] + dt : 0.0;
+    } else {
+        sd[SD_BHNEAR + r] = 0.0;
+        sd[SD_BHNEAR1 + r] = 0.0;
     }
 }
 
@@ -3190,8 +3510,9 @@ static int sk_has_speed(__global const uint* sk, __global const uint* scr,
 // registration order, so the existing mods arguments keep the engine chain.
 static int sk_mods(__global const uint* sk, __global const uint* scr, const int r,
     const int kind, __global float* out) {
-    const __global uint* q = scr + (kind == SK_EFF_TARGET ? SK_TSEQ : SK_ASEQ)
-        + r * SK_SEQN;
+    const __global uint* q = scr + (kind == SK_EFF_TARGET ? SK_TSEQ
+        : (kind == SK_EFF_ACCEL ? SK_ASEQ
+            : (kind == SK_EFF_LANESPEED ? SK_LSEQ : SK_CSEQ))) + r * SK_SEQN;
     int m = 0;
     for (int i = 0; i < SK_SEQN; i++) {
         const uint tok = q[i];
@@ -3206,17 +3527,26 @@ static int sk_mods(__global const uint* sk, __global const uint* scr, const int 
     return m;
 }
 
-// retail_current_speed: (natural + ordinary) + f32(speed), natural empty.
+// retail_current_speed: the natural group folds first, then the ordinary
+// group, the engine's apply_additive order over the two receiver vecs.
 static float sk_current_fold(__global const uint* sk, __global const uint* scr,
     const int r) {
-    float acc = 0.f;
+    float natural = 0.f;
+    float ordinary = 0.f;
     const __global uint* q = scr + SK_CSEQ + r * SK_SEQN;
     for (int i = 0; i < SK_SEQN; i++) {
         const uint tok = q[i];
         if (tok == 0u) {
             break;
         }
-        acc = acc + sk_tok_value(sk, tok, SK_EFF_CURRENT);
+        natural = natural + sk_tok_value(sk, tok, SK_EFF_CURRENT_NAT);
     }
-    return acc;
+    for (int i = 0; i < SK_SEQN; i++) {
+        const uint tok = q[i];
+        if (tok == 0u) {
+            break;
+        }
+        ordinary = ordinary + sk_tok_value(sk, tok, SK_EFF_CURRENT);
+    }
+    return natural + ordinary;
 }

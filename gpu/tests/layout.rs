@@ -10,17 +10,17 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     // The kernel's retail_core.cl scratch map grows by the skill regions, and
     // the host mirror must keep the same layout the work item reads.
     use globalsim_gpu::race_exec as re;
-    assert_eq!(re::SK_STRIDE, 4480);
+    assert_eq!(re::SK_STRIDE, 34112);
     // The full scratch mirrors: stat rows, race state, banks, then the skill
-    // state block, three token orders, the substream bank and the staging.
-    assert_eq!(re::SCR_U_WORDS, 28540);
-    assert_eq!(re::SRL_WORDS, 7288);
+    // state block, four token orders, the substream bank and the staging.
+    assert_eq!(re::SCR_U_WORDS, 51804);
+    assert_eq!(re::SRL_WORDS, 28448);
     // Table areas stay inside the stride, header first, then course lists,
-    // records, effects, programs, regions, tags and random-term entries.
+    // records, effects, programs, arms, regions, terms and tags.
     assert!(16 <= globalsim_gpu::skills_compile::SK_STRAIGHTS);
     assert!(
-        globalsim_gpu::skills_compile::SK_TERMS
-            + globalsim_gpu::skills_compile::SK_MSTRIDE * globalsim_gpu::skills_compile::SK_MMAX
+        globalsim_gpu::skills_compile::SK_TAGS
+            + globalsim_gpu::skills_compile::SK_TMAX
             <= globalsim_gpu::skills_compile::SK_STRIDE
     );
     assert_eq!(
@@ -36,15 +36,22 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     assert_eq!(
         globalsim_gpu::skills_compile::SK_PROGRAMS + globalsim_gpu::skills_compile::SK_PSTRIDE
             * globalsim_gpu::skills_compile::SK_PMAX,
+        globalsim_gpu::skills_compile::SK_ARMS
+    );
+    assert_eq!(
+        globalsim_gpu::skills_compile::SK_ARMS + globalsim_gpu::skills_compile::SK_ASTRIDE
+            * globalsim_gpu::skills_compile::SK_AMAX,
         globalsim_gpu::skills_compile::SK_REGIONS
     );
     assert_eq!(
-        globalsim_gpu::skills_compile::SK_REGIONS + 4 * globalsim_gpu::skills_compile::SK_GMAX,
-        globalsim_gpu::skills_compile::SK_TAGS
+        globalsim_gpu::skills_compile::SK_REGIONS + globalsim_gpu::skills_compile::SK_GSTRIDE
+            * globalsim_gpu::skills_compile::SK_GMAX,
+        globalsim_gpu::skills_compile::SK_TERMS
     );
     assert_eq!(
-        globalsim_gpu::skills_compile::SK_TAGS + globalsim_gpu::skills_compile::SK_TMAX,
-        globalsim_gpu::skills_compile::SK_TERMS
+        globalsim_gpu::skills_compile::SK_TERMS + globalsim_gpu::skills_compile::SK_MSTRIDE
+            * globalsim_gpu::skills_compile::SK_MMAX,
+        globalsim_gpu::skills_compile::SK_TAGS
     );
 }
 

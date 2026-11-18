@@ -20,17 +20,18 @@ pub const RIL_STRIDE: usize = 576;
 pub const ST_STRIDE: usize = 232;
 // Skill scratch mirrors of retail_core.cl and skills.cl.
 pub const SK_STRIDE: usize = crate::skills_compile::SK_STRIDE;
-const SK_RMAX: usize = 32;
+const SK_RMAX: usize = 160;
 const SKR_STRIDE: usize = 8;
 const SK_SEQN: usize = 40;
-const SKD_STRIDE: usize = 44;
+const SKD_STRIDE: usize = 140;
 const SCR_SK: usize = SCR_BANKS + 24 * BANK_WORDS;
 const SK_TSEQ: usize = SCR_SK + SK_RMAX * SKR_STRIDE;
 const SK_ASEQ: usize = SK_TSEQ + SK_RMAX * SK_SEQN;
 const SK_CSEQ: usize = SK_ASEQ + SK_RMAX * SK_SEQN;
-const SK_SUB: usize = SK_CSEQ + SK_RMAX * SK_SEQN;
+const SK_LSEQ: usize = SK_CSEQ + SK_RMAX * SK_SEQN;
+const SK_SUB: usize = SK_LSEQ + SK_RMAX * SK_SEQN;
 const SK_STAGED: usize = SK_SUB + BANK_WORDS;
-pub const SCR_U_WORDS: usize = SK_STAGED + SK_RMAX;
+pub const SCR_U_WORDS: usize = SK_STAGED + 2 * SK_RMAX;
 pub const SRL_SKD: usize = SRL_HP_OUT_L + 24 * 64;
 pub const SRL_WORDS: usize = SRL_SKD + SK_RMAX * SKD_STRIDE;
 pub const DT: f32 = 0.0666;
@@ -72,6 +73,8 @@ pub const PD_CF_ACCEL: usize = 405;
 pub const PD_PM_RANGE: usize = 408;
 pub const PD_PM_NOTFWD: usize = 409;
 pub const PD_DTYPE: usize = 410;
+pub const PD_FC_HALF0: usize = 411;
+pub const PD_FC_HALF1: usize = 412;
 pub const PD_RUN0: usize = 448;
 pub const PD_RUN_STRIDE: usize = 5;
 pub const PRD_POWF: usize = 0;
@@ -104,7 +107,7 @@ pub const EV_STRIDE: usize = 1 + 2 * EV_MAX;
 pub const EV_KAKARI: u32 = 0xFFFF_FFFF;
 // Scratch bases, mirrors of retail_core.cl.
 const IIU: usize = 96;
-const SF_STRIDE: usize = 52;
+const SF_STRIDE: usize = 56;
 const LIST_STRIDE: usize = 48;
 const CAND_MAX: usize = 101;
 const SCR_STATS_IN: usize = 0;
@@ -114,14 +117,14 @@ const SCR_INIT_OUT: usize = SCR_INIT_IN + IIU;
 const SCR_HP_IN: usize = SCR_INIT_OUT + 992;
 const SCR_HP_OUT: usize = SCR_HP_IN + 24 * IIU;
 const SCR_STATE: usize = SCR_HP_OUT + 24 * 180;
-const SCR_SF: usize = SCR_STATE + 64 * 24;
+const SCR_SF: usize = SCR_STATE + 68 * 24;
 const SCR_LISTS: usize = SCR_SF + SF_STRIDE * 24;
 const SCR_CAND: usize = SCR_LISTS + LIST_STRIDE * 24;
 const SCR_CACHED: usize = (SCR_CAND + 3 * CAND_MAX + 63) & !63;
 const SCR_RACE: usize = SCR_CACHED + 4 * LIST_STRIDE * 24;
 const SCR_BANKS: usize = SCR_RACE + 192; // paired mode: one RUN bank per runner
 const BANK_WORDS: usize = 60;
-const SRL_HP: usize = 71 * 24;
+const SRL_HP: usize = 78 * 24;
 const RD_WORDS: usize = 8 * 24 + SRL_HP + 32;
 const SRL_STATS_IN_L: usize = RD_WORDS;
 const SRL_INIT_IN_L: usize = SRL_STATS_IN_L + 24 * 48;
@@ -177,6 +180,18 @@ pub struct RaceGpu {
     /// the same seven blocks after the move.
     /// Present to bisect a divergence, never in a replay reply.
     pub debug_pace: Vec<[f64; 6]>,
+    /// Test diagnostics only, None unless the caller asked for the skill
+    /// scratch: the merged trigger windows and the record state as the scan
+    /// gate sees them after initialization.
+    pub debug_sk: Option<SkillScratch>,
+}
+
+/// One race's kernel skill scratch read back for a divergence hunt: the
+/// per-record double block at `SKD_STRIDE` per record slot and the per-record
+/// state words at `SKR_STRIDE` per record slot.
+pub struct SkillScratch {
+    pub skd: Vec<f64>,
+    pub sks: Vec<u32>,
 }
 
 pub struct RaceRun {
@@ -458,6 +473,7 @@ pub(crate) struct Prepared {
     geometry: Option<retail_geometry::FlatCourse>,
     seed: i32,
     sk: Vec<u32>,
+    debug_scratch: bool,
 }
 
 impl Prepared {
@@ -473,6 +489,7 @@ impl Prepared {
             geometry: None,
             seed: 0,
             sk: Vec::new(),
+            debug_scratch: false,
         }
     }
 }
@@ -504,6 +521,7 @@ fn prepare(
         geometry: None,
         seed: seed_i32,
         sk: Vec::new(),
+        debug_scratch: false,
     });
     if horses.is_empty() || horses.len() > RACE_MAXR {
         return flagged("roster size outside the kernel's range");
@@ -570,12 +588,20 @@ fn prepare(
     pd[PI_DISTANCE] = distance;
     pd[PC_FIRST_MOVE_POINT] = first_move;
     pd[PD_DTYPE] = course.get_i64("distanceType")? as f64;
+    // The final-corner half window, NaN meaning "no window" exactly like the
+    // engine's geometry-less Option making the condition false.
+    pd[PD_FC_HALF0] = f64::NAN;
+    pd[PD_FC_HALF1] = f64::NAN;
 
     if root.get("experimentalRetailGeometry").and_then(Value::as_bool) == Some(true) {
         // first_move_lane_point drives the lane machine when geometry is on,
         // so the registry carries it beside the flattened tables.
         let (flat, first_move) = registry.course(course_id, distance as f32)?;
         pd[PC_FIRST_MOVE_POINT] = f64::from(first_move);
+        if let Some((h0, h1)) = flat.final_corner_half {
+            pd[PD_FC_HALF0] = f64::from(h0);
+            pd[PD_FC_HALF1] = f64::from(h1);
+        }
         geometry = Some(flat);
     }
 
@@ -631,7 +657,7 @@ fn prepare(
             css: css.clone(),
         });
     }
-    Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words })
+    Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, debug_scratch: false })
 }
 
 /// Runs every request end to end on the gated device. Races whose domain the
@@ -821,6 +847,7 @@ impl RaceContext {
             ce_end: vec![0f32],
             ce_id: vec![0i32],
             ce_flags: vec![0u32],
+            final_corner_half: None,
         });
     }
     let tables = crate::geometry::course_tables(&table_sets);
@@ -927,6 +954,19 @@ impl RaceContext {
         b_events.cmd().read(&mut events_all).enq().map_err(|e| e.to_string())?;
         b_frames.cmd().read(&mut frames_all).enq().map_err(|e| e.to_string())?;
     }
+    // The skill scratch readback stays off the normal path: the kernel leaves
+    // the merged windows and the record state there, and a divergence hunt
+    // asks for them per race through `run_with_skill_scratch`.
+    let want_sk = m > 0 && prepared.iter().any(|p| p.debug_scratch);
+    let mut skd_all: Vec<f64> = Vec::new();
+    let mut sks_all: Vec<u32> = Vec::new();
+    if want_sk {
+        skd_all = vec![0f64; m * SRL_WORDS];
+        sks_all = vec![0u32; m * SCR_U_WORDS];
+        b_scr_d.cmd().read(&mut skd_all).enq().map_err(|e| e.to_string())?;
+        b_scr_u.cmd().read(&mut sks_all).enq().map_err(|e| e.to_string())?;
+        queue.finish().map_err(|e| e.to_string())?;
+    }
 
     let mut races: Vec<RaceGpu> = Vec::with_capacity(prepared.len());
     let mut slot = 0usize;
@@ -949,6 +989,7 @@ impl RaceContext {
             lss_all: Vec::new(),
             events: Vec::new(),
             debug_pace: Vec::new(),
+            debug_sk: None,
         };
         if race.host_fallback.is_none() && timing.is_none() {
             let st = &status[slot * ST_STRIDE..][..ST_STRIDE];
@@ -982,6 +1023,14 @@ impl RaceContext {
                             v
                         })
                         .collect();
+                }
+                if race.debug_scratch {
+                    let d = (slot - 1) * SRL_WORDS + SRL_SKD;
+                    let u = (slot - 1) * SCR_U_WORDS + SCR_SK;
+                    out.debug_sk = Some(SkillScratch {
+                        skd: skd_all[d..d + SK_RMAX * SKD_STRIDE].to_vec(),
+                        sks: sks_all[u..u + SK_RMAX * SKR_STRIDE].to_vec(),
+                    });
                 }
                 out.finish_step = read_f64(st, ST_FINISH0);
                 out.finish_raw = read_f64(st, ST_FINISH0 + 2);
@@ -1027,6 +1076,20 @@ pub fn run_with_snapshot(
         if debug_tick > 0 && p.ri.len() > RI_DEBUG_TICK {
             p.ri[RI_DEBUG_TICK] = debug_tick as u32;
         }
+        prepared.push(p);
+    }
+    Ok(ctx.run_prepared(&mut prepared, None)?.0)
+}
+
+/// Diagnostic version of `run`: read every race's kernel skill scratch back
+/// into `RaceGpu::debug_sk` after the launch, so a divergence hunt can read
+/// the merged trigger windows and the record state the scan gate used.
+pub fn run_with_skill_scratch(requests: &[(String, i64)]) -> Result<RaceRun, String> {
+    let mut ctx = RaceContext::open()?;
+    let mut prepared: Vec<Prepared> = Vec::with_capacity(requests.len());
+    for (request, seed) in requests {
+        let mut p = ctx.prepare(request, *seed)?;
+        p.debug_scratch = true;
         prepared.push(p);
     }
     Ok(ctx.run_prepared(&mut prepared, None)?.0)

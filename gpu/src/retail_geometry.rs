@@ -37,6 +37,7 @@ pub struct FlatCourse {
     pub ce_end: Vec<f32>,
     pub ce_id: Vec<i32>,
     pub ce_flags: Vec<u32>,
+    pub final_corner_half: Option<(f32, f32)>,
 }
 
 /// Clears the course's overrun animation, mirroring the engine test that
@@ -90,6 +91,7 @@ pub fn flatten_course(geometry: &CourseGeometry) -> FlatCourse {
         ce_end: Vec::new(),
         ce_id: Vec::new(),
         ce_flags: Vec::new(),
+        final_corner_half: geometry.final_corner_half,
     };
     push_segments(
         &geometry.segments,

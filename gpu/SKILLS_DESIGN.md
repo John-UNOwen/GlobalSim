@@ -27,6 +27,14 @@ race.cl per tick
                                          application points, see below)
 ```
 
+Before the loop runs, one `skills_scan` x2 plus `sk_columns` pass runs with the
+race clock at 0 and the course events not ready. The engine activates the
+immediate records in the solver constructor, before its first timer step, so a
+record armed there gives up its effect one tick earlier than one armed by the
+loop's first scan. The kernel's pre-loop pass reproduces that ordering, which is
+what puts a 2.4 s immediate effect's expiry on the engine's tick instead of one
+tick later.
+
 Initialization mirrors `retail_initialization.rs::initialize()`: the trigger
 samplers, the wisdom lottery and the start-delay multiplier run inside
 `im_init` (initialization.cl) before the existing rushing and section draws, in
@@ -129,6 +137,8 @@ tiers, 3 and 7 are the retail HP tiers). Modifier dispatch follows retail
   target-receiver list.
 - `Accel(31)`: same for the ordered accel-receiver list.
 - `CurrentSpeed(21)`: same for the current-speed list (non-natural).
+- `CurrentSpeedWithNaturalDeceleration(22)`: same list, marked natural, so its
+  fold sits in the natural group and its expiry is more than a removal (below).
 
 The lists mirror `AdditiveReceiver`: registration-order folds, in-place token
 update on refire, order-preserving token removal at expiry.
@@ -147,6 +157,17 @@ update on refire, order-preserving token removal at expiry.
   `observed = (f32(nat_fold) + f32(ord_fold)) + speed` in f32, then clamped to
   [min, cap]. SD_CS keeps the raw speed, since HP and the accel branch read
   `current_speed`, not the folded value.
+- Natural current-speed expiry (`race_solver.rs:1967`): the expired modifier
+  also lands in `modifiers_one_frame_accel`, and the speed chain reads
+  `current_speed` plus that accumulator as its one input, then the retail step
+  clears the accumulator. In the kernel `skills_expire_current` drains the
+  current-speed tokens from the tail of the activation order into `SD_OFA` (the
+  reverse order matches the engine's reverse list drain, which is the sum order
+  when a runner loses two of them in one tick), and `race_step` in race.cl reads
+  the sum into `current` and clears it at the end of a step that ran. The
+  impulse is what keeps the speed decaying toward the lower target over several
+  ticks instead of snapping to it, and a gated rest keeps it for the next tick,
+  as the engine's early return does.
 - Lane and roster target (`retail_target_speed_with_current_skills`,
   `race_solver_retail.rs:740`): `apply_additive(f32(SD_TS), cur_ord_f32s)`,
   recomputed per tick after prepare, because the list state changes between
@@ -168,6 +189,14 @@ wisdom rolls (paired). Chained substreams re-key from the parent state exactly
 as `RetailRandom::substream` does (FNV-1a-64 plus avalanche, seed is
 `hash >> 33` as i32).
 
+A sampled draw is spent for every random trigger term in roster order, in
+`im_init` before any region is judged, exactly as `retail_initialization::initialize`
+does. That includes a record the compiler marks dead (its region chain collapses):
+it still consumes its sampled draw so the shared solo stream stays aligned for every
+later term and runner, then stays inert. Only `is_finalcorner_random` with no
+qualifying corner takes no draw, since the engine draws nothing there. A dead record
+that skipped its draw shifts the whole stream after it and corrupts start delay.
+
 ## Condition-support matrix
 
 Engine vocabulary from the `c.insert` list in `activation_conditions.rs`.
@@ -185,21 +214,27 @@ condition whose comparison is not registered for its operator falls to the
 | name | fold |
 |---|---|
 | always | TRUE/FALSE (`always==1` true, any other comparison false) |
-| phase | static window `[phase_start, phase_end)`, +10 m end for the fudge list; `==,<,<=,>,>=` |
-| distance_rate | static window from `distance*arg/100`; `<=,>=` |
-| remain_distance | static window from `distance-arg`; `==,<=,>=` |
-| furlong | static window `[(arg-1)*201.168, arg*201.168)`; `==` |
-| is_finalcorner | static window split at the last corner start; `==0`/`==1` |
-| is_last_straight | static window over the last straight, course must have straights; `==1` |
-| is_last_straight_onetime | static window `[ls.start, ls.start+10)` plus the dynamic FEAT_LS_ENTRY entry latch; `==1` |
+| phase | static window `[phase_start, phase_end)`, +10 m end for the fudge list, `==,<,<=,>,>=` |
+| distance_rate | static window from `distance*arg/100`, `<=,>=` |
+| remain_distance | static window from `distance-arg`, `==,<=,>=` |
+| furlong | static window `[(arg-1)*201.168, arg*201.168)`, `==` |
+| is_finalcorner | static window split at the last corner start, `==0`/`==1` |
+| is_last_straight | static window over the last straight, course must have straights, `==1` |
+| is_last_straight_onetime | static window `[ls.start, ls.start+10)` plus the dynamic FEAT_LS_ENTRY entry latch, `==1` |
 | corner | static windows over the sorted corner list: `!=0` the corner runs, `==0` the complement gaps, `==num` every 4th corner from index `len+num-5` |
 | slope | static windows over the sorted slope list: `==0` the gaps, `==1` up slopes, `==2` down slopes |
 | order | dynamic FEAT_ORDER, 1-based rank |
 | order_rate | dynamic FEAT_ORDER_RATE, rank versus `round(n*rate/100)` |
-| hp_per | dynamic FEAT_HP_PER, `trunc(f64(f32(hp)/f32(max))*100)`; `<=,>=` only |
+| hp_per | dynamic FEAT_HP_PER, `trunc(f64(f32(hp)/f32(max))*100)`, `<=,>=` only |
 | is_overtake | dynamic FEAT_IS_OVERTAKE, lane target list non-empty |
-| is_temptation | dynamic FEAT_IS_TEMPTATION, kakari flag; `==` only |
+| is_temptation | dynamic FEAT_IS_TEMPTATION, kakari flag, `==` only |
 | all_corner_random, straight_random, down_slope_random, up_slope_random | sampled term (`==1`), init-time windows through the scan gate |
+| phase_random, phase_firsthalf_random, phase_laterhalf_random | sampled term (`==0..4` phase index), window from the six-way phase split |
+| is_finalcorner_random | sampled term, window over the qualifying final corner (an id >= 4 starting within the last 1000 m), else no draw and the record stays inert |
+
+One sampled term per record is required. A second random term in one condition flags
+the race (`skill {sid} has more than one random term`), and a random name outside the
+eight samplers above refuses by name.
 
 Not yet ported (fallback-flagged, plan order in the README):
 
@@ -220,14 +255,12 @@ Not yet ported (fallback-flagged, plan order in the README):
   flag the race: `is_finalcorner_laterhalf`, the static context values
   (`course_distance`, `distance_type`, `ground_condition`, `ground_type`,
   `grade`, `is_dirtgrade`, `track_id`, `weather`, `season`, `time`,
-  `running_style`, `post_number`), and the wider sampled family
-  (`corner_random`, `is_finalcorner_random`, `last_straight_random`,
+  `running_style`, `post_number`), and the remaining sampled family
+  (`corner_random`, `last_straight_random`,
   `phase_straight_random`, `random_lot`)
-- effects outside 27, 31 and 21: `Recovery(9)` (application point known),
-  `22` natural deceleration (expires into `modifiers_one_frame_accel` first),
-  `13` ExtendKakari, `10` and `14` start delay (init already applies them),
-  `28` lane move speed, `35`, `11`, `12` lane goals, `32` AllStatusUp, `36`
-  and `37` random skill activation
+- effects outside the accepted set 1, 9, 10, 21, 22, 27, 28 and 31
+  (`skills_compile.rs` refuses the rest by kind): `13` ExtendKakari, `35`, `11`,
+  `12` lane goals, `32` AllStatusUp, `36` and `37` random skill activation
 - structural: multi-alternative skills (`alternatives` longer than 1), a
   non-empty `precondition`, `value_usage` in {0,8,9,11,14} (rng draws and
   green-tag counts), `duration_usage` 4 (the delayed running-instance path),

@@ -13,7 +13,7 @@
 
 #![cfg(feature = "race")]
 
-use globalsim_gpu::{dep_cpu, race_exec};
+use globalsim_gpu::{dep_cpu, json, race_exec};
 
 const SKILLS: [i64; 6] = [200361, 200341, 200333, 10071, 100401, 110591];
 const COURSES: [i32; 2] = [10504, 10510];
@@ -221,5 +221,45 @@ fn unsupported_construct_flags_the_whole_race() {
             );
         }
         None => panic!("the patched race ran on the kernel without flagging"),
+    }
+}
+
+/// A condition naming a random trigger the kernel has no sampler for must
+/// refuse the whole race by that name, not run on a wrong or empty window. The
+/// merged skill set the app ships carries several such terms (random_lot,
+/// distance_rate_after_random, corner_random), so a refusal names the term.
+#[test]
+fn unsupported_random_term_refuses_by_name() {
+    let base = v77_line();
+    let geometry =
+        std::fs::read_to_string(repo_file("data/course_geometry/10504.json")).expect("geometry file");
+    globalsim::register_course_geometry(10504, geometry);
+    // Rewrite one otherwise-accepted skill's condition to an unported random
+    // term so the only reason to flag is the term name itself.
+    let mut value = json::parse(&base).expect("base parses");
+    if let json::Value::Object(map) = &mut value {
+        if let Some(json::Value::Object(sd)) = map.get_mut("skillData") {
+            if let Some(json::Value::Object(entry)) = sd.get_mut("200333") {
+                if let Some(json::Value::Array(alts)) = entry.get_mut("alternatives") {
+                    if let Some(json::Value::Object(alt)) = alts.get_mut(0) {
+                        alt.insert(
+                            "condition".into(),
+                            json::Value::String("random_lot==1".into()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let mut patched = String::new();
+    json::to_string_into(&value, &mut patched);
+    let request = race_exec::skills_request(&patched, 10504, 1, 0, &SKILLS, None).expect("patched request");
+    let out = race_exec::run(&[(request.clone(), 1i64)]).expect("kernel run");
+    match &out.races[0].fallback {
+        Some(reason) => assert!(
+            reason.contains("random_lot"),
+            "fallback reason should name the unsupported term, got {reason}"
+        ),
+        None => panic!("a race with an unported random term ran on the kernel"),
     }
 }

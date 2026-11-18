@@ -55,6 +55,7 @@ Suites:
 | `paired_race_gate` (gpu + initialization + geometry + race) | See "Paired mode" below |
 | `zero_skill_gate` (gpu + initialization + geometry + race) | See "Zero-skill mixed-style fields" below |
 | `skills_gate` (gpu + initialization + geometry + race) | See "Skills port" below |
+| `app_preset_gate` (gpu + initialization + geometry + race) | Real app mob-preset jobs: zero-fallback compile gate and frame identity both green (see "App mob-preset payloads") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 
 ### What the gate proves
@@ -636,6 +637,31 @@ equal tick counts, zero fallback.
 - `unsupported_construct_flags_the_whole_race`: one skill's `durationUsage`
   patched to 4 (the delayed running-instance path) flags the race before any
   launch, and the reason names `duration_usage 4`.
+- `unsupported_random_term_refuses_by_name`: one skill's condition rewritten to
+  `random_lot==1` (a sampled term with no ported sampler) refuses the race, and
+  the reason names `random_lot`, so an unported random term never runs on an
+  empty or wrong window.
+
+### App mob-preset payloads
+
+The app sends each mob's skill list as bare skill-id strings and carries the
+skill definitions only as a separate merged `skills.json`, so the compiler must
+accept the bare-string form, take the definitions from the request `skillData`,
+and refuse any skill name it cannot lower rather than guess. `app_preset_gate`
+replays the two real job payloads in `gpu/testdata/` (courses 10504 and 10604,
+seeds 1..3) against the CPU engine.
+
+- `mob_preset_jobs_compile_without_fallback` (green): all 12 preset races reach
+  the kernel with zero fallback, and at least one race activates a skill, so the
+  identity gate below is not vacuous.
+- `mob_preset_jobs_replay_bit_exact` (green): every frame column and every
+  `finishTimeRaw` of the 12 preset races matches the CPU engine through
+  `to_bits()`. Two engine behaviours had to be ported for that, the solver
+  constructor's activation pass for immediate records, which fixes an immediate
+  effect giving up its modifier one tick early, and the one-tick speed offset a
+  natural-deceleration current speed (effect type 22) leaves when it expires,
+  which fixes a runner snapping to its lower target instead of decaying to it.
+  Both are written up in `SKILLS_DESIGN.md`.
 
 ### Cost
 

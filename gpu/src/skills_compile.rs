@@ -11,7 +11,7 @@
 
 use crate::json::Value;
 
-pub const SK_STRIDE: usize = 4480;
+pub const SK_STRIDE: usize = 34112;
 
 pub const SK_NREC: usize = 0;
 pub const SK_NPROG: usize = 1;
@@ -21,33 +21,38 @@ pub const SK_NTAG: usize = 4;
 pub const SK_NSTR: usize = 5;
 pub const SK_NCOR: usize = 6;
 pub const SK_NSLOPE: usize = 7;
+pub const SK_NTERM: usize = 8;
 
 pub const SK_STRAIGHTS: usize = 16;
 pub const SK_CORNERS: usize = 40;
 pub const SK_SLOPES: usize = 64;
 pub const SK_RECORDS: usize = 112;
-pub const SK_EFFECTS: usize = 752;
-pub const SK_PROGRAMS: usize = 1232;
-pub const SK_REGIONS: usize = 2512;
-pub const SK_TAGS: usize = 3536;
-pub const SK_TERMS: usize = 4048;
+pub const SK_EFFECTS: usize = 4272;
+pub const SK_PROGRAMS: usize = 6192;
+pub const SK_ARMS: usize = 18480;
+pub const SK_REGIONS: usize = 20528;
+pub const SK_TERMS: usize = 28720;
+pub const SK_TAGS: usize = 30000;
 
-pub const SK_RSTRIDE: usize = 20;
+pub const SK_RSTRIDE: usize = 26;
 pub const SK_ESTRIDE: usize = 10;
 pub const SK_PSTRIDE: usize = 4;
 pub const SK_GSTRIDE: usize = 4;
 pub const SK_MSTRIDE: usize = 8;
+pub const SK_ASTRIDE: usize = 8;
 
-pub const SK_RMAX: usize = 32;
-pub const SK_EMAX: usize = 48;
-pub const SK_PMAX: usize = 320;
-pub const SK_GMAX: usize = 256;
-pub const SK_TMAX: usize = 512;
-pub const SK_MMAX: usize = 48;
+pub const SK_RMAX: usize = 160;
+pub const SK_EMAX: usize = 192;
+pub const SK_PMAX: usize = 3072;
+pub const SK_GMAX: usize = 2048;
+pub const SK_TMAX: usize = 4096;
+pub const SK_MMAX: usize = 160;
+pub const SK_AMAX: usize = 256;
 pub const SK_STRMAX: usize = 12;
 pub const SK_CORMAX: usize = 12;
 pub const SK_SLOPEMAX: usize = 16;
 pub const SK_REGMAX: usize = 16;
+pub const SK_ARMMAX: usize = 2;
 
 pub const SK_FLAG_RETAIN: u32 = 1;
 pub const SK_FLAG_WISDOM: u32 = 2;
@@ -58,6 +63,10 @@ pub const SK_TERM_ALL_CORNER: u32 = 0;
 pub const SK_TERM_STRAIGHT: u32 = 1;
 pub const SK_TERM_DOWN_SLOPE: u32 = 2;
 pub const SK_TERM_UP_SLOPE: u32 = 3;
+pub const SK_TERM_PHASE_RANDOM: u32 = 4;
+pub const SK_TERM_PHASE_FIRSTHALF: u32 = 5;
+pub const SK_TERM_PHASE_LATERHALF: u32 = 6;
+pub const SK_TERM_FC_RANDOM: u32 = 7;
 
 pub const OP_TRUE: u32 = 0;
 pub const OP_AND: u32 = 1;
@@ -70,6 +79,27 @@ pub const FEAT_HP_PER: u32 = 3;
 pub const FEAT_IS_OVERTAKE: u32 = 4;
 pub const FEAT_IS_TEMPTATION: u32 = 5;
 pub const FEAT_LS_ENTRY: u32 = 6;
+pub const FEAT_PHASE: u32 = 7;
+pub const FEAT_CORNER: u32 = 8;
+pub const FEAT_FINALE: u32 = 9;
+pub const FEAT_FC_HALF: u32 = 10;
+pub const FEAT_DIST_RATE: u32 = 11;
+pub const FEAT_REMAIN: u32 = 12;
+pub const FEAT_CLOCK: u32 = 13;
+pub const FEAT_TEMPT: u32 = 14;
+pub const FEAT_ACT0: u32 = 15;
+pub const FEAT_ACT1: u32 = 16;
+pub const FEAT_BSIDE: u32 = 17;
+pub const FEAT_IFNEAR: u32 = 18;
+pub const FEAT_BHNEAR: u32 = 19;
+pub const FEAT_ORDER_DELTA: u32 = 20;
+pub const FEAT_OUT50: u32 = 21;
+pub const FEAT_NEAR: u32 = 22;
+pub const FEAT_BASH_BEHIND: u32 = 23;
+pub const FEAT_BASH_INFRONT: u32 = 24;
+pub const FEAT_LASTSPURT: u32 = 25;
+pub const FEAT_BHNEAR1: u32 = 26;
+pub const FEAT_SLOPE: u32 = 27;
 
 /// One race's compiled table. `reason` is Some when the race must run on the
 /// CPU, naming the first construct the kernel cannot evaluate.
@@ -88,6 +118,7 @@ pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
         nreg: 0,
         neff: 0,
         nterm: 0,
+        narm: 0,
     };
     let skill_data = match root.get("skillData") {
         Some(v) => v,
@@ -114,24 +145,55 @@ pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
         // The engine's skill_enabled is keyed by skill id, so a runner that
         // lists one id twice maps enablement differently than independent
         // kernel records would. Flag the race instead of guessing.
-        let mut seen_ids: Vec<i64> = Vec::new();
+        let mut seen_ids: Vec<String> = Vec::new();
         for entry in list {
-            let Some(sid) = entry.get("skillId").and_then(Value::as_i64) else {
-                c.unsupported("skill entry needs a numeric skillId".to_string());
-                return c.finish();
+            let (sid, level) = match normalize_skill_entry(entry) {
+                Some(v) => v,
+                None => {
+                    c.unsupported("skill entry needs a numeric skillId".to_string());
+                    return c.finish();
+                }
             };
             if seen_ids.contains(&sid) {
                 c.unsupported(format!("skill {sid} appears twice for one runner"));
                 return c.finish();
             }
-            seen_ids.push(sid);
-            c.pack_skill(entry, r, skill_data, course);
+            seen_ids.push(sid.clone());
+            c.pack_skill(&sid, level, r, skill_data, course, horse);
             if c.reason.is_some() {
                 return c.finish();
             }
         }
     }
     c.finish()
+}
+
+/// `skill_id_and_level` in the engine's request parser: an object carries a
+/// string or numeric skillId with a level, a bare string or number is a
+/// level 1 skill.
+fn normalize_skill_entry(entry: &Value) -> Option<(String, i64)> {
+    if let Some(obj) = entry.as_object() {
+        let id = if let Some(s) = obj.get("skillId").and_then(Value::as_str) {
+            s.to_string()
+        } else if let Some(n) = obj.get("skillId").and_then(Value::as_f64) {
+            (n as i64).to_string()
+        } else {
+            return None;
+        };
+        let level = obj
+            .get("level")
+            .and_then(Value::as_f64)
+            .map(|n| n as i64)
+            .filter(|&n| n != 0)
+            .unwrap_or(1);
+        Some((id, level))
+    } else if let Some(s) = entry.as_str() {
+        Some((s.to_string(), 1))
+    } else if let Some(n) = entry.as_f64() {
+        Some(((n as i64).to_string(), 1))
+    } else {
+        None
+    }
 }
 
 struct Compiler {
@@ -143,6 +205,7 @@ struct Compiler {
     nreg: usize,
     neff: usize,
     nterm: usize,
+    narm: usize,
 }
 
 fn f64_words(v: f64) -> [u32; 2] {
@@ -186,22 +249,6 @@ fn phase_start(distance: f64, phase: i64) -> f64 {
         _ => f64::NAN,
     }
 }
-
-fn phase_end(distance: f64, phase: i64) -> f64 {
-    match phase {
-        0 => distance * 1.0 / 6.0,
-        1 => distance * 2.0 / 3.0,
-        2 => distance * 5.0 / 6.0,
-        3 => distance,
-        _ => f64::NAN,
-    }
-}
-
-/// PHASE_FUDGE_SKILLS in activation_conditions.rs, the ids whose phase==
-/// region end stretches by ten metres.
-const PHASE_FUDGE_SKILLS: [&str; 9] = [
-    "100591", "900591", "110261", "910261", "110191", "910191", "120451", "920451", "101502121",
-];
 
 /// Course geometry the region transforms read, in the engine's raw JSON
 /// order. The engine reads corners, straights and slopes unsorted and
@@ -278,12 +325,14 @@ impl Compiler {
         self.words[SK_NREG] = self.nreg as u32;
         self.words[SK_NEFF] = self.neff as u32;
         self.words[SK_NTAG] = self.tags.len().min(SK_TMAX) as u32;
-        if self.tags.len() > SK_TMAX || self.nreg > SK_GMAX {
-            if self.tags.len() > SK_TMAX {
-                self.unsupported("skill table overflow: too many tag bytes");
-            } else {
-                self.unsupported("skill table overflow: too many regions");
-            }
+        self.words[SK_NTERM] = self.nterm as u32;
+        if self.tags.len() > SK_TMAX
+            || self.nprog > SK_PMAX
+            || self.nreg > SK_GMAX
+            || self.nterm > SK_MMAX
+            || self.narm > SK_AMAX
+        {
+            self.unsupported("skill table overflow");
             self.words[SK_NREC] = 0;
         }
         // Four tag bytes per word, little endian, so the kernel can view the
@@ -336,10 +385,23 @@ impl Compiler {
         }
     }
 
-    fn pack_skill(&mut self, entry: &Value, runner: usize, skill_data: &Value, course: &Value) {
-        let sid = entry.get("skillId").and_then(Value::as_i64).unwrap_or(0) as u32;
-        let level = entry.get("level").and_then(Value::as_i64).unwrap_or(1);
-        let def = match skill_data.get(&sid.to_string()) {
+    fn pack_skill(
+        &mut self,
+        sid: &str,
+        level: i64,
+        runner: usize,
+        skill_data: &Value,
+        course: &Value,
+        horse: &Value,
+    ) {
+        let sid_num = match sid.parse::<u32>() {
+            Ok(v) => v,
+            Err(_) => {
+                self.unsupported(format!("skill id {sid} is not numeric"));
+                return;
+            }
+        };
+        let def = match skill_data.get(sid) {
             Some(d) => d,
             None => {
                 self.unsupported(format!("skillData has no entry for skill {sid}"));
@@ -354,10 +416,6 @@ impl Compiler {
             }
         };
         let alt = &alts[0];
-        if !alt.get("precondition").and_then(Value::as_str).unwrap_or("").is_empty() {
-            self.unsupported(format!("skill {sid} has a precondition column"));
-            return;
-        }
         let rarity = match def.get("rarity").and_then(Value::as_i64).unwrap_or(0) {
             v @ (1 | 2 | 6) => v as u32,
             3..=5 => 3,
@@ -389,122 +447,302 @@ impl Compiler {
             }
         };
         let g = Geometry::new(course);
-        let leaves: Vec<Leaf> = match terms.iter().map(|t| classify(t, sid, &g)).collect() {
+        let statics = Statics::new(course, horse);
+        let leaves: Vec<Leaf> = match terms.iter().map(|t| classify(t, &g, &statics)).collect() {
             Ok(l) => l,
             Err(why) => {
                 self.unsupported(format!("skill {sid} condition '{condition}': {why}"));
                 return;
             }
         };
-        let sampled_count = leaves.iter().filter(|l| matches!(l, Leaf::Sampled)).count();
-        if sampled_count > 1 {
-            self.unsupported(format!("skill {sid} has more than one random term"));
-            return;
-        }
-        if terms.iter().any(|t| t.or) {
-            let or_ok = leaves
-                .iter()
-                .all(|l| matches!(l, Leaf::Dynamic { .. } | Leaf::True));
-            if !or_ok {
+
+        // The builder evaluates a precondition over the whole course, clips
+        // the main chain to the first precondition region's start, and checks
+        // precondition membership plus its dynamics as a latched gate.
+        let mut dead = false;
+        let mut seed = vec![(0.0f64, g.distance)];
+        let mut pre_n = 0usize;
+        let mut pre_reg_b = self.nreg;
+        let mut pre_prog_b = self.nprog;
+        let mut pre_prog_len = 0usize;
+        let pre_text = alt.get("precondition").and_then(Value::as_str).unwrap_or("");
+        if !pre_text.is_empty() {
+            let pre_terms = match parse_terms(pre_text) {
+                Ok(t) => t,
+                Err(why) => {
+                    self.unsupported(format!("skill {sid} precondition '{pre_text}': {why}"));
+                    return;
+                }
+            };
+            let pre_leaves: Vec<Leaf> =
+                match pre_terms.iter().map(|t| classify(t, &g, &statics)).collect() {
+                    Ok(l) => l,
+                    Err(why) => {
+                        self.unsupported(format!("skill {sid} precondition '{pre_text}': {why}"));
+                        return;
+                    }
+                };
+            if pre_leaves.iter().any(|l| matches!(l, Leaf::Sampled)) {
                 self.unsupported(format!(
-                    "skill {sid} or-condition mixing region or random terms is not ported"
+                    "skill {sid} precondition random term is not ported"
                 ));
+                return;
+            }
+            let mut pre_regions: Vec<(f64, f64)> = vec![(0.0, g.distance)];
+            for leaf in pre_leaves.iter() {
+                let next = match leaf {
+                    Leaf::True | Leaf::Dynamic { .. } => pre_regions.clone(),
+                    Leaf::False => Vec::new(),
+                    Leaf::Sampled => unreachable!(),
+                    Leaf::Region(list) | Leaf::RegionDyn(list, _) => {
+                        rmap_multi(&pre_regions, |r| list.iter().map(|b| intersect(*r, *b)).collect())
+                    }
+                };
+                if next.len() > SK_REGMAX {
+                    self.unsupported(format!(
+                        "skill {sid} precondition exceeds {SK_REGMAX} regions"
+                    ));
+                    return;
+                }
+                pre_regions = next;
+            }
+            if pre_regions.is_empty() {
+                // The builder skips the whole alternative: continue, with no
+                // record to install.
+                dead = true;
+            } else {
+                let push = self.push_regions(&pre_regions);
+                pre_n = push.0;
+                pre_reg_b = push.1;
+                seed = vec![(pre_regions[0].0, g.distance)];
+                let base = self.nprog;
+                match emit_program(self, &pre_terms, &pre_leaves) {
+                    Ok(len) => {
+                        pre_prog_b = base;
+                        pre_prog_len = len;
+                    }
+                    Err(why) => {
+                        self.nprog = base;
+                        self.unsupported(format!("skill {sid} precondition: {why}"));
+                        return;
+                    }
+                }
+            }
+            if self.reason.is_some() {
                 return;
             }
         }
 
-        // Region chain, in parse order: the whole course narrowed by each
-        // static term. A random term splits the chain, and the kernel chains
-        // the sampled windows at their engine position.
-        let mut regions: Vec<(f64, f64)> = vec![(0.0, g.distance)];
-        let mut pre_regions: Vec<(f64, f64)> = Vec::new();
-        let mut dead = false;
-        for (t, leaf) in terms.iter().zip(leaves.iter()) {
-            let next = match leaf {
-                Leaf::True | Leaf::Dynamic { .. } => regions.clone(),
-                Leaf::False => Vec::new(),
-                Leaf::Sampled => {
-                    pre_regions = regions.clone();
-                    regions.clone()
-                }
-                Leaf::Region(list) | Leaf::LsEntry(list) => {
-                    if !sorted_by_start(list) && list.len() > 1 {
-                        self.unsupported(format!(
-                            "skill {sid} condition '{}' needs a sorted course region list",
-                            t.name
-                        ));
-                        return;
-                    }
-                    rmap_multi(&regions, |r| list.iter().map(|b| intersect(*r, *b)).collect())
-                }
-            };
-            if next.len() > SK_REGMAX {
-                self.unsupported(format!("skill {sid} condition exceeds {SK_REGMAX} regions"));
-                return;
-            }
-            regions = next;
-            if regions.is_empty() {
-                dead = true;
-                break;
+        // A top-level '@' group becomes an arm: its own region chain and
+        // dynamic program. At runtime the activation passes when the position
+        // is in the merged window list and one arm's membership and program
+        // hold, mirroring the Or closure the engine's apply builds.
+        let mut groups: Vec<(usize, usize)> = Vec::new();
+        for (i, t) in terms.iter().enumerate() {
+            if i == 0 || t.or {
+                groups.push((i, i + 1));
+            } else {
+                groups.last_mut().unwrap().1 = i + 1;
             }
         }
-        let sampled = sampled_count == 1;
-        if sampled {
-            let t = terms.iter().find(|t| t.name.contains("random")).unwrap();
+        if groups.len() > SK_ARMMAX {
+            self.unsupported(format!(
+                "skill {sid} condition has more than {} arms",
+                SK_ARMMAX
+            ));
+            return;
+        }
+        if self.narm + groups.len().max(1) > SK_AMAX {
+            self.unsupported("skill table overflow: too many arms");
+            return;
+        }
+        let mut arms: Vec<([Vec<(f64, f64)>; 2], [usize; 2], usize)> = Vec::new();
+        let mut sampled_count = 0usize;
+        for (start, end) in groups.iter() {
+            let arm_sampled =
+                leaves[*start..*end].iter().filter(|l| matches!(l, Leaf::Sampled)).count();
+            sampled_count += arm_sampled;
+            let mut regions = seed.clone();
+            let mut pre_split: Vec<(f64, f64)> = Vec::new();
+            for (t, leaf) in terms[*start..*end].iter().zip(leaves[*start..*end].iter()) {
+                let next = match leaf {
+                    Leaf::True | Leaf::Dynamic { .. } => regions.clone(),
+                    Leaf::False => Vec::new(),
+                    Leaf::Sampled => {
+                        pre_split = regions.clone();
+                        regions.clone()
+                    }
+                    Leaf::Region(list) | Leaf::RegionDyn(list, _) => {
+                        if !sorted_by_start(list) && list.len() > 1 {
+                            self.unsupported(format!(
+                                "skill {sid} condition '{}' needs a sorted course region list",
+                                t.name
+                            ));
+                            return;
+                        }
+                        rmap_multi(&regions, |r| list.iter().map(|b| intersect(*r, *b)).collect())
+                    }
+                };
+                if next.len() > SK_REGMAX {
+                    self.unsupported(format!("skill {sid} condition exceeds {SK_REGMAX} regions"));
+                    return;
+                }
+                regions = next;
+                if regions.is_empty() {
+                    break;
+                }
+            }
+            let sampled_flag = arm_sampled.min(1) | if regions.is_empty() { 2 } else { 0 };
+            if regions.is_empty() {
+                // Keep the collapsed arm as a draw-only entry: the engine
+                // still samples its random term at startup, and an empty
+                // chain never passes the runtime membership gate.
+                arms.push(([pre_split, regions], [sampled_flag, 0], 0));
+                continue;
+            }
+            arms.push(([pre_split, regions], [sampled_flag, 0], 0));
+        }
+        if !arms.is_empty() && arms.iter().all(|a| a.1[0] & 2 != 0) {
+            // Every arm collapsed, so the union is empty and the builder
+            // skips the alternative.
+            dead = true;
+        }
+        if sampled_count > 1 {
+            self.unsupported(format!("skill {sid} has more than one random term"));
+            return;
+        }
+
+        let mut term_word = u32::MAX;
+        let mut skip_draw = false;
+        if sampled_count == 1 {
+            let mut found: Option<(usize, &Term)> = None;
+            for (ai, arm) in arms.iter().enumerate() {
+                if arm.1[0] & 1 != 0 {
+                    let name = terms[groups[ai].0..groups[ai].1]
+                        .iter()
+                        .find(|t| t.name.contains("random"))
+                        .unwrap();
+                    found = Some((ai, name));
+                }
+            }
+            let (arm_at, t) = found.unwrap();
             let kind = match t.name.as_str() {
                 "all_corner_random" => SK_TERM_ALL_CORNER,
                 "straight_random" => SK_TERM_STRAIGHT,
                 "down_slope_random" => SK_TERM_DOWN_SLOPE,
                 "up_slope_random" => SK_TERM_UP_SLOPE,
-                _ => {
-                    self.unsupported(format!(
-                        "skill {sid} random term '{}' is not ported",
-                        t.name
-                    ));
+                "phase_random" => SK_TERM_PHASE_RANDOM,
+                "phase_firsthalf_random" => SK_TERM_PHASE_FIRSTHALF,
+                "phase_laterhalf_random" => SK_TERM_PHASE_LATERHALF,
+                "is_finalcorner_random" => SK_TERM_FC_RANDOM,
+                other => {
+                    self.unsupported(format!("skill {sid} random term '{other}' is not ported"));
                     return;
                 }
             };
-            if t.op != 0 || t.arg != 1 {
+            let ok_arg = if t.op != 0 {
+                false
+            } else if matches!(
+                kind,
+                SK_TERM_PHASE_RANDOM | SK_TERM_PHASE_FIRSTHALF | SK_TERM_PHASE_LATERHALF
+            ) {
+                (0..=4).contains(&t.arg)
+            } else {
+                t.arg == 1
+            };
+            if !ok_arg {
                 self.unsupported(format!(
-                    "skill {sid} random term needs ==1, got '{}'{}{}",
+                    "skill {sid} random term '{}' needs == with a supported argument, got {}{}",
                     t.name,
                     op_text(t.op),
                     t.arg
                 ));
                 return;
             }
-            if sampled_count == 1
-                && pre_regions.len().max(1) * 4 * regions.len().max(1) > SK_REGMAX
-            {
-                self.unsupported(format!(
-                    "skill {sid} random split exceeds {SK_REGMAX} runtime windows"
-                ));
-                return;
+            let corner_idx = if kind == SK_TERM_FC_RANDOM {
+                match fc_random_index(course, g.distance) {
+                    Some(i) => i as i32,
+                    None => {
+                        // Without a qualifying corner the engine draws no
+                        // window, so this term spends no draw. The record is
+                        // inert: mark it dead but take no sampled draw.
+                        dead = true;
+                        skip_draw = true;
+                        -1
+                    }
+                }
+            } else {
+                -1
+            };
+            if !skip_draw {
+                if self.nterm >= SK_MMAX {
+                    self.unsupported("skill table overflow: too many sampled terms");
+                    return;
+                }
+                let (tag_off, tag_len) = self.tag(&format!("T{sid}:0:condition:{}", t.name));
+                let at = SK_TERMS + SK_MSTRIDE * self.nterm;
+                self.words[at] = kind;
+                self.words[at + 1] = t.arg as u32;
+                self.words[at + 2] = tag_off as u32;
+                self.words[at + 3] = tag_len as u32;
+                self.words[at + 4] = corner_idx as u32;
+                self.nterm += 1;
+                arms[arm_at].1[1] = (self.nterm - 1) as usize;
+                term_word = (self.nterm - 1) as u32;
             }
-            let (tag_off, tag_len) = self.tag(&format!("T{sid}:0:condition:{}", t.name));
-            let at = SK_TERMS + SK_MSTRIDE * self.nterm;
-            self.words[at] = kind;
-            self.words[at + 1] = t.arg as u32;
-            self.words[at + 2] = tag_off as u32;
-            self.words[at + 3] = tag_len as u32;
-            self.nterm += 1;
         }
 
-        // Region storage: a random record stores the pre-split list and the
-        // post-split list, and the kernel chains whole course, sampled
-        // windows, then post list. A non-random record stores the final list
-        // as the post list with the whole course implicit pre list. A dead
-        // record stores nothing.
-        let (n_a, reg_a) = if dead {
-            (0usize, self.nreg)
-        } else if sampled {
-            self.push_regions(&pre_regions)
+        let arms_base = self.narm;
+        let mut arms_len = 1usize;
+        let mut arm0_prog = (0usize, 0usize);
+        let mut arm0_pre = (0usize, 0usize);
+        let mut arm0_post = (0usize, 0usize);
+        if dead {
+            // A dead record still spends its random draw: the engine samples
+            // the random term before any region is evaluated, so flag the one
+            // reserved arm as sampled and point it at the term to keep the
+            // shared stream aligned. The inert chain stays empty.
+            let at = SK_ARMS + SK_ASTRIDE * self.narm;
+            if term_word != u32::MAX {
+                self.words[at + 6] = 1;
+                self.words[at + 7] = term_word;
+            }
+            self.narm += 1;
         } else {
-            (0usize, self.nreg)
-        };
-        let (n_b, reg_b) = if dead { (0usize, self.nreg) } else { self.push_regions(&regions) };
-        if self.reason.is_some() {
-            return;
+            arms_len = arms.len();
+            for (ai, (lists, flags, _)) in arms.iter().enumerate() {
+                let (gs, ge) = groups[ai];
+                let (n_pre, pre_b) =
+                    if flags[0] == 1 { self.push_regions(&lists[0]) } else { (0, self.nreg) };
+                let (n_post, post_b) = self.push_regions(&lists[1]);
+                if self.reason.is_some() {
+                    return;
+                }
+                let prog_base = self.nprog;
+                let prog_len = match emit_program(self, &terms[gs..ge], &leaves[gs..ge]) {
+                    Ok(len) => len,
+                    Err(why) => {
+                        self.nprog = prog_base;
+                        self.unsupported(format!("skill {sid}: {why}"));
+                        return;
+                    }
+                };
+                let at = SK_ARMS + SK_ASTRIDE * self.narm;
+                self.words[at] = prog_len as u32;
+                self.words[at + 1] = prog_base as u32;
+                self.words[at + 2] = n_pre as u32;
+                self.words[at + 3] = pre_b as u32;
+                self.words[at + 4] = n_post as u32;
+                self.words[at + 5] = post_b as u32;
+                self.words[at + 6] = flags[0] as u32;
+                self.words[at + 7] = flags[1] as u32;
+                self.narm += 1;
+                if ai == 0 {
+                    arm0_prog = (prog_len, prog_base);
+                    arm0_pre = (n_pre, pre_b);
+                    arm0_post = (n_post, post_b);
+                }
+            }
         }
 
         let effect_list = match alt.get("effects").and_then(Value::as_array) {
@@ -532,7 +770,7 @@ impl Compiler {
         let mut kind_seen: Vec<i32> = Vec::new();
         for ef in effect_list {
             let kind = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
-            if !matches!(kind, 21 | 27 | 31) {
+            if !matches!(kind, 1 | 9 | 10 | 21 | 22 | 27 | 28 | 31) {
                 self.unsupported(format!("skill {sid} effect type {kind} is not ported"));
                 return;
             }
@@ -586,42 +824,38 @@ impl Compiler {
         let cooldown = alt.get("cooldown").and_then(Value::as_f64).unwrap_or(0.) / 10000.0;
         let delay_mult = delay_factor(alt);
 
-        let prog_base = self.nprog;
-        let prog_len = match emit_program(self, &terms, &leaves) {
-            Ok(len) => len,
-            Err(why) => {
-                self.unsupported(format!("skill {sid}: {why}"));
-                self.nprog = prog_base;
-                return;
-            }
-        };
-
         let (wis_off, wis_len) = if wisdom { self.tag(&format!("W{sid}")) } else { (0, 0) };
         let at = SK_RECORDS + SK_RSTRIDE * self.nrec;
-        self.words[at] = sid;
+        self.words[at] = sid_num;
         self.words[at + 1] = runner as u32;
         self.words[at + 2] = (if retain { SK_FLAG_RETAIN } else { 0 })
             | (if wisdom { SK_FLAG_WISDOM } else { 0 })
-            | (if sampled { SK_FLAG_SAMPLED } else { 0 })
+            | (if sampled_count == 1 && !dead { SK_FLAG_SAMPLED } else { 0 })
             | (if dead { SK_FLAG_DEAD } else { 0 });
         self.words[at + 3] = priority as u32;
         self.words[at + 4] = rarity;
         self.words[at + 5] = (self.neff - eff_base) as u32;
         self.words[at + 6] = eff_base as u32;
-        self.words[at + 7] = prog_len as u32;
-        self.words[at + 8] = prog_base as u32;
-        self.words[at + 9] = sampled as u32;
-        self.words[at + 10] = if sampled { (self.nterm - 1) as u32 } else { 0 };
-        self.words[at + 11] = n_a as u32;
-        self.words[at + 12] = reg_a as u32;
+        self.words[at + 7] = arm0_prog.0 as u32;
+        self.words[at + 8] = arm0_prog.1 as u32;
+        self.words[at + 9] = if sampled_count == 1 && !dead { 1 } else { 0 };
+        self.words[at + 10] = term_word;
+        self.words[at + 11] = arm0_pre.0 as u32;
+        self.words[at + 12] = arm0_pre.1 as u32;
         let w = f64_words(cooldown);
         self.words[at + 13] = w[0];
         self.words[at + 14] = w[1];
         self.words[at + 15] = wis_off as u32;
         self.words[at + 16] = wis_len as u32;
         self.words[at + 17] = delay_mult.to_bits();
-        self.words[at + 18] = n_b as u32;
-        self.words[at + 19] = reg_b as u32;
+        self.words[at + 18] = arm0_post.0 as u32;
+        self.words[at + 19] = arm0_post.1 as u32;
+        self.words[at + 20] = arms_len as u32;
+        self.words[at + 21] = arms_base as u32;
+        self.words[at + 22] = pre_n as u32;
+        self.words[at + 23] = pre_reg_b as u32;
+        self.words[at + 24] = pre_prog_len as u32;
+        self.words[at + 25] = pre_prog_b as u32;
         self.nrec += 1;
     }
 
@@ -731,7 +965,9 @@ pub fn parse_terms(text: &str) -> Result<Vec<Term>, String> {
             return Err(format!("unexpected byte {:?}", bytes[at] as char));
         }
         let start = at;
-        while at < bytes.len() && (bytes[at].is_ascii_lowercase() || bytes[at] == b'_') {
+        while at < bytes.len()
+            && (bytes[at].is_ascii_lowercase() || bytes[at] == b'_' || bytes[at].is_ascii_digit())
+        {
             at += 1;
         }
         let name = text[start..at].to_string();
@@ -784,186 +1020,160 @@ enum Leaf {
     True,
     False,
     Region(Vec<(f64, f64)>),
-    /// The last-straight one-time term: a region gate plus the per-tick
-    /// entry-latch check combined in the engine's own filter.
-    LsEntry(Vec<(f64, f64)>),
-    Dynamic { feat: u32, cmp: i64 },
+    /// A static region gate combined with a per-tick live comparison, as the
+    /// engine's live_with_static and lastspurt filters build them.
+    RegionDyn(Vec<(f64, f64)>, u32),
+    Dynamic { feat: u32, cmp: i64, arg: Option<f64> },
     Sampled,
 }
 
-fn classify(t: &Term, sid: u32, g: &Geometry) -> Result<Leaf, String> {
-    let arg = t.arg as f64;
+/// Course and runner constants the engine resolves once at trigger build.
+struct Statics {
+    distance_type: i64,
+    turn: i64,
+    strategy: i64,
+}
+
+impl Statics {
+    fn new(course: &Value, horse: &Value) -> Statics {
+        Statics {
+            distance_type: course.get("distanceType").and_then(Value::as_i64).unwrap_or(0),
+            turn: course.get("turn").and_then(Value::as_i64).unwrap_or(0),
+            strategy: strategy_code(horse.get("strategy").and_then(Value::as_str).unwrap_or("")),
+        }
+    }
+}
+
+fn strategy_code(text: &str) -> i64 {
+    match text.to_ascii_uppercase().as_str() {
+        "NIGE" => 1,
+        "SENKOU" => 2,
+        "SASI" | "SASHI" => 3,
+        "OIKOMI" => 4,
+        "OONIGE" => 5,
+        _ => 0,
+    }
+}
+
+fn dyn_leaf(feat: u32, t: &Term) -> Leaf {
+    Leaf::Dynamic { feat, cmp: t.op, arg: None }
+}
+
+fn fold(value: f64, t: &Term) -> Leaf {
+    let a = t.arg as f64;
+    let ok = match t.op {
+        0 => value == a,
+        1 => value != a,
+        2 => value < a,
+        3 => value <= a,
+        4 => value > a,
+        _ => value >= a,
+    };
+    if ok {
+        Leaf::True
+    } else {
+        Leaf::False
+    }
+}
+
+fn style_matches(a: i64, b: i64) -> bool {
+    a == b || (a == 1 && b == 5) || (a == 5 && b == 1)
+}
+
+/// The retail distance_rate comparison runs against an integer threshold:
+/// f32 percent of the course distance rounded through a +0.5 truncation.
+fn dist_rate_threshold(arg: i64, distance: f64) -> f64 {
+    (((arg as f32 / 100.0) * distance as f32 + 0.5f32) as i32) as f64
+}
+
+/// The corner row is_finalcorner_random draws: reverse scan, ids default to
+/// position-from-the-last-corner, and only rows numbered 4 or higher whose
+/// start sits within the last 1000 m qualify.
+fn fc_random_index(course: &Value, distance: f64) -> Option<usize> {
+    let rows = course.get("corners").and_then(Value::as_array)?;
+    let n = rows.len();
+    for (i, row) in rows.iter().enumerate().rev() {
+        let id = match row.get("index").and_then(Value::as_i64) {
+            Some(v) => v,
+            None => i as i64 + 5 - n as i64,
+        };
+        let start = row.get("start").and_then(Value::as_f64)?;
+        if id >= 4 && distance - start <= 1000.0 {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// One comparison's engine role. Region-algebra terms the retail runtime
+/// swaps to live values lower to pass-through leaves with the runtime
+/// feature, and course or runner constants fold at compile time.
+fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
     let d = g.distance;
-    let sid_text = sid.to_string();
-    let unregistered = |what: &str| Err(format!("{what}{} is not a registered comparison", op_text(t.op)));
     match t.name.as_str() {
-        "always" => {
-            if t.op == 0 && t.arg == 1 {
-                return Ok(Leaf::True);
-            }
-            // always==0 or an odd comparison is a condition the engine
-            // resolves statically false, dropping the record.
-            return Ok(Leaf::False);
+        "always" => Ok(Leaf::True),
+        "accumulatetime" => Ok(dyn_leaf(FEAT_CLOCK, t)),
+        "activate_count_start" if t.op == 5 => Ok(dyn_leaf(FEAT_ACT0, t)),
+        "activate_count_middle" if t.op == 5 => Ok(dyn_leaf(FEAT_ACT1, t)),
+        "bashin_diff_behind" => Ok(dyn_leaf(FEAT_BASH_BEHIND, t)),
+        "bashin_diff_infront" => Ok(dyn_leaf(FEAT_BASH_INFRONT, t)),
+        "behind_near_lane_time" => Ok(dyn_leaf(FEAT_BHNEAR, t)),
+        "behind_near_lane_time_set1" => Ok(dyn_leaf(FEAT_BHNEAR1, t)),
+        "blocked_side_continuetime" => Ok(dyn_leaf(FEAT_BSIDE, t)),
+        "change_order_onetime" => Ok(dyn_leaf(FEAT_ORDER_DELTA, t)),
+        "corner" => Ok(dyn_leaf(FEAT_CORNER, t)),
+        "distance_rate" => Ok(Leaf::Dynamic {
+            feat: FEAT_DIST_RATE,
+            cmp: t.op,
+            arg: Some(dist_rate_threshold(t.arg, d)),
+        }),
+        "distance_type" if matches!(t.op, 0 | 1) => Ok(fold(s.distance_type as f64, t)),
+        "hp_per" if matches!(t.op, 3 | 5) => Ok(dyn_leaf(FEAT_HP_PER, t)),
+        "infront_near_lane_time" => Ok(dyn_leaf(FEAT_IFNEAR, t)),
+        "is_finalcorner" => Ok(dyn_leaf(FEAT_FINALE, t)),
+        "is_finalcorner_laterhalf" => Ok(dyn_leaf(FEAT_FC_HALF, t)),
+        "is_last_straight" if t.op == 0 && t.arg == 1 => match g.straights.last() {
+            Some((a, b)) => Ok(Leaf::Region(vec![(*a, *b)])),
+            None => Err("is_last_straight needs a course with straights".into()),
+        },
+        "is_last_straight_onetime" if t.op == 0 && t.arg == 1 => match g.straights.last() {
+            Some((a, _)) => Ok(Leaf::RegionDyn(vec![(*a, *a + 10.0)], FEAT_LS_ENTRY)),
+            None => Err("is_last_straight_onetime needs a course with straights".into()),
+        },
+        "is_lastspurt" if t.op == 0 && t.arg == 1 => {
+            Ok(Leaf::RegionDyn(vec![(phase_start(d, 2), d)], FEAT_LASTSPURT))
         }
-        "phase" => {
-            let p = t.arg;
-            let fudge = if PHASE_FUDGE_SKILLS.contains(&sid_text.as_str()) { 10.0 } else { 0.0 };
-            let bounds = match t.op {
-                0 if (0..=3).contains(&p) => (phase_start(d, p), phase_end(d, p) + fudge),
-                2 if (1..=3).contains(&p) => (0.0, phase_start(d, p)),
-                3 if (0..=3).contains(&p) => (0.0, phase_end(d, p)),
-                4 if (-1..=2).contains(&p) => (phase_start(d, p + 1), d),
-                5 if (0..=3).contains(&p) => (phase_start(d, p), d),
-                _ => return unregistered("phase"),
-            };
-            Ok(Leaf::Region(vec![bounds]))
+        "is_overtake" => Ok(dyn_leaf(FEAT_IS_OVERTAKE, t)),
+        "is_temptation" if t.op == 0 => Ok(dyn_leaf(FEAT_IS_TEMPTATION, t)),
+        "near_count" => Ok(dyn_leaf(FEAT_NEAR, t)),
+        "order" => Ok(dyn_leaf(FEAT_ORDER, t)),
+        "order_rate" => Ok(dyn_leaf(FEAT_ORDER_RATE, t)),
+        "order_rate_out50_continue" if t.op == 0 => Ok(dyn_leaf(FEAT_OUT50, t)),
+        "phase" => Ok(dyn_leaf(FEAT_PHASE, t)),
+        "remain_distance" => Ok(dyn_leaf(FEAT_REMAIN, t)),
+        "rotation" => Ok(fold(s.turn as f64, t)),
+        "running_style" if t.op == 0 => {
+            Ok(if style_matches(s.strategy, t.arg) { Leaf::True } else { Leaf::False })
         }
-        "distance_rate" => {
-            let bounds = match t.op {
-                3 => (0.0, d * arg / 100.0),
-                5 => (d * arg / 100.0, d),
-                _ => return unregistered("distance_rate"),
-            };
-            Ok(Leaf::Region(vec![bounds]))
-        }
-        "remain_distance" => {
-            let bounds = match t.op {
-                0 => (d - arg, d - arg + 1.0),
-                3 => (d - arg, d),
-                5 => (0.0, d - arg),
-                _ => return unregistered("remain_distance"),
-            };
-            Ok(Leaf::Region(vec![bounds]))
-        }
-        "furlong" => {
-            if t.op != 0 {
-                return unregistered("furlong");
-            }
-            Ok(Leaf::Region(vec![((arg - 1.0) * 201.168, arg * 201.168)]))
-        }
-        "is_finalcorner" => {
-            if t.op != 0 || (t.arg != 0 && t.arg != 1) {
-                return Err("is_finalcorner expects ==0 or ==1".into());
-            }
-            if g.corners.is_empty() {
-                // The engine passes the regions through for flag 0 and drops
-                // the record for flag 1 when the course has no corners.
-                return Ok(if t.arg == 0 { Leaf::True } else { Leaf::False });
-            }
-            let start = g.corners.last().unwrap().0;
-            Ok(Leaf::Region(vec![if t.arg == 0 { (0.0, start) } else { (start, d) }]))
-        }
-        "is_last_straight" => {
-            if t.op != 0 || t.arg != 1 {
-                return Err("is_last_straight expects ==1".into());
-            }
-            match g.straights.last() {
-                Some((s, e)) => Ok(Leaf::Region(vec![(*s, *e)])),
-                None => Err("is_last_straight needs a course with straights".into()),
-            }
-        }
-        "is_last_straight_onetime" => {
-            if t.op != 0 || t.arg != 1 {
-                return Err("is_last_straight_onetime expects ==1".into());
-            }
-            match g.straights.last() {
-                Some((s, _)) => Ok(Leaf::LsEntry(vec![(*s, s + 10.0)])),
-                None => Err("is_last_straight_onetime needs a course with straights".into()),
-            }
-        }
-        "hp_per" => {
-            if !(t.op == 3 || t.op == 5) {
-                return Err("only <= and >= are registered for hp_per".into());
-            }
-            Ok(Leaf::Dynamic { feat: FEAT_HP_PER, cmp: t.op })
-        }
-        "is_overtake" => Ok(Leaf::Dynamic { feat: FEAT_IS_OVERTAKE, cmp: t.op }),
-        "is_temptation" => {
-            if t.op != 0 {
-                return Err("only == is registered for is_temptation".into());
-            }
-            Ok(Leaf::Dynamic { feat: FEAT_IS_TEMPTATION, cmp: t.op })
-        }
-        "order" => Ok(Leaf::Dynamic { feat: FEAT_ORDER, cmp: t.op }),
-        "order_rate" => Ok(Leaf::Dynamic { feat: FEAT_ORDER_RATE, cmp: t.op }),
-        "corner" => {
-            if !sorted_by_start(&g.corners) {
-                return Err("corner needs a sorted corners list".into());
-            }
-            let num = t.arg;
-            let list = if t.op == 1 {
-                if num != 0 {
-                    return Err("corner!= only supports 0".into());
-                }
-                g.corners.clone()
-            } else if t.op != 0 {
-                return unregistered("corner");
-            } else if num == 0 {
-                let mut last_end = 0.0;
-                let mut gaps = Vec::new();
-                for c in &g.corners {
-                    gaps.push((last_end, c.0));
-                    last_end = c.1;
-                }
-                if last_end != d {
-                    gaps.push((last_end, d));
-                }
-                gaps
-            } else if (g.corners.len() as i64) + num >= 5 {
-                let mut idx = g.corners.len() as i64 + num - 5;
-                let mut picked = Vec::new();
-                while idx >= 0 {
-                    picked.push(g.corners[idx as usize]);
-                    idx -= 4;
-                }
-                picked.reverse();
-                picked
-            } else {
-                Vec::new()
-            };
-            if list.is_empty() {
-                return Ok(Leaf::False);
-            }
-            Ok(Leaf::Region(list))
-        }
-        "slope" => {
-            if t.op != 0 {
-                return unregistered("slope");
-            }
-            if !sorted_by_start(&g.slopes.iter().map(|s| (s.0, s.1)).collect::<Vec<_>>()) {
-                return Err("slope needs a sorted slopes list".into());
-            }
-            let list = match t.arg {
-                0 => {
-                    let mut last_start = 0.0;
-                    let mut gaps = Vec::new();
-                    for s in &g.slopes {
-                        if s.0 - last_start > 0.0 {
-                            gaps.push((last_start, s.0));
-                        }
-                        last_start = last_start.max(s.1);
-                    }
-                    if d - last_start > 0.0 {
-                        gaps.push((last_start, d));
-                    }
-                    gaps
-                }
-                1 => g.slopes.iter().filter(|s| s.2 > 0.0).map(|s| (s.0, s.1)).collect(),
-                2 => g.slopes.iter().filter(|s| s.2 < 0.0).map(|s| (s.0, s.1)).collect(),
-                _ => return Err(format!("slope type {} is not registered", t.arg)),
-            };
-            if list.is_empty() {
-                return Ok(Leaf::False);
-            }
-            Ok(Leaf::Region(list))
-        }
-        "all_corner_random" | "straight_random" | "down_slope_random" | "up_slope_random" => {
-            if t.op != 0 || t.arg != 1 {
-                return Err(format!("random term '{}' needs ==1", t.name));
-            }
+        "slope" => Ok(dyn_leaf(FEAT_SLOPE, t)),
+        "temptation_count" if t.op == 0 => Ok(dyn_leaf(FEAT_TEMPT, t)),
+        "all_corner_random" | "straight_random" | "down_slope_random"
+        | "up_slope_random"
+            if t.op == 0 && t.arg == 1 =>
+        {
             Ok(Leaf::Sampled)
         }
-        other => Err(format!("'{other}' is not ported")),
+        "phase_random" | "phase_firsthalf_random" | "phase_laterhalf_random"
+            if t.op == 0 && (0..=4).contains(&t.arg) =>
+        {
+            Ok(Leaf::Sampled)
+        }
+        "is_finalcorner_random" if t.op == 0 && t.arg == 1 => Ok(Leaf::Sampled),
+        other => Err(format!(
+            "'{other}'{}{} is not ported",
+            op_text(t.op),
+            t.arg
+        )),
     }
 }
 
@@ -978,47 +1188,26 @@ fn op_text(op: i64) -> &'static str {
     }
 }
 
-/// Emits the postfix program over the dynamic leaves only. Static region
-/// terms and the sampled term act through the window gate instead, exactly
-/// like the engine's None checks. Each group ANDs its leaves left to right,
-/// and one OR marker follows every group after the first.
+/// Emits one arm's postfix program: every term in parse order ANDed. The
+/// postfix form pushes each operand then folds with AND, so a stack machine
+/// accumulates left to right. The '@' split is structural in the arms table,
+/// so no OR marker appears here.
 fn emit_program(c: &mut Compiler, terms: &[Term], leaves: &[Leaf]) -> Result<usize, String> {
     let base = c.nprog;
     let mut used = 0usize;
-    let mut first_group = true;
-    let mut i = 0usize;
-    while i < terms.len() {
-        let group_start = i;
-        let mut group_len = 1usize;
-        while i + group_len < terms.len() && !terms[i + group_len].or {
-            group_len += 1;
+    for j in 0..terms.len() {
+        if base + used >= SK_PMAX {
+            return Err("condition program overflow".into());
         }
-        for j in 0..group_len {
+        emit_leaf(c, base + used, &terms[j], &leaves[j])?;
+        used += 1;
+        if j > 0 {
             if base + used >= SK_PMAX {
                 return Err("condition program overflow".into());
             }
-            emit_leaf(c, base + used, &terms[group_start + j], &leaves[group_start + j])?;
-            used += 1;
-            if j > 0 {
-                if base + used >= SK_PMAX {
-                    return Err("condition program overflow".into());
-                }
-                c.words[SK_PROGRAMS + SK_PSTRIDE * (base + used)] = OP_AND;
-                used += 1;
-            }
-        }
-        if !first_group {
-            if base + used >= SK_PMAX {
-                return Err("condition program overflow".into());
-            }
-            c.words[SK_PROGRAMS + SK_PSTRIDE * (base + used)] = OP_OR;
+            c.words[SK_PROGRAMS + SK_PSTRIDE * (base + used)] = OP_AND;
             used += 1;
         }
-        first_group = false;
-        i += group_len;
-    }
-    if used == 0 {
-        return Err("condition has no leaves".into());
     }
     c.nprog += used;
     Ok(used)
@@ -1027,18 +1216,19 @@ fn emit_program(c: &mut Compiler, terms: &[Term], leaves: &[Leaf]) -> Result<usi
 fn emit_leaf(c: &mut Compiler, slot: usize, t: &Term, leaf: &Leaf) -> Result<(), String> {
     let at = SK_PROGRAMS + SK_PSTRIDE * slot;
     match leaf {
-        Leaf::Dynamic { feat, cmp } => {
+        Leaf::Dynamic { feat, cmp, arg } => {
             c.words[at] = OP_FEAT_I;
             c.words[at + 1] = feat * 8 + *cmp as u32;
-            let w = f64_words(t.arg as f64);
+            let w = f64_words(arg.unwrap_or(t.arg as f64));
             c.words[at + 2] = w[0];
             c.words[at + 3] = w[1];
         }
-        Leaf::LsEntry(_) => {
+        Leaf::RegionDyn(_, feat) => {
             c.words[at] = OP_FEAT_I;
-            c.words[at + 1] = FEAT_LS_ENTRY * 8;
-            c.words[at + 2] = 1;
-            c.words[at + 3] = 0;
+            c.words[at + 1] = feat * 8 + t.op as u32;
+            let w = f64_words(t.arg as f64);
+            c.words[at + 2] = w[0];
+            c.words[at + 3] = w[1];
         }
         _ => {
             c.words[at] = OP_TRUE;
