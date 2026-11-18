@@ -694,6 +694,16 @@ seeds)` answers a launch with one `BatchOutcome` per request, in input order,
 and `run_repeated(request, seeds)` answers one request over many seeds after
 preparing it once (see "Batch cost").
 
+`register_geometry(course_id, json_text)` makes the app's registered course
+geometry the kernel's authority for the course: `prepare` flattens the
+injected copy and only falls back to the `data/course_geometry` files when
+nothing was registered, which is what standalone tests and tools use. The
+app's CPU lane keeps its own `register_course_geometry` flow with the same
+text, so kernel and CPU lanes answer from one geometry instead of two trees
+of files that can drift apart. Injecting replaces any earlier copy (file or
+injected) from the next prepare. The app-side wiring is the `register_geometry`
+export in the app's `globalsim-native` addon.
+
 The contract is the app's `run_compact` path. `meta` is the engine reply
 JSON without frames, restricted to the fields that path reads:
 `playerHorseIndex`, then per runner in roster order `finishTimeRaw`,
@@ -751,9 +761,10 @@ prints the tables):
   now launches through the context's prebuilt program and costs about
   0.3-4 ms.
 - The geometry registry loads and flattens each course once per context
-  (about 4-9 ms cold), then clones the flat tables per prepared race, and
-  one launch dedups the courses into shared tables (about 1 ms at 96
-  races of one course).
+  (about 4-9 ms cold, an injected copy re-flattens on the next prepare after
+  a re-register), then clones the flat tables per prepared race, and one
+  launch dedups the courses into shared tables (about 1 ms at 96 races of
+  one course).
 - The fixed cost of a warm call is dominated by the race kernel itself: at
   m = 1 enqueue takes 0 ms and the device run about 429 ms. It scales with
   the race's tick count (course 11401, 1000 m: 712 ticks, 206 ms), not with
@@ -796,6 +807,17 @@ Verified 2026-11-18 on the gated B580 (`single_fp_config 0xbf`,
   unparseable request, `run_batch` on the mixed batch against
   `run_repeated` per request: all four groups byte-identical, the flagged
   and unparseable groups carrying the fallback arms.
+- `injected_geometry_outranks_the_file_copy`: the v77 line-1 race against a
+  geometry file whose nearest kind-0 corner event distance is shifted by
+  +30 m. The kernel's answer to the injected copy differs from the
+  file-loaded baseline (meta and packet), and re-registering the original
+  file text restores the baseline byte for byte: injection is the
+  authority, it replaces, and the file only serves unregistered courses.
+- `injected_app_vendor_geometry_keeps_the_race_bit_exact`: the app's vendor
+  copy of 10504 (sibling main app checkout, override with
+  `GLOBALSIM_APP_VENDOR`) must equal the engine copy, and with that vendor
+  text injected the v77 line-1 race stays byte-for-byte frame-exact against
+  the CPU engine.
 
 ### skillEvents: the engine writer sites, and what the kernel logs
 

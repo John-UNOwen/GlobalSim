@@ -13,7 +13,10 @@ port"), and, under the `initialization` feature, `course_data.rs`,
 remain part of the engine (AGPL-3.0-only, Copyright the
 engine's authors); this crate is therefore AGPL-3.0-only as well. The engine's
 source is the authority on semantics and is never modified to make GPU code pass
-(see `docs/GPU_HANDOFF.md`, "Rules").
+(see `docs/GPU_HANDOFF.md`, "Rules"). The kernel's race-course geometry data
+arrives at runtime from the host app (`facade::GpuRaces::register_geometry`);
+the engine's `data/course_geometry` files are only the fallback for standalone
+tests and tools.
 
 The `log10` in `gpu/src/kernels/initialization.cl` is a line-for-line OpenCL
 port of the algorithm in the `libm` crate 0.2.16 (`src/math/log10.rs`, MIT OR

@@ -3,8 +3,9 @@
 //! compact_record reads is compared against the engine's own `write_json`
 //! reply on the same request, and the packet's frame bytes against the
 //! engine's `into_binary` packet. A startup request inside the same batch
-//! must come back as a fallback without disturbing its siblings, and
-//! `gate_reasons` is checked as a pure function on synthetic device facts.
+//! must come back as a fallback without disturbing its siblings,
+//! `gate_reasons` is checked as a pure function on synthetic device facts,
+//! and `register_geometry` injection outranks the geometry file copy.
 
 #![cfg(feature = "race")]
 
@@ -310,6 +311,118 @@ fn run_repeated_matches_a_mixed_two_course_batch() {
     }
     assert!(batched[8].fallback.is_some() && batched[8].meta.is_none(), "the startup slice must carry the fallback arm");
     assert!(batched[10].fallback.is_some(), "the unparseable slice must carry the fallback arm");
+}
+
+/// The app's registered geometry is the kernel's authority. An injected copy
+/// that differs observably from the file copy changes the kernel's answer,
+/// and re-registering the file text restores the baseline byte for byte, so
+/// injection replaces (never merges) and the file is the fallback only while
+/// nothing was registered.
+#[test]
+fn injected_geometry_outranks_the_file_copy() {
+    let base = v77_line();
+    let file =
+        std::fs::read_to_string(repo_file("data/course_geometry/10504.json")).expect("geometry file");
+    let request = race_exec::multi_request(&base, 10504, 1).expect("request");
+
+    // Shift the nearest kind-0 corner event's distance by +30 m. No verified
+    // identity field is touched, so the flattener accepts it, and the corner
+    // table and the derived first_move_lane_point both move.
+    let mut value = json::parse(&file).expect("geometry parses");
+    let json::Value::Object(root) = &mut value else { panic!("geometry is an object") };
+    let json::Value::Object(diagnostics) =
+        root.get_mut("course_event_diagnostics").expect("course_event_diagnostics")
+    else {
+        panic!("course_event_diagnostics is an object")
+    };
+    let json::Value::Array(rows) = diagnostics.get_mut("rows").expect("rows") else {
+        panic!("rows is an array")
+    };
+    let nearest = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let row = row.as_object()?;
+            if row.get("kind")?.as_f64()? != 0. {
+                return None;
+            }
+            Some((row.get("distance")?.as_f64()?, index))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .expect("the fixture carries a kind-0 corner event");
+    let json::Value::Object(row) = &mut rows[nearest.1] else {
+        panic!("corner row is an object")
+    };
+    let json::Value::Number(distance) = row.get_mut("distance").expect("distance") else {
+        panic!("distance is a number")
+    };
+    *distance += 30.;
+    let mut perturbed = String::new();
+    json::to_string_into(&value, &mut perturbed);
+
+    let answer = |races: &mut GpuRaces| {
+        let outcome = races.run_repeated(&request, &[7]).expect("run").remove(0);
+        assert!(outcome.meta.is_some(), "the race should launch, got fallback {:?}", outcome.fallback);
+        (outcome.meta.expect("meta"), outcome.packet.expect("packet"))
+    };
+
+    let mut races = GpuRaces::new().expect("device gate");
+    let (baseline_meta, baseline_packet) = answer(&mut races);
+    races.register_geometry(10504, &perturbed).expect("perturbed geometry accepted");
+    let (injected_meta, injected_packet) = answer(&mut races);
+    assert_ne!(
+        injected_meta, baseline_meta,
+        "the kernel answered identically to the file baseline, the injection did not take effect"
+    );
+    assert_ne!(injected_packet, baseline_packet, "the kernel's frames answered identically to the file baseline");
+
+    races.register_geometry(10504, &file).expect("file text accepted");
+    let (restored_meta, restored_packet) = answer(&mut races);
+    assert_eq!(restored_meta, baseline_meta, "re-registering the file text must restore the baseline exactly");
+    assert_eq!(restored_packet, baseline_packet, "restored frames must equal the baseline frames");
+}
+
+/// The app's vendor copy of 10504 is byte-equal to the engine copy, and with
+/// that vendor text injected the v77 line-1 race stays bit-exact against the
+/// CPU engine (frames compared byte for byte). Reads the app checkout through
+/// `GLOBALSIM_APP_VENDOR` (a `vendor/GlobalSim` dir), default to the sibling
+/// main app checkout.
+#[test]
+fn injected_app_vendor_geometry_keeps_the_race_bit_exact() {
+    let vendor_dir = std::env::var("GLOBALSIM_APP_VENDOR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../Yet-Another-Umalator-Fork/vendor/GlobalSim")
+        });
+    let vendor_file = vendor_dir.join("data/course_geometry/10504.json");
+    let vendor = std::fs::read_to_string(&vendor_file)
+        .unwrap_or_else(|e| panic!("{} unreadable: {e}", vendor_file.display()));
+    let engine =
+        std::fs::read_to_string(repo_file("data/course_geometry/10504.json")).expect("engine geometry file");
+    assert_eq!(vendor, engine, "the app vendor geometry must equal the engine copy before the identity run");
+
+    // The CPU reference lane keeps its registration flow, same text.
+    globalsim::register_course_geometry(10504, vendor.clone());
+    let base = v77_line();
+    let request = race_exec::multi_request(&base, 10504, 1).expect("request");
+
+    let mut races = GpuRaces::new().expect("device gate");
+    races.register_geometry(10504, &vendor).expect("vendor geometry accepted");
+    let outcome = races.run_repeated(&request, &[1]).expect("run").remove(0);
+    let (Some(_meta), Some(packet)) = (outcome.meta, outcome.packet) else {
+        panic!("the injected vendor race should launch, got fallback {:?}", outcome.fallback);
+    };
+    let cpu = dep_cpu::run_cpu_binary(&request, 1).expect("engine run");
+    match (replay_packet::frame_bytes(&packet), replay_packet::frame_bytes(&cpu.packet)) {
+        (Some(gpu), Some(cpu)) if gpu == cpu => {}
+        (Some(gpu), Some(cpu)) => panic!(
+            "frame bytes differ (gpu {} bytes, engine {} bytes)",
+            gpu.len(),
+            cpu.len()
+        ),
+        _ => panic!("a packet lacks its frame payload"),
+    }
 }
 
 fn facts(extensions: &str, single_fp_config: u64, double_fp_config: u64) -> DeviceFacts {

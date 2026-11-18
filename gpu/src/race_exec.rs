@@ -513,7 +513,8 @@ impl Prepared {
 
 /// Parses one request into kernel inputs. A domain the kernel cannot answer
 /// bit-exactly comes back as `host_fallback`, and the race skips the launch.
-/// Geometry files load and flatten once per course through the registry.
+/// Geometry loads and flattens once per course through the registry, an
+/// injected copy ahead of the file fallback.
 fn prepare(
     request: &str,
     seed: i64,
@@ -703,19 +704,53 @@ pub fn run_kernel_only(requests: &[(String, i64)], warm: usize, timed: usize) ->
 
 /// Flattened course tables, cached per course by `RaceContext` and by the
 /// module-level runs. The f32 is the geometry's first_move_lane_point.
+/// `injected` holds the app's registered JSON per course: the authority over
+/// the `data/course_geometry` files, which stay the fallback for courses
+/// nothing registered (tests and standalone tools).
 #[derive(Default)]
 pub struct GeometryRegistry {
+    injected: std::collections::HashMap<i32, String>,
     courses: std::collections::HashMap<i32, (retail_geometry::FlatCourse, f32)>,
 }
 
 impl GeometryRegistry {
+    /// Make `json_text` (the app's `data/course_geometry/<course_id>.json`
+    /// contents) the kernel's geometry for the course, replacing any earlier
+    /// copy, injected or file, from the next prepare. The text is fully
+    /// verified now against its own captured identity, so a rejected course
+    /// names itself at registration instead of mid-batch.
+    pub fn register(&mut self, course_id: i32, json_text: &str) -> Result<(), String> {
+        let value = json::parse(json_text).map_err(|e| format!("injected geometry for {course_id}: {e}"))?;
+        let identity = value
+            .get("course_identity")
+            .ok_or_else(|| format!("injected geometry for {course_id}: Missing verified course identity"))?;
+        let distance = identity.get_f64("distance")? as f32;
+        retail_geometry::CourseGeometry::from_value(&value, course_id, distance)
+            .map_err(|e| format!("injected geometry for {course_id}: {e}"))?;
+        self.injected.insert(course_id, json_text.to_string());
+        // Drop the flattened cache so the next prepare flattens the new copy.
+        self.courses.remove(&course_id);
+        Ok(())
+    }
+
     fn course(&mut self, course_id: i32, distance: f32) -> Result<(retail_geometry::FlatCourse, f32), String> {
         if let Some((flat, first_move)) = self.courses.get(&course_id) {
             return Ok((flat.clone(), *first_move));
         }
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/course_geometry");
-        let loaded = retail_geometry::CourseGeometry::load(&dir, course_id, distance)
-            .map_err(|e| format!("world geometry for {course_id}: {e}"))?;
+        // An injected copy is the authority: a bad one fails this prepare
+        // (the facade answers `fallback`) instead of substituting the file.
+        let loaded = match self.injected.get(&course_id) {
+            Some(text) => {
+                let value = json::parse(text).map_err(|e| format!("injected geometry for {course_id}: {e}"))?;
+                retail_geometry::CourseGeometry::from_value(&value, course_id, distance)
+                    .map_err(|e| format!("injected geometry for {course_id}: {e}"))?
+            }
+            None => {
+                let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/course_geometry");
+                retail_geometry::CourseGeometry::load(&dir, course_id, distance)
+                    .map_err(|e| format!("world geometry for {course_id}: {e}"))?
+            }
+        };
         let first_move = loaded.first_move_lane_point;
         let flat = retail_geometry::flatten_course(&loaded);
         self.courses.insert(course_id, (flat.clone(), first_move));
@@ -772,8 +807,9 @@ impl LaunchMode {
 
 /// Launch state kept between batches: one gated device, one built race
 /// program, one built initialization program, engine data loaded once and
-/// the geometry cache. Not Sync, the OpenCL queue and program belong to the
-/// thread that opened them.
+/// the geometry registry (injected app copies ahead of the file fallback).
+/// Not Sync, the OpenCL queue and program belong to the thread that opened
+/// them.
 pub struct RaceContext {
     globals: Value,
     grids: Value,
@@ -825,6 +861,12 @@ impl RaceContext {
     /// The gated device the batches run on.
     pub fn device(&self) -> &crate::gpu::DeviceReport {
         &self.spike.device
+    }
+
+    /// Register the app's course JSON as the kernel's geometry authority for
+    /// the course, ahead of the file fallback (see `GeometryRegistry`).
+    pub fn register_geometry(&mut self, course_id: i32, json_text: &str) -> Result<(), String> {
+        self.registry.register(course_id, json_text)
     }
 
     /// One request into kernel inputs. The Err arm is a parse failure the

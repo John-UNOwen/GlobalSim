@@ -42,6 +42,16 @@ impl GpuRaces {
         self.ctx.device().name.clone()
     }
 
+    /// Register the app's course JSON (the text it feeds the CPU lane's
+    /// `register_course_geometry`) as this instance's kernel geometry for the
+    /// course, so both lanes flatten one copy. Injecting replaces any earlier
+    /// copy, file or injected, from the next prepare. Courses the app never
+    /// registers keep the `data/course_geometry` file fallback, which is what
+    /// standalone tests and tools use.
+    pub fn register_geometry(&mut self, course_id: i32, json_text: &str) -> Result<(), String> {
+        self.ctx.register_geometry(course_id, json_text)
+    }
+
     /// Runs one batch in a single launch. The launchable races must share one
     /// runner count, the same constraint the kernel grid carries, and a mixed
     /// batch is an error for the caller to split. A request the domain gates
