@@ -198,11 +198,6 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
     if root.get("experimentalRetailStartup").and_then(Value::as_bool) == Some(true) {
         return Some("startup mode".into());
     }
-    if let Ok(horses) = root.get_array("horses") {
-        if horses.iter().any(|h| h.get_str("strategy").map(|s| s.eq_ignore_ascii_case("OONIGE")).unwrap_or(false)) {
-            return Some("Oonige start dash".into());
-        }
-    }
     if root.get("experimentalRetailRuntime").and_then(Value::as_bool) != Some(true) {
         return Some("non-retail runtime".into());
     }

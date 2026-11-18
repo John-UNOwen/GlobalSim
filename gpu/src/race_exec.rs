@@ -519,12 +519,6 @@ fn prepare(
     if root.get("experimentalRetailRuntime").and_then(Value::as_bool) != Some(true) {
         return flagged("non-retail runtime");
     }
-    // The Oonige start-dash subsystem is not ported: a field with an Oonige
-    // diverges at tick 1 without a flag. Refuse it until the port lands.
-    if horses.iter().any(|h| h.get_str("strategy").map(|s| s.eq_ignore_ascii_case("OONIGE")).unwrap_or(false)) {
-        return flagged("Oonige start dash");
-    }
-
     let mut ri = vec![0u32; RI_STRIDE];
     let mut pd = vec![0f64; RIL_STRIDE];
     let mut stats_cases: Vec<StatsCase> = Vec::new();
@@ -602,7 +596,9 @@ fn prepare(
         let rank = gate_order.iter().position(|&i| i == r).unwrap_or(0);
         let lane = retail_starting_lane(rank, track, horses.len(), grids);
         let b = RI_RUN0 + RI_RUN_STRIDE * r;
-        ri[b + RR_STYLE] = strategy as u32;
+        // Retail initialization sees the base style: an Oonige takes the
+        // RunningOut force coefficient and its shared-stream draw (lib.rs:1533).
+        ri[b + RR_STYLE] = (if strategy == 5 { 1 } else { strategy }) as u32;
         ri[b + RR_STRATEGY] = strategy as u32;
         ri[b + RR_DISTAPT] = aptitude_id(horse.get_str("distanceAptitude")?)? as u32;
         ri[b + RR_MOOD] = horse.get_i64("mood")? as u32;

@@ -53,6 +53,7 @@ Suites:
 | `race_diff` (gpu only) | The whole comparison pipeline on `examples/v77-race.jsonl` line 1 with geometry 10504 and seed 7: the CPU engine runs the whole race (1463 ticks), the stub's ticks diverge, and the outcome carries the fallback flag |
 | `solo_race_gate` (gpu + initialization + geometry + race) | See "Race loop port" below |
 | `paired_race_gate` (gpu + initialization + geometry + race) | See "Paired mode" below |
+| `zero_skill_gate` (gpu + initialization + geometry + race) | See "Zero-skill mixed-style fields" below |
 | `skills_gate` (gpu + initialization + geometry + race) | See "Skills port" below |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 
@@ -538,6 +539,31 @@ Verified 2026-11-18 on the gated B580 (`single_fp_config 0xbf`,
   tick 72, unpaired bits `0x40540dd360000000`, paired bits
   `0x40540ddda0000000`), so the pinned equality proves the kernel switched
   streams, not that both sides ignored the flag.
+
+### Zero-skill mixed-style fields
+
+`zero_skill_gate` runs app-shaped zero-skill rosters (mob presets, uma stat
+blocks, mixed styles, roster sizes 2 to 18) through the kernel and the CPU
+engine: equal tick counts, every frame column `to_bits()`-equal, and
+`finishTimeRaw` bits equal, for seeds 1..3 on 10504 and 10604, zero fallback
+on every race.
+
+Oonige (strategy 5, Runaway) is ported and gated on this suite: a dedicated
+4-runner probe, the mob9 layout with its gate-0 Nige swapped to an Oonige,
+and the 18-runner field with its gate-10 Nige swapped, each on both courses.
+The tick-side start-dash state machine, the runaway HP drain, the Ex phase
+rows, the runaway pace columns, rush mode 4 and the field style rules came in
+with the race loop itself. The missing piece was on the initialization side:
+the engine hands the retail initialization the base style (`lib.rs:1533`), so
+an Oonige enters the force-in-move pass as style 1, consumes one shared-stream
+`real(0, forceInMoveTargetSpeedAddRandomRange)` draw, and carries the
+RunningOut coefficient. The kernel packed the raw strategy into `RR_STYLE`,
+saw style 5 there, skipped the draw, and every runner's start delay, section
+modifiers and rushing lotteries then came from a shifted stream: whole-field
+divergence at tick 1. `RR_STYLE` now packs the base style (`race_exec.rs`),
+and `oonige_fields_are_not_refused` asserts the host and facade gates let
+Oonige through. `gpu/OONIGE_CALLGRAPH.md` maps every place an Oonige touches
+the engine and the kernel.
 
 ### Rounding traps this port hit
 

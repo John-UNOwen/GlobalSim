@@ -53,6 +53,13 @@ fn uma(strategy: &str, gate: usize) -> Value {
     horse(strategy, [1000., 1000., 900., 800., 900.], "A", 2, gate)
 }
 
+/// The 4-runner Oonige probe: Senkou uma, Sasi and Nige mobs, and an Oonige
+/// on the mob preset.
+fn oonige4() -> Vec<Value> {
+    vec![uma("Senkou", 0), mob("Sasi", 1, (0., 0.)), mob("Nige", 2, (0., 0.)),
+        horse("Oonige", [1600., 1200., 1200., 600., 1200.], "S", 0, 3)]
+}
+
 /// The v77 line-1 template with its horses replaced, courseId and seed set.
 fn request_with(base: &str, horses: Vec<Value>, course: i32, seed: i64) -> String {
     let mut value = json::parse(base).expect("template parses");
@@ -63,6 +70,14 @@ fn request_with(base: &str, horses: Vec<Value>, course: i32, seed: i64) -> Strin
     let mut out = String::new();
     json::to_string_into(&value, &mut out);
     out
+}
+
+/// One field row's strategy string replaced, everything else kept.
+fn with_style(mut value: Value, strategy: &str) -> Value {
+    if let Value::Object(map) = &mut value {
+        map.insert("strategy".into(), Value::String(strategy.into()));
+    }
+    value
 }
 
 /// The mob-layout 9-runner field: the Default preset's eight mob rows
@@ -269,32 +284,41 @@ fn zero_skill_mixed_style_fields_are_bit_exact() {
     all.extend(check_shape("mob9", &base, 10604, field9(3)));
     all.extend(check_shape("all9-mixed", &base, 10604, all9_mixed));
 
+    // The Oonige shapes: the 4-runner probe, the mob9 layout with its
+    // gate-0 Nige swapped to an Oonige, and the 18-runner field with the
+    // gate-10 Nige swapped.
+    all.extend(check_shape("4r-oonige", &base, 10504, oonige4()));
+    all.extend(check_shape("4r-oonige", &base, 10604, oonige4()));
+    let mut mob9_oonige = field9(3);
+    mob9_oonige[0] = with_style(mob9_oonige[0].clone(), "Oonige");
+    all.extend(check_shape("mob9-oonige", &base, 10504, mob9_oonige.clone()));
+    all.extend(check_shape("mob9-oonige", &base, 10604, mob9_oonige));
+    let mut field18_oonige = field18();
+    let slot10 = field18_oonige
+        .iter()
+        .position(|h| h.get_i64("gateIndex").unwrap_or(-1) == 10)
+        .expect("field18 has a gate-10 row");
+    field18_oonige[slot10] = with_style(field18_oonige[slot10].clone(), "Oonige");
+    all.extend(check_shape("mob18-oonige", &base, 10504, field18_oonige.clone()));
+    all.extend(check_shape("mob18-oonige", &base, 10604, field18_oonige));
+
     if !all.is_empty() {
         panic!("{} problems:\n{}", all.len(), all.join("\n"));
     }
 }
 
-/// A field containing an Oonige refuses until the start-dash subsystem is
-/// ported. Before this refusal it diverged at tick 1 without any flag.
+/// An Oonige race no longer refuses: the start-dash subsystem is ported and
+/// the identity gate above runs the fields bit-exactly.
 #[test]
-fn oonige_fields_are_refused_not_silently_wrong() {
+fn oonige_fields_are_not_refused() {
     let base = v77_line();
-    let request = request_with(
-        &base,
-        vec![uma("Senkou", 0), mob("Sasi", 1, (0., 0.)), mob("Nige", 2, (0., 0.)),
-            horse("Oonige", [1600., 1200., 1200., 600., 1200.], "S", 0, 3)],
-        10504,
-        1,
-    );
+    let request = request_with(&base, oonige4(), 10504, 1);
     let out = race_exec::run(&[(request.clone(), 1)]).expect("kernel run");
-    assert_eq!(out.races[0].fallback.as_deref(), Some("Oonige start dash"));
+    assert_eq!(out.races[0].fallback, None);
     let facts = globalsim_gpu::facade::DeviceFacts {
         extensions: "cl_khr_fp64".into(),
         single_fp_config: 0xbf,
         double_fp_config: 0x3f,
     };
-    assert_eq!(
-        globalsim_gpu::facade::gate_reasons(&request, Some(&facts)).as_deref(),
-        Some("Oonige start dash")
-    );
+    assert_eq!(globalsim_gpu::facade::gate_reasons(&request, Some(&facts)), None);
 }
