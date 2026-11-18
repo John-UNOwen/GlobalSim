@@ -36,11 +36,11 @@
 #define RI_COURSE 2          // geometry table index
 #define RI_GROUND 3          // 1..4
 #define RI_SURFACE 4         // 1..2
-#define RI_PAIRED 5          // 1 = pairedRandomStreams (fallback, unsupported)
+#define RI_PAIRED 5          // 1 = pairedRandomStreams (per-runner RUN banks)
 #define RI_STARTUP 6         // 1 = experimentalRetailStartup (fallback)
 #define RI_GEOM_ON 7         // 1 = experimentalRetailGeometry
 #define RI_HOST_FLAG 8       // nonzero: the host already knows this race needs
-                             // a fallback (skills, paired streams, no geometry)
+                             // a fallback (skills, startup, no geometry)
 #define RI_HOST_ARG 9        // which domain the host flag stands for
 #define RI_NSLOPES 10
 #define RI_NSTR 11           // straights present
@@ -347,7 +347,8 @@
 #define RS_LKEYS 120          // 24: resolve-overlaps truncated lane keys
 #define RS_LORDER 144         // 24: resolve-overlaps scan order
 #define RS_ADV 168            // 24: stepped (not gated) flags of the tick
-#define SCR_U_WORDS (SCR_RACE + 192)
+#define SCR_BANKS (SCR_RACE + 192) // paired mode: one RUN bank per runner
+#define SCR_U_WORDS (SCR_BANKS + 24 * BANK_WORDS)
 
 // Per-race scratch f64, one 24-wide column per slot (field base + runner
 // index). Array fields keep 24 slots per element: base + element * 24 + r.

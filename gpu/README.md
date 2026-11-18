@@ -52,6 +52,7 @@ Suites:
 | `geometry_gate` (gpu + geometry only) | See "Geometry port" below |
 | `race_diff` (gpu only) | The whole comparison pipeline on `examples/v77-race.jsonl` line 1 with geometry 10504 and seed 7: the CPU engine runs the whole race (1463 ticks), the stub's ticks diverge, and the outcome carries the fallback flag |
 | `solo_race_gate` (gpu + initialization + geometry + race) | See "Race loop port" below |
+| `paired_race_gate` (gpu + initialization + geometry + race) | See "Paired mode" below |
 
 ### What the gate proves
 
@@ -144,7 +145,7 @@ yet asserted as a race for anything but the restricted subset.
 step-6 kernel runner implements the trait, fills `RaceOutcome.frames` with
 every runner's rows per tick, and sets `fallback` only where the kernel
 cannot guarantee exactness. The comparator and the tool's summary and flag
-handling need no change. `RaceOutcome` carries no tick timestamps; a kernel
+handling need no change. `RaceOutcome` carries no tick timestamps, so a kernel
 that emits its own timeline will need the outcome extended.
 
 ## RNG port (handoff step 6.1)
@@ -197,7 +198,7 @@ All comparisons run on the gated B580, and every float is compared through
   engine's `uniform` are asserted equal for every non-cap case.
 
 `next_double` multiplies by a compile-time constant. The engine computes
-`1.0/i32::MAX as f64` (raw bits `0x3e00000000200000`); the kernel embeds it as the
+`1.0/i32::MAX as f64` (raw bits `0x3e00000000200000`). The kernel embeds it as the
 hex literal `0x1.0000000200000p-31`, and `rng_gate` ties that literal to the Rust
 value through the bits assertion.
 
@@ -244,7 +245,7 @@ that include line ever changes shape.
 
 `flatten_course` copies the state `CourseGeometry::from_value` built, field
 for field, into `FlatCourse`. For `C` courses and `N` items the kernel reads
-and writes (`run` in `src/geometry.rs` uploads them; f32 values in the
+and writes (`run` in `src/geometry.rs` uploads them, and f32 values in the
 integer arrays go as raw bits):
 
 | Buffer | Type, length | Contents |
@@ -424,7 +425,7 @@ All comparisons run on the gated B580, and every value is compared through
 
 - Skill triggers and their rng streams stay out. With no skills in the entry
   the wisdom lottery is computed but never drawn, and the pacer rng
-  (`race_solver_builder.rs:867`) is drawn into and discarded; its seed pair is
+  (`race_solver_builder.rs:867`) is drawn into and discarded. Its seed pair is
   pinned only for stream parity. The six stage counters would catch any stream
   shift if skills joined later.
 - Request-level handling stays host-side: the `gate_perm` entry permutation
@@ -459,13 +460,14 @@ interpolation. The Rust reference side is the engine through its public API
 
 Host side is `src/race_exec.rs` behind the `race` feature. `run` takes one
 spec per race (course id, distance, geometry, seed, horse list, ground) and
-returns frames plus finish data; `GpuRace` implements `race::RaceRunner`. The
+returns frames plus finish data. `GpuRace` implements `race::RaceRunner`. The
 tick loop runs the runners sequentially in roster order inside one work item,
 so the shared race dice are consumed in the same order the engine's field
-moves them. Domain gates run before any launch: skills, paired mode, the
-startup pass and grid mode each return the race flagged with its reason
-instead of launching wrong numbers. A no-skill field of up to `RACE_MAXR`
-(24) runners launches unflagged.
+moves them. Paired mode gives every runner its own stream instead (see
+"Paired mode" below). Domain gates run before any launch: skills, the startup
+pass, non-retail runtime and a roster outside the kernel's 1..24 range each
+return the race flagged with its reason instead of launching wrong numbers. A
+no-skill field of up to `RACE_MAXR` (24) runners launches unflagged.
 
 The race's dice stream is the manager RNG cloned at `lib.rs:773`, which is
 after `initialize()` and `initialize_sections_and_rushing()` have consumed
@@ -497,6 +499,41 @@ Verified 2026-11-19 on the gated B580 (`single_fp_config 0xbf`,
   blocking, lane-target selection and its PassingSearch draws, the duel warmup
   and entry, the spot struggle, the conserve ledger and the asitame release,
   none of which a field of one can reach.
+
+### Paired mode
+
+A request with `pairedRandomStreams: true` replaces each runner's shared
+runtime stream with a fresh per-runner stream: the engine's
+`retail_random::substream(seed, runner, "RUN")` at `lib.rs:794` (FNV-1a of
+seed, runner and the tag, then the shift-multiply avalanche, then
+`RetailRandom::new`). The `lib.rs:773` clone the runtime takes is replaced per
+runner and never consumed, and the Rule30 solver rng stays exactly as it is:
+paired mode keys only the retail stream. Inside the kernel, paired mode sends
+each runner's rushing lottery to its own RUSH substream in `im_init` (the same
+switch `initialize_sections_and_rushing` applies, pinned by
+`initialization_gate`'s 376 paired cases), and builds one fresh RUN bank per
+runner (`r128_substream_hash_run` in `rng_core.cl`) in scratch (`SCR_BANKS`,
+60 words per runner). The sequential tick loop reads each runner's own bank
+for the whole race. Pace, rushing, lane, downhill and spurt draws all come
+from it, matching the engine's per-runner `RetailRuntimeConfig` (its HP policy
+shares the same stream). Unpaired mode keeps the shared-bank path untouched.
+
+### What `paired_race_gate` pins
+
+Verified 2026-11-18 on the gated B580 (`single_fp_config 0xbf`,
+`double_fp_config 0x3f`), one kernel launch for all 16 races.
+
+- `v77_paired_races_are_bit_exact`: the same 9-runner v77 line-1 roster and
+  courses, requested with `pairedRandomStreams: true`, seeds 1..8 on 10504
+  and 1..4 on 10604 and 11004. Every tick, every runner, every frame column
+  compared through `to_bits()` against the CPU engine running the same paired
+  request, equal tick counts, equal `finishTimeRaw` bits, zero fallback on
+  every race. 1,370,466 compared values.
+- `paired_requests_change_the_race`: the same request with and without the
+  paired key differ in the CPU engine (course 10504 seed 1, runner 4 pos at
+  tick 72, unpaired bits `0x40540dd360000000`, paired bits
+  `0x40540ddda0000000`), so the pinned equality proves the kernel switched
+  streams, not that both sides ignored the flag.
 
 ### Rounding traps this port hit
 
@@ -530,6 +567,9 @@ and gate:
   `acceleration` and `target_speed`, activation hooks). Skills stay host-gated,
   so a skill-bearing field is flagged and the field kernel only carries the
   no-skill conserve/asitame release
-- Paired mode, the experimental startup pass and grid mode (flagged, gated)
+- The experimental startup pass (flagged, gated)
+- Grid mode (`experimentalGrid`): not ported, host-gated. The engine enables
+  it whenever the key is present (21 to 120 horses), so `prepare` flags any
+  request carrying the key
 - Ground and terrain lookups beyond the slope and corner geometry events
 - Replay frame encoding outside the gate's frame comparison

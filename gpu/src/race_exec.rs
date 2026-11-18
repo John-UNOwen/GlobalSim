@@ -18,7 +18,7 @@ pub const RACE_MAX_TICKS: usize = 6144;
 pub const RI_STRIDE: usize = 320;
 pub const RIL_STRIDE: usize = 576;
 pub const ST_STRIDE: usize = 112;
-pub const SCR_U_WORDS: usize = SCR_RACE + 192;
+pub const SCR_U_WORDS: usize = SCR_BANKS + 24 * BANK_WORDS;
 pub const SRL_WORDS: usize = SRL_HP_OUT_L + 24 * 64;
 pub const DT: f32 = 0.0666;
 
@@ -93,6 +93,8 @@ const SCR_LISTS: usize = SCR_SF + SF_STRIDE * 24;
 const SCR_CAND: usize = SCR_LISTS + LIST_STRIDE * 24;
 const SCR_CACHED: usize = (SCR_CAND + 3 * CAND_MAX + 63) & !63;
 const SCR_RACE: usize = SCR_CACHED + 4 * LIST_STRIDE * 24;
+const SCR_BANKS: usize = SCR_RACE + 192; // paired mode: one RUN bank per runner
+const BANK_WORDS: usize = 60;
 const SRL_HP: usize = 71 * 24;
 const RD_WORDS: usize = 8 * 24 + SRL_HP + 32;
 const SRL_STATS_IN_L: usize = RD_WORDS;
@@ -103,7 +105,6 @@ const SRL_HP_OUT_L: usize = SRL_HP_IN_L + 24 * 48;
 
 // Fallback codes the kernel reports, mirrors of race.cl FB_*.
 pub const FB_N: u32 = 1;
-pub const FB_PAIRED: u32 = 2;
 pub const FB_STARTUP: u32 = 3;
 pub const FB_HOST: u32 = 4;
 pub const FB_INIT: u32 = 5;
@@ -431,11 +432,13 @@ fn prepare(request: &str, seed: i64, globals: &Value, grids: &Value, courses: &V
     if horses.is_empty() || horses.len() > RACE_MAXR {
         return flagged("roster size outside the kernel's range");
     }
-    if root.get("pairedRandomStreams").and_then(Value::as_bool) == Some(true) {
-        return flagged("paired random streams");
-    }
     if root.get("experimentalRetailStartup").and_then(Value::as_bool) == Some(true) {
         return flagged("startup mode");
+    }
+    // The engine enables grid mode whenever the key is present, 21 to 120
+    // horses. The kernel has no grid start, so any presence flags the race.
+    if root.get("experimentalGrid").is_some() {
+        return flagged("grid mode");
     }
     if root.get("experimentalRetailRuntime").and_then(Value::as_bool) != Some(true) {
         return flagged("non-retail runtime");
@@ -482,6 +485,8 @@ fn prepare(request: &str, seed: i64, globals: &Value, grids: &Value, courses: &V
     ri[RI_N] = horses.len() as u32;
     ri[RI_GROUND] = ground as u32;
     ri[RI_SURFACE] = surface as u32;
+    ri[RI_PAIRED] =
+        (root.get("pairedRandomStreams").and_then(Value::as_bool) == Some(true)) as u32;
     ri[RI_NSLOPES] = nslopes as u32;
     let temptation = group(group(globals, "parameters")?, "Temptation")?;
     ri[RI_LOT_MIN] = temptation.get_i64("TemptationLotSectionMin")? as u32;
@@ -798,7 +803,6 @@ fn read_f64(st: &[u32], word: usize) -> Option<f64> {
 fn kernel_fallback(flag: u32, arg: u32) -> Option<String> {
     (flag != 0).then(|| match (flag, arg) {
         (FB_N, _) => "roster size the kernel rejects".into(),
-        (FB_PAIRED, _) => "paired streams reached the kernel".into(),
         (FB_STARTUP, _) => "startup reached the kernel".into(),
         (FB_HOST, code) => format!("kernel host flag {code}"),
         (FB_INIT, _) => "the initialization chain flagged".into(),
@@ -839,6 +843,21 @@ pub fn multi_request(request: &str, course: i32, seed: i64) -> Result<String, St
     }
     map.insert("courseId".into(), Value::Number(f64::from(course)));
     map.insert("seed".into(), Value::Number(seed as f64));
+    let mut out = String::new();
+    json::to_string_into(&value, &mut out);
+    Ok(out)
+}
+
+/// `multi_request` with the `pairedRandomStreams` key set.
+pub fn paired_request(request: &str, course: i32, seed: i64) -> Result<String, String> {
+    let mut value = json::parse(request)?;
+    let Value::Object(map) = &mut value else { return Err("request is not a JSON object".into()) };
+    if !map.get("horses").is_some_and(|h| h.as_array().is_some()) {
+        return Err("request has no horses array".into());
+    }
+    map.insert("courseId".into(), Value::Number(f64::from(course)));
+    map.insert("seed".into(), Value::Number(seed as f64));
+    map.insert("pairedRandomStreams".into(), Value::Bool(true));
     let mut out = String::new();
     json::to_string_into(&value, &mut out);
     Ok(out)

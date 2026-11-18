@@ -4,16 +4,15 @@
 // retail_core.cl sources are concatenated ahead of this file by the host
 // (gpu/src/gpu.rs).
 //
-// Domain: retail runtime, no skills, no paired streams, no startup mode.
-// Anything else sets ST_FALLBACK with the domain code in ST_ARG (1 bad n,
-// 2 paired, 3 startup, 4 host flag, 5 initialization input, 6 geometry).
-// The field logic (ranks, pacemaker, lane blocking and movement, duel and
-// spot competition) runs in the work item in roster order. Skills keep
-// their own streams on the CPU, so a request carrying any skill still
-// falls back at the host.
+// Domain: retail runtime, no skills, no startup mode. Paired mode gives each
+// runner its own RUN substream bank, fresh from the race seed. Anything else
+// sets ST_FALLBACK with the domain code in ST_ARG (1 bad n, 3 startup,
+// 4 host flag, 5 initialization input, 6 geometry). The field logic (ranks,
+// pacemaker, lane blocking and movement, duel and spot competition) runs in
+// the work item in roster order. Skills keep their own streams on the CPU, so
+// a request carrying any skill still falls back at the host.
 
 #define FB_N 1u
-#define FB_PAIRED 2u
 #define FB_STARTUP 3u
 #define FB_HOST 4u
 #define FB_INIT 5u
@@ -354,10 +353,6 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         race_fb(st, FB_N);
         return;
     }
-    if ((int)ri[RI_PAIRED]) {
-        race_fb(st, FB_PAIRED);
-        return;
-    }
     if ((int)ri[RI_STARTUP]) {
         race_fb(st, FB_STARTUP);
         return;
@@ -422,13 +417,16 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
 
     // One shared initialization block drives force offsets, delays, section
     // modifiers and the rushing lottery from the run's RetailRandom stream.
+    // Paired mode sends each runner's rushing lottery to its own RUSH
+    // substream (lib.rs:760), same as the engine's init.
+    const int paired = (int)ri[RI_PAIRED];
     {
         __global uint* ib = scr + SCR_INIT_IN;
         ib[US_MODE] = (uint)IM_INIT;
         ib[US_A] = ri[RI_SEED];
         ib[US_B] = (uint)n;
-        ib[US_C] = 0u;
-        ib[US_D] = 0u;
+        ib[US_C] = (uint)paired;
+        ib[US_D] = ri[RI_SEED];
         ib[US_E] = ri[RI_LOT_MIN];
         ib[US_F] = ri[RI_LOT_MAX];
         for (int r = 0; r < n; r++) {
@@ -465,9 +463,18 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             race_fb(st, FB_INIT);
             return;
         }
-        // The race rng is the clone the runtime takes at the after_delays
-        // point, so later initialization draws never touch the race stream.
-        for (int i = 0; i < BANK_WORDS; i++) bank[i] = ob[OS_BANK_FOR_RACE + i];
+        // Unpaired: the race rng is the clone the runtime takes at the
+        // after_delays point, so later initialization draws never touch the
+        // race stream. Paired: lib.rs:794 replaces that clone per runner with
+        // a fresh RUN substream, so each runner ticks on its own bank.
+        if (paired) {
+            for (int r = 0; r < n; r++) {
+                const ulong hash = r128_substream_hash_run((int)ri[RI_SEED], (uint)r);
+                r128_new(scr + SCR_BANKS + r * BANK_WORDS, (int)(uint)(hash >> 33));
+            }
+        } else {
+            for (int i = 0; i < BANK_WORDS; i++) bank[i] = ob[OS_BANK_FOR_RACE + i];
+        }
     }
 
     int ordinary_nige = 0;
@@ -788,10 +795,13 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             si[SI_BLOCKER + r] = (uint)front;
             sf[SF_BLOCKER_GAP + r] = front_gap;
         }
-        // Movement in roster order; the live columns are the roster.
+        // Movement in roster order; the live columns are the roster. Paired
+        // runners draw race dice from their own bank, the others share one.
         for (int r = 0; r < n; r++) {
+            __global uint* runner_bank =
+                paired ? scr + SCR_BANKS + r * BANK_WORDS : bank;
             const float advance_distance = race_step(si, scr, sf, sd, shl, lists,
-                cached, bank, c_start, c_speed, c_time, pd, rds, r, n,
+                cached, runner_bank, c_start, c_speed, c_time, pd, rds, r, n,
                 empty_move, dt, course_distance);
             rs[RS_ADV + r] = 0u;
             if (advance_distance < 0.f) {

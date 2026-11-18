@@ -223,3 +223,20 @@ static ulong r128_substream_hash4(const int seed, const uint runner) {
     hash ^= hash >> 33;
     return hash;
 }
+
+// The three-byte key "RUN", the fresh stream lib.rs:794 hands each runner's
+// retail runtime in paired mode.
+static ulong r128_substream_hash_run(const int seed, const uint runner) {
+    ulong hash = 0xcbf29ce484222325UL ^ (ulong)(uint)seed;
+    hash = (hash * 0x100000001b3UL) ^ (ulong)runner;
+    const uchar bytes[3] = {'R', 'U', 'N'};
+    for (int i = 0; i < 3; i++) {
+        hash = (hash ^ (ulong)bytes[i]) * 0x100000001b3UL;
+    }
+    hash ^= hash >> 33;
+    hash = hash * 0xff51afd7ed558ccdUL;
+    hash ^= hash >> 33;
+    hash = hash * 0xc4ceb9fe1a85ec53UL;
+    hash ^= hash >> 33;
+    return hash;
+}
