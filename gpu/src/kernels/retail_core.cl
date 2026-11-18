@@ -48,6 +48,11 @@
 #define RI_LOT_MIN 13
 #define RI_LOT_MAX 14
 #define RI_EMPTY_MOVE 15       // course empty_in_move (first_move_lane_point > 0)
+// Debug-only: when nonzero and equal to the frame index just captured, the
+// loop writes pace, clock, rush, lane, and lane-list state for each runner
+// into the fourteen reserved tail frame slots. Zero in production keeps
+// those slots zero.
+#define RI_DEBUG_TICK 304
 // Per-runner block, slot RI_RUN0 + RI_RUN_STRIDE * r.
 #define RI_RUN0 16
 #define RI_RUN_STRIDE 12
@@ -1429,6 +1434,14 @@ static void lane_collect(__global uint* si, __global float* sf, __global uint* l
     sf[SF_L_SIDE_INNER + r] = 0.f;
     int k = 0;
     while (k < n) {
+        // The cache covers every roster slot, as the engine's
+        // extend_from_slice does. The reach cutoff below only trims the
+        // visible/front/side analysis; the crowd walk and front blocker
+        // scan read cached rows far behind and far ahead.
+        cached[4 * (LIST_STRIDE * r + k)] = convert_float_rte(sd[SD_POS + k]);
+        cached[4 * (LIST_STRIDE * r + k) + 1] = convert_float_rte(sd[SD_LANE + k]);
+        cached[4 * (LIST_STRIDE * r + k) + 2] = sf0[SF_OBSERVED + k];
+        cached[4 * (LIST_STRIDE * r + k) + 3] = convert_float_rte(sd[SD_TSWSK + k]);
         if (k != r) {
             const float other_position = convert_float_rte(sd[SD_POS + k]);
             const float position_gap = other_position - position;
@@ -1471,10 +1484,6 @@ static void lane_collect(__global uint* si, __global float* sf, __global uint* l
                 inner_nearby = 1;
             }
         }
-        cached[4 * (LIST_STRIDE * r + k)] = convert_float_rte(sd[SD_POS + k]);
-        cached[4 * (LIST_STRIDE * r + k) + 1] = convert_float_rte(sd[SD_LANE + k]);
-        cached[4 * (LIST_STRIDE * r + k) + 2] = sf0[SF_OBSERVED + k];
-        cached[4 * (LIST_STRIDE * r + k) + 3] = convert_float_rte(sd[SD_TSWSK + k]);
         k += 1;
     }
     si[SI_L_CANIN + r] = (uint)can_in;
@@ -1535,7 +1544,7 @@ static void lane_update_targets(__global uint* si, __global float* sf, __global 
     __global float* cached, __global const double* sd, __global const float* sf0,
     const int r, const int n, __global const double* pd, const float dt,
     const float position, const float lane, const float owner_speed,
-    const float owner_target) {
+    const float owner_target, const long dbg_row, __global double* fr) {
     const float front_distance = convert_float_rte(pd[PT_BLOCKING]);
     const float front_lane_param = convert_float_rte(pd[PL_FRONT_LANE]);
     int front = (int)si[SI_L_FRONT_IDX + r];
@@ -1574,6 +1583,12 @@ static void lane_update_targets(__global uint* si, __global float* sf, __global 
     }
     targets_len = write;
     const int existing_count = targets_len;
+    uint orig[6];
+    int norig = 0;
+    while (norig < existing_count && norig < 6) {
+        orig[norig] = targets[norig];
+        norig += 1;
+    }
     int v = 0;
     while (v < (int)si[SI_L_VISN + r]) {
         const int j = (int)visible[v];
@@ -1604,6 +1619,22 @@ static void lane_update_targets(__global uint* si, __global float* sf, __global 
         t += 1;
     }
     targets_len = write;
+    if (dbg_row >= 0) {
+        int k = 0;
+        while (k < 6) {
+            double keep = -1.;
+            if (k < norig) {
+                keep = 0.;
+                int q = 0;
+                while (q < targets_len) {
+                    if ((int)targets[q] == (int)orig[k]) { keep = 1.; }
+                    q += 1;
+                }
+            }
+            fr[dbg_row + 6 * (long)r + k] = keep;
+            k += 1;
+        }
+    }
     if (front >= 0) {
         int contains = 0;
         t = 0;
@@ -1641,11 +1672,16 @@ static float lane_passing_target(__global uint* si, __global uint* lists,
     const int r, const int n,
     const float lane, const float position, const int phase, const float max_lane,
     const float side_lane, const int can_in, const int can_out, const float in_space,
-    const float out_space, const int lane_preference) {
+    const float out_space, const int lane_preference,
+    const long dbg_base, __global double* fr) {
     const int targets_len = (int)si[SI_L_TGTN + r];
     const int visible_len = (int)si[SI_L_VISN + r];
     __global const uint* targets = lists + LIST_STRIDE * r;
     __global const uint* visible = lists + LIST_STRIDE * r + RACE_MAXR;
+    // Trace row 3: the walk inputs of the second target, written near the
+    // end of the candidate loop. Row 2 (survived-target flags) is written
+    // by the target update.
+    const long row3 = dbg_base >= 0 ? dbg_base + (long)12 * n : -1;
     float best = lane;
     float best_score = INFINITY;
     float best_origin = -INFINITY;
@@ -1717,6 +1753,21 @@ static float lane_passing_target(__global uint* si, __global uint* lists,
                     }
                     v += 1;
                 }
+            }
+            if (row3 >= 0 && t == 1 && dsign == 1) {
+                // Row 3: the crowd-walk inputs for the walk anchored on
+                // target 1 (row 3's cached and live lane, row 4's cached
+                // and live lane) and the + direction's final edge.
+                fr[row3 + 6 * (long)r + 0] =
+                    (double)cached[4 * (LIST_STRIDE * r + 3) + 1];
+                fr[row3 + 6 * (long)r + 1] =
+                    (double)convert_float_rte(sd[SD_LANE + 3]);
+                fr[row3 + 6 * (long)r + 2] =
+                    (double)cached[4 * (LIST_STRIDE * r + 4) + 1];
+                fr[row3 + 6 * (long)r + 3] =
+                    (double)convert_float_rte(sd[SD_LANE + 4]);
+                fr[row3 + 6 * (long)r + 4] = (double)(candidate);
+                fr[row3 + 6 * (long)r + 5] = (double)(edge);
             }
             if (!blocked) {
                 const float origin = cached[4 * (LIST_STRIDE * r + idx)];
@@ -1796,6 +1847,14 @@ static float lane_passing_target(__global uint* si, __global uint* lists,
             best = straight;
         }
     }
+    if (dbg_base >= 0) {
+        fr[dbg_base + 6 * (long)r + 0] = (double)nearest;
+        fr[dbg_base + 6 * (long)r + 1] = (double)best;
+        fr[dbg_base + 6 * (long)r + 2] = (double)straight;
+        fr[dbg_base + 6 * (long)r + 3] = (double)blocked;
+        fr[dbg_base + 6 * (long)r + 4] = (double)(int)si[SI_L_FRONT_IDX + r];
+        fr[dbg_base + 6 * (long)r + 5] = (double)targets_len;
+    }
     return best;
 }
 
@@ -1805,7 +1864,8 @@ static float lane_target(__global uint* si, __global float* sf, __global uint* l
     __global float* cached, __global const double* sd, __global const float* sf0,
     __global const double* pd, __global uint* bank, const int r, const int n,
     const float position, const float lane, const float owner_speed,
-    const float owner_target, const int phase, const int has_hp, const int pace_down) {
+    const float owner_target, const int phase, const int has_hp, const int pace_down,
+    const long dbg_base, __global double* fr) {
     const int can_in = (int)si[SI_L_CANIN + r];
     const int can_out = (int)si[SI_L_CANOUT + r];
     const float in_space = sf[SF_L_SIDE_INS + r];
@@ -1835,7 +1895,8 @@ static float lane_target(__global uint* si, __global float* sf, __global uint* l
             || !(first_move - 200.f <= position && position <= first_move));
     if (passing) {
         float target = lane_passing_target(si, lists, cached, sd, sf0, r, n, lane,
-            position, phase, max_lane, side_lane, can_in, can_out, in_space, out_space, 0);
+            position, phase, max_lane, side_lane, can_in, can_out, in_space, out_space, 0,
+            dbg_base, fr);
         if ((int)si[SI_L_XOP + r] && target >= lane && sf[SF_L_XO + r] > target
             && lane_reachable(can_in, can_out, in_space, out_space, lane, sf[SF_L_XO + r])) {
             target = sf[SF_L_XO + r];
@@ -2536,6 +2597,9 @@ static void spot_update(__global uint* scr, __global uint* si, __global double* 
     }
     int count = 0, early = 0, started[RACE_MAXR];
     for (int j = 0; j < n; j++) {
+        // Every slot needs a value: the start loop below reads all j, and a
+        // skipped other-style row would otherwise read stack garbage.
+        started[j] = 0;
         if ((int)si[SI_STRATEGY + j] != strategy) {
             continue;
         }

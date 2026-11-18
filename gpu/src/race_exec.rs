@@ -51,6 +51,7 @@ pub const RI_NCOR: usize = 12;
 pub const RI_LOT_MIN: usize = 13;
 pub const RI_LOT_MAX: usize = 14;
 pub const RI_EMPTY_MOVE: usize = 15;
+pub const RI_DEBUG_TICK: usize = 304;
 pub const RI_RUN0: usize = 16;
 pub const RI_RUN_STRIDE: usize = 12;
 pub const RR_STYLE: usize = 0;
@@ -164,6 +165,18 @@ pub struct RaceGpu {
     /// The race's skillEvents (horseIndex, id) pairs in kernel order, id
     /// EV_KAKARI for a completed rush episode.
     pub events: Vec<(usize, u32)>,
+    /// Test diagnostics only, empty unless the request set RI_DEBUG_TICK.
+    /// The fourteen reserved tail frame slots read back as fourteen blocks
+    /// of `runners` rows of six: pre-move pace (mode, coefficient,
+    /// pacemaker, gap, rank, RS_STYLE), pre-move clock (target speed, exit
+    /// gap, cooldown, interval, competition flags, spot timer), pre-move
+    /// rush, pre-move lane room (lane max, lane cooldown, x-overlap, side
+    /// inner, side inside, side outside), then the passing-search trace
+    /// (nearest, best target, straight, clear flag, front and target count,
+    /// retained-target flags, the second target's crowd-walk inputs), then
+    /// the same seven blocks after the move.
+    /// Present to bisect a divergence, never in a replay reply.
+    pub debug_pace: Vec<[f64; 6]>,
 }
 
 pub struct RaceRun {
@@ -505,6 +518,11 @@ fn prepare(
     }
     if root.get("experimentalRetailRuntime").and_then(Value::as_bool) != Some(true) {
         return flagged("non-retail runtime");
+    }
+    // The Oonige start-dash subsystem is not ported: a field with an Oonige
+    // diverges at tick 1 without a flag. Refuse it until the port lands.
+    if horses.iter().any(|h| h.get_str("strategy").map(|s| s.eq_ignore_ascii_case("OONIGE")).unwrap_or(false)) {
+        return flagged("Oonige start dash");
     }
 
     let mut ri = vec![0u32; RI_STRIDE];
@@ -934,6 +952,7 @@ impl RaceContext {
             delay_all: Vec::new(),
             lss_all: Vec::new(),
             events: Vec::new(),
+            debug_pace: Vec::new(),
         };
         if race.host_fallback.is_none() && timing.is_none() {
             let st = &status[slot * ST_STRIDE..][..ST_STRIDE];
@@ -958,6 +977,16 @@ impl RaceContext {
                             .collect()
                     })
                     .collect();
+                if race.ri[RI_DEBUG_TICK] != 0 {
+                    let tail = base + (RACE_MAX_TICKS - 14) * n * 6;
+                    out.debug_pace = (0..14 * n)
+                        .map(|row| {
+                            let mut v = [0f64; 6];
+                            v.copy_from_slice(&frames_all[tail + row * 6..tail + row * 6 + 6]);
+                            v
+                        })
+                        .collect();
+                }
                 out.finish_step = read_f64(st, ST_FINISH0);
                 out.finish_raw = read_f64(st, ST_FINISH0 + 2);
                 out.finish_step_all = (0..race.n)
@@ -986,6 +1015,25 @@ impl RaceContext {
 
     Ok((RaceRun { device: self.spike.device.clone(), build_ms: self.spike.build_ms, races }, bench))
     }
+}
+
+/// Diagnostic version of `run`: snapshot the pace decision state entering
+/// and leaving the movement pass of frame `debug_tick`, carried in
+/// `RaceGpu::debug_pace`. Zero leaves the kernel snapshot off.
+pub fn run_with_snapshot(
+    requests: &[(String, i64)],
+    debug_tick: usize,
+) -> Result<RaceRun, String> {
+    let mut ctx = RaceContext::open()?;
+    let mut prepared: Vec<Prepared> = Vec::with_capacity(requests.len());
+    for (request, seed) in requests {
+        let mut p = ctx.prepare(request, *seed)?;
+        if debug_tick > 0 && p.ri.len() > RI_DEBUG_TICK {
+            p.ri[RI_DEBUG_TICK] = debug_tick as u32;
+        }
+        prepared.push(p);
+    }
+    Ok(ctx.run_prepared(&mut prepared, None)?.0)
 }
 
 /// The module-level entry: open a context, prepare every request (one parse

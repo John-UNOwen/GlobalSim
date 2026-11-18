@@ -71,7 +71,8 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
     __global float* c_time, __global const double* pd, __global const double* rd,
     const int r, const int n, const int empty_move, const float dt,
     const double course_distance, __global const uint* skt,
-    __global uint* ev, __global uint* st) {
+    __global uint* ev, __global uint* st,
+    __global double* fr, const long dbg_base) {
     const int strategy = (int)si[SI_STRATEGY + r];
     const float dist_f = convert_float_rte(course_distance);
     const int finished = (int)si[SI_FINISHED + r];
@@ -165,12 +166,13 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
     const float position_f = convert_float_rte(sd[SD_POS + r]);
     const float lane_f = convert_float_rte(sd[SD_LANE + r]);
     lane_update_targets(si, sf, lists, cached, sd, sf, r, n, pd, dt,
-        position_f, lane_f, sf[SF_OBSERVED + r], convert_float_rte(sd[SD_TSWSK + r]));
+        position_f, lane_f, sf[SF_OBSERVED + r], convert_float_rte(sd[SD_TSWSK + r]),
+        dbg_base >= 0 ? dbg_base + (long)6 * n : -1, fr);
     if (empty_move && sf[SF_AFTER_GOAL + r] < 1.f) {
         const float target = lane_target(si, sf, lists, cached, sd, sf, pd, bank,
             r, n, position_f, lane_f, sf[SF_OBSERVED + r],
             convert_float_rte(sd[SD_TSWSK + r]), phase, (int)(shl_r[SH_HP] > 0.),
-            (int)si[SI_PACEDOWN + r]);
+            (int)si[SI_PACEDOWN + r], dbg_base, fr);
         sd[SD_LANET + r] = (double)target;
     }
 
@@ -847,12 +849,19 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         }
         // Movement in roster order; the live columns are the roster. Paired
         // runners draw race dice from their own bank, the others share one.
+        const uint snap = ri[RI_DEBUG_TICK];
         for (int r = 0; r < n; r++) {
             __global uint* runner_bank =
                 paired ? scr + SCR_BANKS + r * BANK_WORDS : bank;
+            const long dbg_base = (snap > 0u
+                && (tick + 1 == (int)snap - 1 || tick + 1 == (int)snap))
+                ? ((long)id * RACE_MAX_TICKS + (RACE_MAX_TICKS - 14 + 4
+                    + (tick + 1 == (int)snap ? 7 : 0))) * (long)n * 6
+                : -1L;
             const float advance_distance = race_step(si, scr, sf, sd, shl, lists,
-                cached, runner_bank, c_start, c_speed, c_time, pd, rds, r, n,
-                empty_move, dt, course_distance, skt, ev, st);
+                cached, runner_bank, c_start, c_speed, c_time, pd, rds, r,
+                n, empty_move, dt, course_distance, skt, ev, st, frames_all,
+                dbg_base);
             // stadium_score::RushingScore.update(is_kakari, dt), after the
             // step and before the gated continue, as the engine loop does.
             if ((int)si[SI_KAKARI + r]) {
@@ -953,6 +962,97 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
                 sd[SD_LANE + r], (double)(int)si[SI_RMODE + r],
                 (double)(int)si[SI_BLOCKER + r]);
             prev_pos[r] = sd[SD_POS + r];
+        }
+        // Diagnostics: two reserved tail slots carry the pace decision
+        // state. Slot -2 is the entering state of the frame's movement
+        // pass, slot -1 the state after it, so the pace context reads and
+        // the mode transition land side by side for one frame.
+        if (snap > 0u && (tick + 1 == (int)snap - 1 || tick + 1 == (int)snap)) {
+            const int set = tick + 1 == (int)snap ? 1 : 0;
+            long at = ((long)id * RACE_MAX_TICKS + (RACE_MAX_TICKS - 14 + 7 * set))
+                * (long)n * 6;
+            for (int r = 0; r < n; r++) {
+                const int pm = (int)rs[RS_PM] - 1;
+                double gap = 0.0;
+                if (pm >= 0 && pm != r) {
+                    gap = sd[SD_POS + pm] - sd[SD_POS + r];
+                }
+                frames_all[at + r * 6 + 0] = (double)(int)si[SI_PS_MODE + r];
+                frames_all[at + r * 6 + 1] = (double)sf[SF_PS_COEF + r];
+                frames_all[at + r * 6 + 2] = (double)pm;
+                frames_all[at + r * 6 + 3] = gap;
+                frames_all[at + r * 6 + 4] = (double)(int)si[SI_RANKCOL + r];
+                frames_all[at + r * 6 + 5] = (double)(int)rs[RS_STYLE + r];
+            }
+            at += (long)n * 6;
+            for (int r = 0; r < n; r++) {
+                const uint flags = si[SI_SPOT_ACTIVE + r]
+                    | (si[SI_SPOT_STARTED + r] << 1)
+                    | (si[SI_SPOT_TOKEN + r] << 2)
+                    | (si[SI_SPOT_LATCH + r] << 3)
+                    | (si[SI_SPOT_CLOSED + r] << 4)
+                    | (si[SI_DUEL_ACTIVE + r] << 5)
+                    | (si[SI_DUEL_FIGHT + r] << 6)
+                    | (si[SI_DUEL_TOKEN + r] << 7);
+                frames_all[at + r * 6 + 0] = sd[SD_TS + r];
+                frames_all[at + r * 6 + 1] = (double)sf[SF_PS_EXIT + r];
+                frames_all[at + r * 6 + 2] = (double)sf[SF_PS_COOL + r];
+                frames_all[at + r * 6 + 3] = (double)sf[SF_PS_INTVL + r];
+                frames_all[at + r * 6 + 4] = (double)(int)flags;
+                frames_all[at + r * 6 + 5] = sd[SD_SPOT_TIMER + r];
+            }
+            at += (long)n * 6;
+            for (int r = 0; r < n; r++) {
+                frames_all[at + r * 6 + 0] = (double)(int)si[SI_KAKARI + r];
+                frames_all[at + r * 6 + 1] = (double)(int)si[SI_RMODE + r];
+                frames_all[at + r * 6 + 2] = (double)sf[SF_RS_CHECK + r];
+                frames_all[at + r * 6 + 3] = (double)sf[SF_RS_MAXREM + r];
+                frames_all[at + r * 6 + 4] = (double)(int)si[SI_TEMPT + r];
+                frames_all[at + r * 6 + 5] = (double)sf[SF_RREM + r];
+            }
+            at += (long)n * 6;
+            for (int r = 0; r < n; r++) {
+                frames_all[at + r * 6 + 0] = (double)sf[SF_LANEMAX + r];
+                frames_all[at + r * 6 + 1] = (double)sf[SF_L_COOLDOWN + r];
+                frames_all[at + r * 6 + 2] = (double)sf[SF_L_XO + r];
+                frames_all[at + r * 6 + 3] = (double)sf[SF_L_SIDE_INNER + r];
+                frames_all[at + r * 6 + 4] = (double)sf[SF_L_SIDE_INS + r];
+                frames_all[at + r * 6 + 5] = (double)sf[SF_L_SIDE_OUTS + r];
+            }
+            at += (long)n * 6;
+            // The passing-search trace already owns this block's rows.
+            if (!(tick + 1 == (int)snap - 1 || tick + 1 == (int)snap)) {
+                for (int r = 0; r < n; r++) {
+                    frames_all[at + r * 6 + 0] = sd[SD_LANET + r];
+                    frames_all[at + r * 6 + 1] = (double)sf[SF_MV_LANE + r];
+                    frames_all[at + r * 6 + 2] = (double)sf[SF_MV_TARGET + r];
+                    frames_all[at + r * 6 + 3] = (double)sf[SF_MV_SPEED + r];
+                    frames_all[at + r * 6 + 4] = (double)sf[SF_MV_TIME + r];
+                    frames_all[at + r * 6 + 5] = (double)(int)si[SI_MV_DIR + r];
+                }
+                at += (long)n * 6;
+                for (int r = 0; r < n; r++) {
+                    const __global uint* tl = lists + LIST_STRIDE * r;
+                    frames_all[at + r * 6 + 0] = (double)(int)si[SI_L_TGTN + r];
+                    frames_all[at + r * 6 + 1] = (double)(int)si[SI_L_VISN + r];
+                    frames_all[at + r * 6 + 2] = (double)(int)tl[0];
+                    frames_all[at + r * 6 + 3] = (double)(int)tl[1];
+                    frames_all[at + r * 6 + 4] = (double)(int)tl[2];
+                    frames_all[at + r * 6 + 5] = (double)(int)tl[3];
+                }
+                at += (long)n * 6;
+                for (int r = 0; r < n; r++) {
+                    const __global uint* vl = lists + LIST_STRIDE * r + RACE_MAXR;
+                    frames_all[at + r * 6 + 0] = (double)(int)vl[0];
+                    frames_all[at + r * 6 + 1] = (double)(int)vl[1];
+                    frames_all[at + r * 6 + 2] = (double)(int)vl[2];
+                    frames_all[at + r * 6 + 3] = (double)(int)vl[3];
+                    frames_all[at + r * 6 + 4] = (double)(int)vl[4];
+                    frames_all[at + r * 6 + 5] = (double)(int)vl[5];
+                }
+            } else {
+                at += (long)n * 12;
+            }
         }
         any_open = 0;
         for (int r = 0; r < n; r++) {
