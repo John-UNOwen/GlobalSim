@@ -99,6 +99,7 @@ name = "globalsim-gpu"
 version = "0.1.0"
 dependencies = [
  "ocl",
+ "race_engine_rs",
 ]
 
 [[package]]
@@ -206,6 +207,10 @@ dependencies = [
  "crossbeam",
  "futures",
 ]
+
+[[package]]
+name = "race_engine_rs"
+version = "0.1.0"
 
 [[package]]
 name = "rustc_version"

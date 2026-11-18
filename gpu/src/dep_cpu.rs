@@ -1,0 +1,69 @@
+//! The CPU side of the whole-race comparison tool: run the full engine
+//! (path dependency, public API only) and decode its dense replay frames.
+
+use crate::json::{self, Value};
+
+/// One tick of replay: a row of the six replay values per runner, in the
+/// order of `docs/BINARY-REPLAY.md`: pos, speed, hp, lane, rushing, blocker.
+pub type TickFrame = Vec<[f64; 6]>;
+
+pub struct CpuRace {
+    pub frames: Vec<TickFrame>,
+    pub runners: usize,
+    /// Runners whose last-tick position has reached the course distance.
+    pub finishers: usize,
+}
+
+pub fn course_id(request: &str) -> Result<i32, String> {
+    Ok(json::parse(request)?.get_i64("courseId")? as i32)
+}
+
+pub fn request_seed(request: &str) -> Result<i64, String> {
+    json::parse(request)?.get_i64("seed")
+}
+
+/// Reads a file from the engine repo's `data/` directory. The tool points at
+/// the checkout it is built inside, the same data the engine embeds.
+pub fn engine_data(file: &str) -> Result<String, String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data").join(file);
+    std::fs::read_to_string(&path).map_err(|e| format!("reading {} failed: {e}", path.display()))
+}
+
+pub fn course_distance(course_id: i32) -> Result<f32, String> {
+    let root = json::parse(&engine_data("course_data.json")?)?;
+    root.get(&course_id.to_string())
+        .and_then(|course| course.get_f64("distance").ok())
+        .map(|distance| distance as f32)
+        .ok_or_else(|| format!("course_data.json has no distance for {course_id}"))
+}
+
+/// The request with `retainAllFrames: true` forced on.
+pub fn with_retain_all_frames(request: &str) -> Result<String, String> {
+    let mut value = json::parse(request)?;
+    match &mut value {
+        Value::Object(map) => {
+            map.insert("retainAllFrames".into(), Value::Bool(true));
+        }
+        _ => return Err("race request must be a JSON object".into()),
+    }
+    let mut out = String::new();
+    json::to_string_into(&value, &mut out);
+    Ok(out)
+}
+
+/// Runs the engine on (request, seed) with every frame retained and decodes
+/// the runner rows. Tick timestamps stay out of the rows: the replay values
+/// are what the parity contract compares.
+pub fn run_cpu_race(request: &str, seed: i64) -> Result<CpuRace, String> {
+    let distance = course_distance(course_id(request)?)? as f64;
+    let mut prepared = globalsim::PreparedRace::new(&with_retain_all_frames(request)?)?;
+    let simulation = prepared.run(seed)?;
+    let frames = simulation.frames();
+    let runners = frames.horse_count();
+    let decoded: Vec<TickFrame> =
+        (0..frames.len()).map(|index| frames.frame(index).1.to_vec()).collect();
+    let finishers = decoded
+        .last()
+        .map_or(0, |last| last.iter().filter(|row| row[0] >= distance).count());
+    Ok(CpuRace { frames: decoded, runners, finishers })
+}

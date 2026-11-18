@@ -16,8 +16,16 @@ gpu = ["dep:ocl"]
 
 [dependencies]
 ocl = { version = "=0.19.7", optional = true }
+# The full engine as a library for the whole-race comparison tool. Path dep
+# only, no copy. default-features off keeps mimalloc and its C toolchain out.
+# external-geometry lets the tool register course geometry like the wasm host.
+globalsim = { package = "race_engine_rs", path = "..", default-features = false, features = ["external-geometry"] }
 
 [[bin]]
 name = "bench"
 path = "src/bin/bench.rs"
 required-features = ["gpu"]
+
+[[bin]]
+name = "gpu-race-diff"
+path = "src/bin/gpu_race_diff.rs"

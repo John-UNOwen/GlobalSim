@@ -433,7 +433,13 @@ pub fn kernel_params() -> KernelParams {
     let path = jax_dir().join("globalsim_jax").join("global_parameters.json");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("reading {} failed: {e}", path.display()));
-    let root = json::parse(&text).expect("global_parameters.json parses");
+    kernel_params_from_text(&text)
+}
+
+/// Packs the same scalars from any file's text, so tools can read the
+/// engine's own `data/global_parameters.json` without the Jax checkout.
+pub fn kernel_params_from_text(text: &str) -> KernelParams {
+    let root = json::parse(text).expect("global parameters parse");
     let parameters = root.get("parameters").expect("parameters object");
     let group = |key| parameters.get(key).unwrap_or_else(|| panic!("group {key}"));
     let number = |value: &json::Value, key: &str| value.get_f64(key).unwrap_or_else(|_| panic!("number {key}")) as f32;
