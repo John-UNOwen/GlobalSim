@@ -690,7 +690,9 @@ and the 24-race matrix test above pins the class of it.
 
 `facade::GpuRaces` is the lane an app holds. `new` runs the exactness gate,
 loads the engine data and builds the race kernel once, `run_batch(requests,
-seeds)` answers a launch with one `BatchOutcome` per request, in input order.
+seeds)` answers a launch with one `BatchOutcome` per request, in input order,
+and `run_repeated(request, seeds)` answers one request over many seeds after
+preparing it once (see "Batch cost").
 
 The contract is the app's `run_compact` path. `meta` is the engine reply
 JSON without frames, restricted to the fields that path reads:
@@ -721,6 +723,50 @@ lanes: the kernel exports no `skillDetailEvents`, `competitionEvents`,
 `positioningPhases` or per-tick frame times inside the meta, and the compact
 contract asks for none of them.
 
+### `run_repeated` and the cost of one call
+
+`run_repeated(request, seeds)` runs one request over many seeds in one
+launch after preparing it once. The seed enters the prepared kernel inputs
+only through the `ri[RI_SEED]` word (`prepare` reads nothing else from it,
+the stats cases, the skill table, the parameter rows and the geometry are
+seed-independent, and the kernel reseeds every RNG stream from that word),
+so the entries past the first are a template clone with `with_seed` rewriting
+that word. Outputs are byte-identical to `run_batch` on the request repeated
+per seed (pinned by the two gate tests below), fallbacks included. A
+`run_batch` prepare cache keyed by request hash was the alternative and was
+rejected: it would keep every request alive indefinitely and make
+`run_batch`'s cost depend on call history.
+
+Measured on the B580, 2026-11-18, v77 line 1 through `multi_request`
+(course 10504, 9 runners, one course per batch; `--bin batch_profile`
+prints the tables):
+
+- Program builds are per `RaceContext::open`, not per call: race program
+  about 6 ms, initialization program about 2 ms, the device gate with its
+  `restricted_tick` program about 3 ms warm (first open in a process about
+  700 ms, driver cache cold). The 1.5 MB race binary costs a few ms at its
+  first dispatch, never per launch. The stats pre-pass used to run
+  `initialization::run`, which opened a fresh gated device and rebuilt the
+  initialization program every call (about 7-9 ms warm, 700 ms cold); it
+  now launches through the context's prebuilt program and costs about
+  0.3-4 ms.
+- The geometry registry loads and flattens each course once per context
+  (about 4-9 ms cold), then clones the flat tables per prepared race, and
+  one launch dedups the courses into shared tables (about 1 ms at 96
+  races of one course).
+- The fixed cost of a warm call is dominated by the race kernel itself: at
+  m = 1 enqueue takes 0 ms and the device run about 429 ms. It scales with
+  the race's tick count (course 11401, 1000 m: 712 ticks, 206 ms), not with
+  the race count (marginal about 3.1 ms per race to n = 96), and not with
+  buffer churn (ten back-to-back launches on the same buffers cost the same
+  429 ms each). Batching is therefore the lever, and every facade entry
+  already launches once per batch.
+- Per-seed marginal at n = 96: `run_batch` about 9.8 ms per seed (prepare
+  about 1.9, one 350 KB `playerHorseIndex` parse per race about 1.7, upload
+  about 1.1, launch share about 3.1, readback about 0.8, packet about 1,
+  decode about 0.2). `run_repeated` removes the prepare and the parse: about
+  6.3 ms per seed, wall 1372 ms to 1034 ms at n = 96.
+
 ### What `facade_gate` pins
 
 Verified 2026-11-18 on the gated B580 (`single_fp_config 0xbf`,
@@ -741,6 +787,15 @@ Verified 2026-11-18 on the gated B580 (`single_fp_config 0xbf`,
   synthetic device facts (fp64, single and double fp-config bits, and the
   no-device case), then grid, startup, runtime and roster refusals for the
   request. No device is opened.
+- `run_repeated_matches_run_batch_over_64_seeds`: the v77 line-1 request
+  (course 10504, 9 runners) with seeds 1..64 through `run_batch` on the
+  request repeated and through `run_repeated`: every meta string, packet
+  byte and fallback identical.
+- `run_repeated_matches_a_mixed_two_course_batch`: courses 10504 and 10604
+  (9 runners each, so launchable in one batch) plus a startup and an
+  unparseable request, `run_batch` on the mixed batch against
+  `run_repeated` per request: all four groups byte-identical, the flagged
+  and unparseable groups carrying the fallback arms.
 
 ### skillEvents: the engine writer sites, and what the kernel logs
 

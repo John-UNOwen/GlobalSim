@@ -227,6 +227,91 @@ fn a_startup_request_falls_back_and_its_siblings_stay_whole() {
     assert!(middle.meta.is_none() && middle.packet.is_none(), "a fallback race carries no meta or packet");
 }
 
+/// `run_repeated` against `run_batch`, the same request and seeds: every
+/// outcome field byte-identical. This is the hard contract of the
+/// prepare-once lane (the seed only enters the prepared inputs through
+/// `RI_SEED`, so the clone path must equal a per-seed prepare).
+#[test]
+fn run_repeated_matches_run_batch_over_64_seeds() {
+    let base = v77_line();
+    let geometry =
+        std::fs::read_to_string(repo_file("data/course_geometry/10504.json")).expect("geometry file");
+    globalsim::register_course_geometry(10504, geometry);
+
+    let request = race_exec::multi_request(&base, 10504, 1).expect("request");
+    let seeds: Vec<i32> = (1..=64).collect();
+    let requests: Vec<String> = seeds.iter().map(|_| request.clone()).collect();
+
+    let mut races = GpuRaces::new().expect("device gate");
+    let batched = races.run_batch(&requests, &seeds).expect("run_batch");
+    let repeated = races.run_repeated(&request, &seeds).expect("run_repeated");
+    assert_eq!(batched.len(), seeds.len());
+    assert_eq!(repeated.len(), seeds.len());
+    for (index, (batched, repeated)) in batched.iter().zip(&repeated).enumerate() {
+        let tag = format!("seed {}", seeds[index]);
+        assert_eq!(&batched.fallback, &repeated.fallback, "{tag}: fallback");
+        assert_eq!(&batched.meta, &repeated.meta, "{tag}: meta");
+        assert_eq!(&batched.packet, &repeated.packet, "{tag}: packet");
+        assert!(batched.meta.is_some(), "{tag}: the fixture should launch, got fallback {:?}", batched.fallback);
+    }
+}
+
+/// The shape `run_batch` supports and `run_repeated` splits: two courses in
+/// one mixed call. Each course answered on its own must byte-equal its slice
+/// of the mixed batch. A flagged and an unparseable request ride along to
+/// pin the fallback arms in both lanes.
+#[test]
+fn run_repeated_matches_a_mixed_two_course_batch() {
+    let base = v77_line();
+    for course in [10504, 10604] {
+        let geometry = std::fs::read_to_string(repo_file(&format!("data/course_geometry/{course}.json")))
+            .expect("geometry file");
+        globalsim::register_course_geometry(course, geometry);
+    }
+
+    let first = race_exec::multi_request(&base, 10504, 1).expect("first request");
+    let second = race_exec::multi_request(&base, 10604, 1).expect("second request");
+    let mut startup_value = json::parse(&first).expect("parses");
+    if let json::Value::Object(map) = &mut startup_value {
+        map.insert("experimentalRetailStartup".into(), json::Value::Bool(true));
+    }
+    let mut startup = String::new();
+    json::to_string_into(&startup_value, &mut startup);
+
+    let seeds = [1i32, 2, 3, 4];
+    let mut requests: Vec<String> = Vec::new();
+    requests.extend(std::iter::repeat(first.clone()).take(4));
+    requests.extend(std::iter::repeat(second.clone()).take(4));
+    requests.extend(std::iter::repeat(startup.clone()).take(2));
+    requests.extend(std::iter::repeat("not json".into()).take(2));
+    let all_seeds: Vec<i32> = [1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4].iter().copied().collect();
+
+    let mut races = GpuRaces::new().expect("device gate");
+    let batched = races.run_batch(&requests, &all_seeds).expect("run_batch");
+    let repeated_first = races.run_repeated(&first, &seeds).expect("run_repeated first");
+    let repeated_second = races.run_repeated(&second, &seeds).expect("run_repeated second");
+    let repeated_startup = races.run_repeated(&startup, &seeds).expect("run_repeated startup");
+    let repeated_broken = races.run_repeated("not json", &seeds).expect("run_repeated broken");
+
+    let groups = [
+        (&batched[0..4], repeated_first.as_slice()),
+        (&batched[4..8], repeated_second.as_slice()),
+        (&batched[8..10], &repeated_startup[0..2]),
+        (&batched[10..12], &repeated_broken[0..2]),
+    ];
+    for (course, group) in [("10504", groups[0]), ("10604", groups[1]), ("startup", groups[2]), ("broken", groups[3])] {
+        assert_eq!(group.0.len(), group.1.len(), "{course}: len");
+        for (index, (batched, repeated)) in group.0.iter().zip(group.1).enumerate() {
+            let tag = format!("{course} seed {}", seeds[index]);
+            assert_eq!(&batched.fallback, &repeated.fallback, "{tag}: fallback");
+            assert_eq!(&batched.meta, &repeated.meta, "{tag}: meta");
+            assert_eq!(&batched.packet, &repeated.packet, "{tag}: packet");
+        }
+    }
+    assert!(batched[8].fallback.is_some() && batched[8].meta.is_none(), "the startup slice must carry the fallback arm");
+    assert!(batched[10].fallback.is_some(), "the unparseable slice must carry the fallback arm");
+}
+
 fn facts(extensions: &str, single_fp_config: u64, double_fp_config: u64) -> DeviceFacts {
     DeviceFacts { extensions: extensions.into(), single_fp_config, double_fp_config }
 }

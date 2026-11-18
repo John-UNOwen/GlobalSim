@@ -476,10 +476,24 @@ fn buffer<T: ocl::core::OclPrm>(queue: &ocl::Queue, data: &[T]) -> Result<ocl::B
 }
 
 /// Runs every case through the initialization kernel on the gated device.
+/// Each call builds the initialization program, which costs a full compile.
+/// A caller that runs often keeps a `RaceContext` (race_exec), which builds
+/// it once and launches through `run_with_program`.
 #[cfg(feature = "gpu")]
 pub fn run(cases: &[Case]) -> Result<RunOutput, String> {
     let spike = crate::gpu::Spike::open()?;
     let program = spike.build_program(crate::gpu::INITIALIZATION_KERNEL_SOURCE)?;
+    run_with_program(cases, &spike, &program)
+}
+
+/// `run` against a caller's device and prebuilt program, so a batch lane
+/// pays the program compile once instead of once per call.
+#[cfg(feature = "gpu")]
+pub(crate) fn run_with_program(
+    cases: &[Case],
+    spike: &crate::gpu::Spike,
+    program: &ocl::Program,
+) -> Result<RunOutput, String> {
     let queue = spike.queue();
     let in_u: Vec<u32> = cases.iter().flat_map(|c| c.words_u()).collect();
     let in_l: Vec<u64> = cases.iter().flat_map(|c| c.words_l()).collect();
@@ -525,7 +539,7 @@ pub fn run(cases: &[Case]) -> Result<RunOutput, String> {
             )
         })
         .collect();
-    Ok(RunOutput { outs, device: spike.device, build_ms: spike.build_ms })
+    Ok(RunOutput { outs, device: spike.device.clone(), build_ms: spike.build_ms })
 }
 
 

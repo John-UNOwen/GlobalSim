@@ -197,6 +197,8 @@ pub struct SkillScratch {
 pub struct RaceRun {
     pub device: crate::gpu::DeviceReport,
     pub build_ms: f64,
+    /// Where this call's milliseconds went inside `run_prepared`.
+    pub stage_ms: StageTimings,
     pub races: Vec<RaceGpu>,
 }
 
@@ -464,7 +466,12 @@ fn pack_course_scalars(course: &Value, pd: &mut [f64]) -> Result<usize, String> 
 
 /// Everything the launch needs about one race before the powf slot (it
 /// waits for the adjusted-guts pre-pass) and before the geometry tables.
-pub(crate) struct Prepared {
+/// The seed enters this data only through the `ri[RI_SEED]` word: the stats
+/// cases, the skill table, the parameter rows and the geometry are all
+/// seed-independent, and the kernel reseeds every stream from that word.
+/// A clone with `with_seed` is therefore an exact prepare for another seed.
+#[derive(Clone)]
+pub struct Prepared {
     ri: Vec<u32>,
     pd: Vec<f64>,
     n: usize,
@@ -491,6 +498,16 @@ impl Prepared {
             sk: Vec::new(),
             debug_scratch: false,
         }
+    }
+
+    /// The clone of this prepared race that `prepare(request, seed)` would
+    /// return for another seed: one `ri` copy with `RI_SEED` rewritten.
+    /// Only valid for a parsed prepare (a stub has no `ri`).
+    pub fn with_seed(&self, seed: i32) -> Prepared {
+        let mut clone = self.clone();
+        clone.ri[RI_SEED] = seed as u32;
+        clone.seed = seed;
+        clone
     }
 }
 
@@ -706,28 +723,103 @@ impl GeometryRegistry {
     }
 }
 
+/// Where `RaceContext::open` spent its milliseconds: the device gate (with
+/// its restricted_tick program), the race program build, the initialization
+/// program build, and the engine data load.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OpenTimings {
+    pub spike_ms: f64,
+    pub race_program_ms: f64,
+    pub init_program_ms: f64,
+    pub data_ms: f64,
+    pub total_ms: f64,
+}
+
+/// Where `run_prepared` spent its milliseconds. Every batch pays these once
+/// per call. `prepass_ms` is the adjusted-stats launch (its program is built
+/// at `RaceContext::open`, not per call). `tables_ms` is the geometry dedup
+/// and table assembly, `upload_ms` the buffer allocation and writes,
+/// `launch_ms` the kernel enqueue plus the device sync, `readback_ms` the
+/// result reads, and `decode_ms` the host-side decode of every race row.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StageTimings {
+    pub total_ms: f64,
+    pub prepass_ms: f64,
+    pub tables_ms: f64,
+    pub upload_ms: f64,
+    pub launch_ms: f64,
+    pub readback_ms: f64,
+    pub decode_ms: f64,
+}
+
+/// What `run_prepared` does at the launch: run once, or time launches.
+/// `Burst` enqueues back to back with one sync at the end, which separates
+/// work time from the device's per-launch wake-up cost.
+pub enum LaunchMode {
+    Once,
+    /// warm launches, a sync, then `timed` launches each with its own sync.
+    Timed { warm: usize, timed: usize },
+    /// warm launches, a sync, then `count` back-to-back launches and one sync.
+    Burst { warm: usize, count: usize },
+}
+
+impl LaunchMode {
+    /// True when the launch is a measurement and frames stay undecoded.
+    fn timed(&self) -> bool {
+        !matches!(self, LaunchMode::Once)
+    }
+}
+
 /// Launch state kept between batches: one gated device, one built race
-/// program, engine data loaded once and the geometry cache. Not Sync, the
-/// OpenCL queue and program belong to the thread that opened them.
+/// program, one built initialization program, engine data loaded once and
+/// the geometry cache. Not Sync, the OpenCL queue and program belong to the
+/// thread that opened them.
 pub struct RaceContext {
     globals: Value,
     grids: Value,
     courses: Value,
     spike: crate::gpu::Spike,
     program: ocl::Program,
+    init_program: ocl::Program,
     registry: GeometryRegistry,
+    pub open_ms: OpenTimings,
 }
 
 impl RaceContext {
-    /// Runs the device gate, loads the engine data and builds the race
-    /// program once. A failing gate never loads the data.
+    /// Runs the device gate, loads the engine data and builds the race and
+    /// initialization programs once. A failing gate never loads the data.
     pub fn open() -> Result<RaceContext, String> {
+        let started = std::time::Instant::now();
         let spike = crate::gpu::Spike::open()?;
+        let spike_ms = started.elapsed().as_secs_f64() * 1e3;
+        let started = std::time::Instant::now();
         let program = spike.build_program(crate::gpu::RACE_KERNEL_SOURCE)?;
+        let race_program_ms = started.elapsed().as_secs_f64() * 1e3;
+        let started = std::time::Instant::now();
+        let init_program = spike.build_program(crate::gpu::INITIALIZATION_KERNEL_SOURCE)?;
+        let init_program_ms = started.elapsed().as_secs_f64() * 1e3;
+        let started = std::time::Instant::now();
         let globals = initialization::engine_parameters_value()?;
         let grids = json::parse(&dep_cpu::engine_data("starting_grids.json")?)?;
         let courses = initialization::engine_json("data/course_data.json")?;
-        Ok(RaceContext { globals, grids, courses, spike, program, registry: GeometryRegistry::default() })
+        let data_ms = started.elapsed().as_secs_f64() * 1e3;
+        let total_ms = started.elapsed().as_secs_f64() * 1e3 + spike_ms + race_program_ms + init_program_ms;
+        Ok(RaceContext {
+            globals,
+            grids,
+            courses,
+            spike,
+            program,
+            init_program,
+            registry: GeometryRegistry::default(),
+            open_ms: OpenTimings {
+                spike_ms,
+                race_program_ms,
+                init_program_ms,
+                data_ms,
+                total_ms,
+            },
+        })
     }
 
     /// The gated device the batches run on.
@@ -737,13 +829,33 @@ impl RaceContext {
 
     /// One request into kernel inputs. The Err arm is a parse failure the
     /// batch caller reports per race instead of failing the batch.
-    pub(crate) fn prepare(&mut self, request: &str, seed: i64) -> Result<Prepared, String> {
+    pub fn prepare(&mut self, request: &str, seed: i64) -> Result<Prepared, String> {
         prepare(request, seed, &self.globals, &self.grids, &self.courses, &mut self.registry)
     }
 
     /// Launches the unflagged entries in one kernel run and decodes every
-    /// entry, flagged ones included, in input order.
-    pub(crate) fn run_prepared(&mut self, prepared: &mut [Prepared], timing: Option<(usize, usize)>) -> Result<(RaceRun, Option<KernelBench>), String> {
+    /// entry, flagged ones included, in input order. The facade and the
+    /// benches drive batches through here. `run` and the module-level entries
+    /// open a context and prepare on top of it.
+    pub fn run_prepared(&mut self, prepared: &mut [Prepared], timing: Option<(usize, usize)>) -> Result<(RaceRun, Option<KernelBench>), String> {
+        self.run_prepared_mode(
+            prepared,
+            match timing {
+                None => LaunchMode::Once,
+                Some((warm, timed)) => LaunchMode::Timed { warm, timed },
+            },
+        )
+    }
+
+    /// `run_prepared` in `LaunchMode::Burst`: the timed launches go back to
+    /// back with a single sync, so the measurement shows what the launches
+    /// cost when the device never goes idle between them.
+    pub fn run_prepared_burst(&mut self, prepared: &mut [Prepared], warm: usize, count: usize) -> Result<(RaceRun, Option<KernelBench>), String> {
+        self.run_prepared_mode(prepared, LaunchMode::Burst { warm: warm.max(1), count: count.max(1) })
+    }
+
+    fn run_prepared_mode(&mut self, prepared: &mut [Prepared], mode: LaunchMode) -> Result<(RaceRun, Option<KernelBench>), String> {
+    let t_total = std::time::Instant::now();
     let launched: Vec<usize> = (0..prepared.len()).filter(|&i| prepared[i].host_fallback.is_none()).collect();
     if launched.windows(2).any(|w| prepared[w[0]].n != prepared[w[1]].n) {
         return Err("one launch needs one uniform runner count".into());
@@ -753,13 +865,14 @@ impl RaceContext {
     // The stats chain runs once per race as an initialization-kernel
     // pre-pass so the host can supply the exact f32 powf (the kernel
     // re-runs the chain itself, from the same inputs, for the rest).
+    let t_stage = std::time::Instant::now();
     let mut cases: Vec<Case> = Vec::new();
     for &i in &launched {
         for stats in &prepared[i].stats {
             cases.push(Case::Stats(stats.clone()));
         }
     }
-    let prepass = if cases.is_empty() { None } else { Some(initialization::run(&cases)?) };
+    let prepass = if cases.is_empty() { None } else { Some(initialization::run_with_program(&cases, &self.spike, &self.init_program)?) };
     let mut offset = 0usize;
     for &i in &launched {
         let count = prepared[i].stats.len();
@@ -805,8 +918,10 @@ impl RaceContext {
         }
         offset += count;
     }
+    let prepass_ms = t_stage.elapsed().as_secs_f64() * 1e3;
 
     // One geometry table set shared by every launched race.
+    let t_stage = std::time::Instant::now();
     let mut table_courses: Vec<i32> = Vec::new();
     let mut table_sets: Vec<retail_geometry::FlatCourse> = Vec::new();
     for &i in &launched {
@@ -851,7 +966,9 @@ impl RaceContext {
         });
     }
     let tables = crate::geometry::course_tables(&table_sets);
+    let tables_ms = t_stage.elapsed().as_secs_f64() * 1e3;
 
+    let t_stage = std::time::Instant::now();
     let queue = self.spike.queue();
 
     let m = launched.len();
@@ -886,7 +1003,9 @@ impl RaceContext {
     let b_ce_e = read_only(&queue, &tables.ce_e)?;
     let b_ce_i = read_only(&queue, &tables.ce_i)?;
     let b_ce_f = read_only(&queue, &tables.ce_f)?;
+    let upload_ms = t_stage.elapsed().as_secs_f64() * 1e3;
 
+    let t_stage = std::time::Instant::now();
     let mut bench: Option<KernelBench> = None;
     if m > 0 {
         let kernel = ocl::Kernel::builder()
@@ -917,39 +1036,66 @@ impl RaceContext {
             .arg(&b_events)
             .build()
             .map_err(|e| e.to_string())?;
-        if let Some((warm, timed)) = timing {
-            for _ in 0..warm {
-                unsafe { kernel.enq().map_err(|e| e.to_string())? };
-            }
-            queue.finish().map_err(|e| e.to_string())?;
-            let mut probe = vec![0u32; m * ST_STRIDE];
-            b_status.cmd().read(&mut probe).enq().map_err(|e| e.to_string())?;
-            queue.finish().map_err(|e| e.to_string())?;
-            let total_ticks = probe.chunks(ST_STRIDE).map(|s| s[ST_TICKS] as usize).sum();
-            let start = std::time::Instant::now();
-            for _ in 0..timed {
-                unsafe { kernel.enq().map_err(|e| e.to_string())? };
+        match mode {
+            LaunchMode::Timed { warm, timed } => {
+                for _ in 0..warm {
+                    unsafe { kernel.enq().map_err(|e| e.to_string())? };
+                }
                 queue.finish().map_err(|e| e.to_string())?;
+                let mut probe = vec![0u32; m * ST_STRIDE];
+                b_status.cmd().read(&mut probe).enq().map_err(|e| e.to_string())?;
+                queue.finish().map_err(|e| e.to_string())?;
+                let total_ticks = probe.chunks(ST_STRIDE).map(|s| s[ST_TICKS] as usize).sum();
+                let start = std::time::Instant::now();
+                for _ in 0..timed {
+                    unsafe { kernel.enq().map_err(|e| e.to_string())? };
+                    queue.finish().map_err(|e| e.to_string())?;
+                }
+                let launch_ms = start.elapsed().as_secs_f64() * 1e3 / timed as f64;
+                bench = Some(KernelBench {
+                    device: self.spike.device.name.clone(),
+                    build_ms: self.spike.build_ms,
+                    races: m,
+                    runners: m * n,
+                    total_ticks,
+                    launch_ms,
+                });
             }
-            let launch_ms = start.elapsed().as_secs_f64() * 1e3 / timed as f64;
-            bench = Some(KernelBench {
-                device: self.spike.device.name.clone(),
-                build_ms: self.spike.build_ms,
-                races: m,
-                runners: m * n,
-                total_ticks,
-                launch_ms,
-            });
-        } else {
-            unsafe { kernel.enq().map_err(|e| e.to_string())? };
+            LaunchMode::Burst { warm, count } => {
+                for _ in 0..warm {
+                    unsafe { kernel.enq().map_err(|e| e.to_string())? };
+                }
+                queue.finish().map_err(|e| e.to_string())?;
+                let mut probe = vec![0u32; m * ST_STRIDE];
+                b_status.cmd().read(&mut probe).enq().map_err(|e| e.to_string())?;
+                queue.finish().map_err(|e| e.to_string())?;
+                let total_ticks = probe.chunks(ST_STRIDE).map(|s| s[ST_TICKS] as usize).sum();
+                let start = std::time::Instant::now();
+                for _ in 0..count {
+                    unsafe { kernel.enq().map_err(|e| e.to_string())? };
+                }
+                queue.finish().map_err(|e| e.to_string())?;
+                let launch_ms = start.elapsed().as_secs_f64() * 1e3 / count as f64;
+                bench = Some(KernelBench {
+                    device: self.spike.device.name.clone(),
+                    build_ms: self.spike.build_ms,
+                    races: m,
+                    runners: m * n,
+                    total_ticks,
+                    launch_ms,
+                });
+            }
+            LaunchMode::Once => unsafe { kernel.enq().map_err(|e| e.to_string())? },
         }
     }
     queue.finish().map_err(|e| e.to_string())?;
+    let launch_ms = t_stage.elapsed().as_secs_f64() * 1e3;
 
+    let t_stage = std::time::Instant::now();
     let mut status = vec![0u32; m.max(1) * ST_STRIDE];
     let mut events_all = vec![0u32; m.max(1) * EV_STRIDE];
-    let mut frames_all = if timing.is_some() { Vec::new() } else { vec![0f64; m.max(1) * RACE_MAX_TICKS * n * 6] };
-    if m > 0 && timing.is_none() {
+    let mut frames_all = if mode.timed() { Vec::new() } else { vec![0f64; m.max(1) * RACE_MAX_TICKS * n * 6] };
+    if m > 0 && !mode.timed() {
         b_status.cmd().read(&mut status).enq().map_err(|e| e.to_string())?;
         b_events.cmd().read(&mut events_all).enq().map_err(|e| e.to_string())?;
         b_frames.cmd().read(&mut frames_all).enq().map_err(|e| e.to_string())?;
@@ -967,7 +1113,10 @@ impl RaceContext {
         b_scr_u.cmd().read(&mut sks_all).enq().map_err(|e| e.to_string())?;
         queue.finish().map_err(|e| e.to_string())?;
     }
+    queue.finish().map_err(|e| e.to_string())?;
+    let readback_ms = t_stage.elapsed().as_secs_f64() * 1e3;
 
+    let t_stage = std::time::Instant::now();
     let mut races: Vec<RaceGpu> = Vec::with_capacity(prepared.len());
     let mut slot = 0usize;
     for race in prepared.iter() {
@@ -991,7 +1140,7 @@ impl RaceContext {
             debug_pace: Vec::new(),
             debug_sk: None,
         };
-        if race.host_fallback.is_none() && timing.is_none() {
+        if race.host_fallback.is_none() && !mode.timed() {
             let st = &status[slot * ST_STRIDE..][..ST_STRIDE];
             let ev = &events_all[slot * EV_STRIDE..][..EV_STRIDE];
             slot += 1;
@@ -1057,8 +1206,18 @@ impl RaceContext {
         }
         races.push(out);
     }
+    let decode_ms = t_stage.elapsed().as_secs_f64() * 1e3;
 
-    Ok((RaceRun { device: self.spike.device.clone(), build_ms: self.spike.build_ms, races }, bench))
+    let stage_ms = StageTimings {
+        total_ms: t_total.elapsed().as_secs_f64() * 1e3,
+        prepass_ms,
+        tables_ms,
+        upload_ms,
+        launch_ms,
+        readback_ms,
+        decode_ms,
+    };
+    Ok((RaceRun { device: self.spike.device.clone(), build_ms: self.spike.build_ms, stage_ms, races }, bench))
     }
 }
 

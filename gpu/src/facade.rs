@@ -1,6 +1,7 @@
 //! Batch facade: what the app's run_compact lane calls. One `GpuRaces`
-//! instance per app, built once, then `run_batch` per launch. The module is
-//! not Sync: keep the instance on one thread.
+//! instance per app, built once, then `run_batch` (or `run_repeated` for one
+//! request over many seeds) per launch. The module is not Sync: keep the
+//! instance on one thread.
 //!
 //! The contract is the compact meta plus the GSIMRP01 packet. A race the
 //! kernel cannot answer bit-exactly comes back as `fallback` instead, meta
@@ -67,39 +68,85 @@ impl GpuRaces {
             );
         }
         let (run, _) = self.ctx.run_prepared(&mut prepared, None)?;
-        let mut outcomes = Vec::with_capacity(run.races.len());
-        for (race, request) in run.races.iter().zip(requests) {
-            outcomes.push(match &race.fallback {
-                Some(reason) => BatchOutcome {
-                    meta: None,
-                    packet: None,
-                    fallback: Some(reason.clone()),
-                },
-                None => {
-                    let meta = compact_meta(race, request);
-                    let (meta_text, packet) = replay_packet::build(&meta, &race.frames);
-                    BatchOutcome {
-                        meta: Some(meta_text),
-                        packet: Some(packet),
-                        fallback: None,
-                    }
-                }
-            });
-        }
-        Ok(outcomes)
+        Ok(build_outcomes(&run, requests.iter().map(|request| player_horse_index(request))))
     }
+
+    /// Runs one request against many seeds in a single launch, preparing it
+    /// once. Chosen over a `run_batch` prepare cache keyed by request hash:
+    /// a cache would keep every request alive indefinitely and change what
+    /// `run_batch` costs depending on call history, while this entry says
+    /// explicitly which batches share their prepare.
+    ///
+    /// The seed enters the prepared inputs only through the `RI_SEED` word
+    /// (see `race_exec::Prepared`), so the entries past the first are the
+    /// template clone with that one word rewritten. Outputs are byte-identical
+    /// to `run_batch` on the same request repeated per seed, fallbacks
+    /// included.
+    pub fn run_repeated(
+        &mut self,
+        request: &str,
+        seeds: &[i32],
+    ) -> Result<Vec<BatchOutcome>, String> {
+        if seeds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut prepared: Vec<_> = match self.ctx.prepare(request, seeds[0] as i64) {
+            Ok(template) => seeds.iter().map(|&seed| template.with_seed(seed)).collect(),
+            // One parse failure flags every seed, same as run_batch does for
+            // one bad request among many.
+            Err(reason) => seeds
+                .iter()
+                .map(|_| race_exec::Prepared::stub(reason.clone()))
+                .collect(),
+        };
+        let (run, _) = self.ctx.run_prepared(&mut prepared, None)?;
+        // The one request parses once here, not once per seed: its reply
+        // fields are the only request input the meta path reads.
+        let player = player_horse_index(request);
+        Ok(build_outcomes(&run, std::iter::repeat(player).take(seeds.len())))
+    }
+}
+
+/// The playerHorseIndex of a request, defaulting to 0 like the engine lane.
+fn player_horse_index(request: &str) -> f64 {
+    json::parse(request)
+        .ok()
+        .and_then(|root| root.get("playerHorseIndex").and_then(Value::as_f64))
+        .unwrap_or(0.)
+}
+
+/// One launch's answers, in input order: flagged races carry the reason, the
+/// rest get the compact meta and the GSIMRP01 packet.
+fn build_outcomes(
+    run: &race_exec::RaceRun,
+    players: impl Iterator<Item = f64>,
+) -> Vec<BatchOutcome> {
+    run.races
+        .iter()
+        .zip(players)
+        .map(|(race, player)| match &race.fallback {
+            Some(reason) => BatchOutcome {
+                meta: None,
+                packet: None,
+                fallback: Some(reason.clone()),
+            },
+            None => {
+                let meta = compact_meta(race, player);
+                let (meta_text, packet) = replay_packet::build(&meta, &race.frames);
+                BatchOutcome {
+                    meta: Some(meta_text),
+                    packet: Some(packet),
+                    fallback: None,
+                }
+            }
+        })
+        .collect()
 }
 
 /// The reply object compact_record reads: playerHorseIndex, results in roster
 /// order, and the skillEvents (horseIndex, skillId) pairs the kernel logged.
 /// The keys carry the engine's names, spellings and JSON types.
-fn compact_meta(race: &race_exec::RaceGpu, request: &str) -> Value {
-    let root = json::parse(request).unwrap_or(Value::Null);
-    let player = root
-        .get("playerHorseIndex")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.);
-
+fn compact_meta(race: &race_exec::RaceGpu, player: f64) -> Value {
     // finishOrder: the engine's stable sort of the roster by finish time,
     // unfinished runners at the loop's own end time.
     let n = race.finish_raw_all.len();
