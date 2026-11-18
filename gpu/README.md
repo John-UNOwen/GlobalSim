@@ -433,7 +433,7 @@ All comparisons run on the gated B580, and every value is compared through
 - The gate pins only the reply fields listed above. Everything a tick writes
   belongs to the loop slice (handoff step 6, remaining).
 
-## Race loop port (handoff step 6, no-skill races, field of one)
+## Race loop port (handoff step 6, no-skill races, multi-runner field)
 
 `src/kernels/race.cl` holds the whole-race kernel, `race`, one work item per
 race, with the tick loop inside the kernel (up to `RACE_MAX_TICKS` 6144). The
@@ -449,16 +449,23 @@ and exit-gap draws, the spurt plan (30 m candidate grid, speed grid in 0.1
 steps under `maximum_spurt_speed`, time-diff sort, per-candidate dice), the
 lane target chain (final-corner outward roll, side room, block parameter
 pick), lane movement and overlap resolution, the front-blocker sample and
-speed cap, the HP rate table with the rush and downhill multipliers, and the
-finish step with the `finishTimeRaw` interpolation. The Rust reference side is
-the engine through its public API (`src/dep_cpu.rs`).
+speed cap, the HP rate table with the rush and downhill multipliers, the
+rank column and oikomi/oonige field styles, the duel proximity timers with
+their warmup and entry rules, the spot struggle state machine, the clean
+conserve-power ledger and its legacy gauge, and the asitame release that rides
+the last-spurt transition, plus the finish step with the `finishTimeRaw`
+interpolation. The Rust reference side is the engine through its public API
+(`src/dep_cpu.rs`).
 
 Host side is `src/race_exec.rs` behind the `race` feature. `run` takes one
-spec per race (course id, distance, geometry, seed, horse, ground) and returns
-frames plus finish data; `GpuRace` implements `race::RaceRunner`. Domain gates
-run before any launch: skills, multi-runner fields (duel ranking and spot
-struggle), paired mode, the startup pass and grid mode each return the race
-flagged with its reason instead of launching wrong numbers.
+spec per race (course id, distance, geometry, seed, horse list, ground) and
+returns frames plus finish data; `GpuRace` implements `race::RaceRunner`. The
+tick loop runs the runners sequentially in roster order inside one work item,
+so the shared race dice are consumed in the same order the engine's field
+moves them. Domain gates run before any launch: skills, paired mode, the
+startup pass and grid mode each return the race flagged with its reason
+instead of launching wrong numbers. A no-skill field of up to `RACE_MAXR`
+(24) runners launches unflagged.
 
 The race's dice stream is the manager RNG cloned at `lib.rs:773`, which is
 after `initialize()` and `initialize_sections_and_rushing()` have consumed
@@ -481,9 +488,15 @@ Verified 2026-11-19 on the gated B580 (`single_fp_config 0xbf`,
   rush mode, blocker) compared through `to_bits()` against the CPU engine's
   frames, plus identical tick counts and identical `finishTimeRaw` bits, with
   zero fallback flags on every race.
-- `v77_multi_runner_race_stays_flagged` (`#[ignore]`): the 9-runner sample
-  request returns flagged ("multi-runner duel and spot are not ported"),
-  documenting where the multi-runner port resumes.
+- `v77_multi_runner_races_are_bit_exact`: the 9-runner v77 line-1 roster (all
+  Senkou, skills empty, ground Good) on courses 10504 (seeds 1..8), 10604
+  (seeds 1..4) and 11004 (seeds 1..4). Every tick, every runner, every frame
+  column compared through `to_bits()` against the CPU engine with all frames
+  retained, equal tick counts, equal `finishTimeRaw` bits, and zero fallback
+  on every race. This is the field gate: it exercises roster order, ranks,
+  blocking, lane-target selection and its PassingSearch draws, the duel warmup
+  and entry, the spot struggle, the conserve ledger and the asitame release,
+  none of which a field of one can reach.
 
 ### Rounding traps this port hit
 
@@ -497,6 +510,16 @@ Verified 2026-11-19 on the gated B580 (`single_fp_config 0xbf`,
 - The engine clones the shared RNG after the rushing lottery, not after
   `initialize()` alone, so the snapshot point sits after the per-runner
   section and rush draws.
+- The lane collect overwrote the force-in coefficient slot with the force-in
+  flag instead of setting the separate flag column, so the block decision lost
+  the coefficient. Both the coefficient and the flag need their own slot.
+- The lane blocker scan was anchored on the owner's live position rather than
+  the candidate's cached row, so a mid-pack blocker scan disagreed with the
+  engine's `front_index`. Anchor on the cached row.
+- The duel path is gated by `has_corner_events`, the host's
+  `RI_NSTR && RI_NCOR`. Those two counts were packed nowhere, so duels never
+  fired on the GPU and the CPU's final-straight duel target bump had no GPU
+  match. Set them from the course's straights and corners.
 
 ## Not covered (step 6 blockers)
 
@@ -504,9 +527,9 @@ Engine behavior the race loop port does not reach, each needing its own port
 and gate:
 
 - Skills and their rng streams (trigger windows, additive modifiers into
-  `acceleration` and `target_speed`, activation hooks)
-- Multi-runner field interactions: duel ranking, spot struggle, field-level
-  oikomi and oonige effects
+  `acceleration` and `target_speed`, activation hooks). Skills stay host-gated,
+  so a skill-bearing field is flagged and the field kernel only carries the
+  no-skill conserve/asitame release
 - Paired mode, the experimental startup pass and grid mode (flagged, gated)
 - Ground and terrain lookups beyond the slope and corner geometry events
 - Replay frame encoding outside the gate's frame comparison

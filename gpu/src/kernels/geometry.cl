@@ -163,7 +163,7 @@ static int geo_position(__global const uint* cb, const float distance, const flo
 // set. ready=0 (the engine's events-not-yet-ready state) keeps (0, false).
 static void geo_corner_state(__global const uint* cb, __global const float* ce_b,
     __global const float* ce_e, __global const uint* ce_i, __global const uint* ce_f,
-    const float distance, const int ready, uint* id, uint* is_final) {
+    const float distance, const int ready, __global uint* id, __global uint* is_final) {
     *id = 0u;
     *is_final = 0u;
     if (!ready) {
@@ -254,10 +254,8 @@ __kernel void geometry(__global const uint* cs,
     ob[GO_C] = 0u;
 
     if (mode == MODE_CORNER) {
-        uint id_out, final_out;
-        geo_corner_state(cb, ce_b, ce_e, ce_i, ce_f, distance, (int)ib[IS_READY], &id_out, &final_out);
-        ob[GO_ID] = id_out;
-        ob[GO_FINAL] = final_out;
+        geo_corner_state(cb, ce_b, ce_e, ce_i, ce_f, distance, (int)ib[IS_READY],
+            &ob[GO_ID], &ob[GO_FINAL]);
     } else if (mode == MODE_LANE_MAX) {
         ob[GO_A] = as_uint(geo_lane_max_at(cb, lm_b, lm_l, distance));
     } else if (mode == MODE_POSITION) {

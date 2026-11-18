@@ -69,7 +69,7 @@
 // parameters are stored as the raw JSON f64 and narrowed once in the kernel,
 // mirroring Parameters::from_value's `get_f64 as f32`.
 
-#define RIL_STRIDE 448
+#define RIL_STRIDE 576
 // 0..83: retail physics Parameters, the layout the retail_physics port reads.
 #define PT_COURSE0 0
 #define PT_COURSE1 1
@@ -155,6 +155,23 @@
 #define PL_BASE_SPEED 394      // laneMoveSpeedBase
 #define PL_OUTER_COEFFICIENT 395 // laneMoveSpeedOutCoef
 #define PL_ACCELERATION 396    // laneMoveAccelMoveSpeedBaseCoef
+// 400..: CompeteFight and CompeteTop settings with the per-runner powf
+// precomputes. The duel and spot modifiers are race constants derived from
+// guts, so the host supplies them like PT_POWF (no powf in the kernel).
+#define PD_CF_DIST 400         // CompeteFight DistanceGap (raw JSON f64)
+#define PD_CF_LANE 401         // CompeteFight LaneGap (raw JSON f64)
+#define PD_CF_SPEED 402        // [3] CompeteFight AddParam1Coef1..3
+#define PD_CF_ACCEL 405        // [3] CompeteFight AddParam2Coef1..3
+#define PD_PM_RANGE 408        // PaseMakerChangeForwardRunningStyleRange
+#define PD_PM_NOTFWD 409
+#define PD_DTYPE 410               // course distance_type, the asitame coefficient row       // PaseMakerChangeTopHorseNotMostForwardStyleCount
+#define PD_RUN0 448            // per runner, stride 5
+#define PD_RUN_STRIDE 5
+#define PRD_POWF 0             // per-runner spurt powf bits as the integer value
+#define PRD_DUEL_T 1           // duel target-speed modifier, f64
+#define PRD_DUEL_A 2           // duel accel modifier, f64
+#define PRD_SPOT_M 3           // spot struggle modifier, f64
+#define PRD_SPOT_D 4           // spot struggle duration, f64
 
 // ---------------------------------------------------------------------------
 // Per-race scratch bases, u32 words at scratch + SCR_* (the im_* blocks) and
@@ -170,103 +187,137 @@
 #define SCR_HP_IN (SCR_INIT_OUT + OOU)           // 24 * IIU
 #define SCR_HP_OUT (SCR_HP_IN + 24 * IIU)        // 24 * 180, ob 172 then olb
 #define SCR_STATE (SCR_HP_OUT + 24 * 180)
-// Integer state, SI_STRIDE columns per runner.
-#define SI_STRIDE 48
-#define SI_STRATEGY 0
-#define SI_DISTAPT 1
-#define SI_SUAPT 2            // surface aptitude (drives the accel ground factor)
-#define SI_RANK 3
-#define SI_PHASE 4            // solver phase 0..2
-#define SI_RPHASE 5           // retail phase count, unclamped 0..4
-#define SI_RMODE 6            // rushing_mode 0..4
-#define SI_KAKARI 7
-#define SI_PACEDOWN 8
-#define SI_DOWNHILL 9
-#define SI_DASH 10
-#define SI_PREPARED 11
-#define SI_EVENTS_READY 12
-#define SI_CORNER 13
-#define SI_FINALE 14          // final_corner
-#define SI_LS_ENTERED 15      // last_straight_entered
-#define SI_FINISHED 16
-#define SI_BLOCKER 17         // front_blocker solver index, -1 none
-#define SI_HPEMPTY 18
-#define SI_DIRTY 19           // live_roster_dirty
-#define SI_SECT 20            // rushing start_section, -1 none
-#define SI_RS_ACTIVE 21
-#define SI_RS_USED 22
-#define SI_RS_MODE 23
-#define SI_DS_ACTIVE 24
-#define SI_SL_NEXT 25         // slope next_event
-#define SI_SL_REGION 26       // slope region, -1 none
-#define SI_PS_RUSHING 27
-#define SI_PS_STYLE 28
-#define SI_PS_MODE 29         // pace mode 0..4, 7 none
-#define SI_L_FORCE 30         // lane force_check
-#define SI_L_XOP 31           // extra_outward present
-#define SI_L_PREV_CANIN 32    // -1 None, 0 Some(false), 1 Some(true)
-#define SI_SP_PENDING 33
-#define SI_SP_COUNT 34
-#define SI_SP_RESULT 35
-#define SI_MV_DIR 36          // move continue_direction, -1 initial
-#define SI_SEC_CUR 37         // SectionIndex current
-#define SI_BMIN_BITS 38       // base_minimum guts bits
-#define SI_L_INNER_IDX 39     // side inner_blocker index, -1 none
-#define SI_L_TGTN 40          // lane targets list length
-#define SI_L_VISN 41          // lane visible list length
-#define SI_L_FRONT_IDX 42     // blocking sample front index, -1 none
-#define SI_L_CANIN 43         // side room can_in
-#define SI_L_CANOUT 44        // side room can_out
-#define SI_L_FORCEIN 45       // lane force_in
-#define SI_RANKCOL 46         // field rank_of, 1-based (0 before the first update)
-#define SI_SP_ACTIVE 47       // is_last_spurt
-// Integer columns end.
-#define SCR_SF (SCR_STATE + 48 * 24)
-// f32 state (raw-bit floats), SF_STRIDE columns per runner.
-#define SF_STRIDE 44
-#define SF_LANEMAX 0
-#define SF_OBSERVED 1
-#define SF_MIN 2              // retail minimum
-#define SF_BMIN_VAL 3         // base_minimum value
-#define SF_ACCEL_BASE 4       // adjusted power (the accel cache is inert)
-#define SF_FORCE_IN 5         // force_in_coefficient
-#define SF_PENDING_HP 6
-#define SF_AFTER_GOAL 7
-#define SF_DELAY 8            // delay_remaining
-#define SF_RS_CHECK 9
-#define SF_RS_MAXREM 10
-#define SF_DS_REM 11
-#define SF_SL_END 12
-#define SF_SL_VALUE 13
-#define SF_PS_COOL 14
-#define SF_PS_INTVL 15
-#define SF_PS_COEF 16
-#define SF_PS_ESTART 17
-#define SF_PS_EEND 18
-#define SF_PS_EXIT 19
-#define SF_L_COOLDOWN 20
-#define SF_L_XO 21
-#define SF_L_SIDE_INNER 22    // side inner_blocker lane value
-#define SF_L_FRONT_POS 23     // front_cache owner position
-#define SF_L_FRONT_LANE 24    // front_cache owner lane
-#define SF_L_FRONT_DIST 25    // unused slot (kept spacing)
-#define SF_L_FRONT_LIMIT 26   // aliased below as SF_SPURT_MAX
-#define SF_L_FRONT_IDX 27     // front_cache front index (float, -1 none)
-#define SF_SP_START 28
-#define SF_SP_SPEED 29
-#define SF_MV_SPEED 30        // move_speed
-#define SF_MV_TARGET 31       // move target lane
-#define SF_MV_TIME 32         // move continue_time
-#define SF_HPG 33
-#define SF_HPW 34
-#define SF_MV_LANE 35         // MoveState lane
-#define SF_L_SIDE_INS 36      // side room in_space
-#define SF_L_SIDE_OUTS 37     // side room out_space
-#define SF_WORLD_X 38         // geometry world cursor x
-#define SF_WORLD_Y 39         // geometry world cursor y
-#define SF_BLOCKER_GAP 40     // front_blocker gap, f32
-#define SF_SPURT_MAX 26       // race-constant maximum_spurt_speed (front_cache slot)
-#define SCR_LISTS (SCR_SF + SF_STRIDE * 24)
+// Integer state, one 24-wide column per slot (field base + runner index).
+#define SI_SLOTS 64
+#define SI_STRIDE (SI_SLOTS * 24)
+#define SI_SLOT(n) ((n) * 24)
+#define SI_STRATEGY SI_SLOT(0)
+#define SI_DISTAPT SI_SLOT(1)
+#define SI_SUAPT SI_SLOT(2)      // surface aptitude (drives the accel ground factor)
+#define SI_RANK SI_SLOT(3)
+#define SI_PHASE SI_SLOT(4)      // solver phase 0..2
+#define SI_RPHASE SI_SLOT(5)     // retail phase count, unclamped 0..4
+#define SI_RMODE SI_SLOT(6)      // rushing_mode 0..4
+#define SI_KAKARI SI_SLOT(7)
+#define SI_PACEDOWN SI_SLOT(8)
+#define SI_DOWNHILL SI_SLOT(9)
+#define SI_DASH SI_SLOT(10)
+#define SI_PREPARED SI_SLOT(11)
+#define SI_EVENTS_READY SI_SLOT(12)
+#define SI_CORNER SI_SLOT(13)
+#define SI_FINALE SI_SLOT(14)    // final_corner
+#define SI_LS_ENTERED SI_SLOT(15) // last_straight_entered
+#define SI_FINISHED SI_SLOT(16)
+#define SI_BLOCKER SI_SLOT(17)   // front_blocker solver index, -1 none
+#define SI_HPEMPTY SI_SLOT(18)
+#define SI_DIRTY SI_SLOT(19)     // live_roster_dirty
+#define SI_SECT SI_SLOT(20)      // rushing start_section, -1 none
+#define SI_RS_ACTIVE SI_SLOT(21)
+#define SI_RS_USED SI_SLOT(22)
+#define SI_RS_MODE SI_SLOT(23)
+#define SI_DS_ACTIVE SI_SLOT(24)
+#define SI_SL_NEXT SI_SLOT(25)   // slope next_event
+#define SI_SL_REGION SI_SLOT(26) // slope region, -1 none
+#define SI_PS_RUSHING SI_SLOT(27)
+#define SI_PS_STYLE SI_SLOT(28)
+#define SI_PS_MODE SI_SLOT(29)   // pace mode 0..4, 7 none
+#define SI_L_FORCE SI_SLOT(30)   // lane force_check
+#define SI_L_XOP SI_SLOT(31)     // extra_outward present
+#define SI_L_PREV_CANIN SI_SLOT(32) // -1 None, 0 Some(false), 1 Some(true)
+#define SI_SP_PENDING SI_SLOT(33)
+#define SI_SP_COUNT SI_SLOT(34)
+#define SI_SP_RESULT SI_SLOT(35)
+#define SI_MV_DIR SI_SLOT(36)    // move continue_direction, -1 initial
+#define SI_SEC_CUR SI_SLOT(37)   // SectionIndex current
+#define SI_BMIN_BITS SI_SLOT(38) // base_minimum guts bits
+#define SI_L_INNER_IDX SI_SLOT(39) // side inner_blocker index, -1 none
+#define SI_L_TGTN SI_SLOT(40)    // lane targets list length
+#define SI_L_VISN SI_SLOT(41)    // lane visible list length
+#define SI_L_FRONT_IDX SI_SLOT(42) // blocking sample front index, -1 none
+#define SI_L_CANIN SI_SLOT(43)   // side room can_in
+#define SI_L_CANOUT SI_SLOT(44)  // side room can_out
+#define SI_L_FORCEIN SI_SLOT(45) // lane force_in
+#define SI_RANKCOL SI_SLOT(46)    // field rank_of, 1-based
+#define SI_SP_ACTIVE SI_SLOT(47)  // is_last_spurt
+#define SI_DUEL_ACTIVE SI_SLOT(48)
+#define SI_DUEL_FIGHT SI_SLOT(49) // compete_fight_count
+#define SI_DUEL_GROUP SI_SLOT(50) // duel_group, -1 for None
+#define SI_DUEL_PRE_FIN SI_SLOT(51) // duel_preupdate_finished
+#define SI_DUEL_PRE_STR SI_SLOT(52) // duel_preupdate_final_straight
+#define SI_GOAL_SNAP SI_SLOT(53)  // duel_goal_crossing_snapshot
+#define SI_SPOT_ACTIVE SI_SLOT(54)
+#define SI_SPOT_STARTED SI_SLOT(55)
+#define SI_SPOT_EXITED SI_SLOT(56) // spot_struggle_distance_exited
+#define SI_SPOT_LATCH SI_SLOT(57)  // spot_struggle_cutoff_latched
+#define SI_SPOT_CLOSED SI_SLOT(58) // spot_struggle_entry_closed
+#define SI_SPOT_TOKEN SI_SLOT(59)  // retail target token 1 is registered
+#define SI_DUEL_TOKEN SI_SLOT(60)  // retail target and accel token 4 is registered
+#define SI_CPFLAGS SI_SLOT(62)     // conserve power and asitame bit flags
+#define CP_UNSUPPORTED 1u
+#define CP_CUTOFF 2u
+#define CP_WASBLK 4u
+#define CP_WASRUSH 8u
+#define CP_WASSPOT 16u
+#define CP_INITSET 32u
+#define CP_CLOCK 64u
+#define CP_HASTH 128u
+#define CP_STRUGGLE 256u
+#define CP_KAKARI 512u
+#define CP_FIRED 1024u
+#define CP_ASIT 2048u
+// Integer slots end.
+#define SCR_SF (SCR_STATE + SI_STRIDE)
+// f32 state (raw-bit floats), one 24-wide column per slot.
+#define SF_SLOTS 52
+#define SF_STRIDE (SF_SLOTS * 24)
+#define SF_SLOT(n) ((n) * 24)
+#define SF_LANEMAX SF_SLOT(0)
+#define SF_OBSERVED SF_SLOT(1)
+#define SF_MIN SF_SLOT(2)         // retail minimum
+#define SF_BMIN_VAL SF_SLOT(3)    // base_minimum value
+#define SF_ACCEL_BASE SF_SLOT(4)  // adjusted power (the accel cache is inert)
+#define SF_FORCE_IN SF_SLOT(5)    // force_in_coefficient
+#define SF_PENDING_HP SF_SLOT(6)
+#define SF_AFTER_GOAL SF_SLOT(7)
+#define SF_DELAY SF_SLOT(8)       // delay_remaining
+#define SF_RS_CHECK SF_SLOT(9)
+#define SF_RS_MAXREM SF_SLOT(10)
+#define SF_DS_REM SF_SLOT(11)
+#define SF_SL_END SF_SLOT(12)
+#define SF_SL_VALUE SF_SLOT(13)
+#define SF_PS_COOL SF_SLOT(14)
+#define SF_PS_INTVL SF_SLOT(15)
+#define SF_PS_COEF SF_SLOT(16)
+#define SF_PS_ESTART SF_SLOT(17)
+#define SF_PS_EEND SF_SLOT(18)
+#define SF_PS_EXIT SF_SLOT(19)
+#define SF_L_COOLDOWN SF_SLOT(20)
+#define SF_L_XO SF_SLOT(21)
+#define SF_L_SIDE_INNER SF_SLOT(22) // side inner_blocker lane value
+#define SF_L_FRONT_POS SF_SLOT(23)  // front_cache owner position
+#define SF_L_FRONT_LANE SF_SLOT(24) // front_cache owner lane
+#define SF_L_FRONT_DIST SF_SLOT(25) // unused slot (kept spacing)
+#define SF_L_FRONT_LIMIT SF_SLOT(26) // aliased below as SF_SPURT_MAX
+#define SF_L_FRONT_IDX SF_SLOT(27)  // front_cache front index (float, -1 none)
+#define SF_SP_START SF_SLOT(28)
+#define SF_SP_SPEED SF_SLOT(29)
+#define SF_MV_SPEED SF_SLOT(30)   // move_speed
+#define SF_MV_TARGET SF_SLOT(31)  // move target lane
+#define SF_MV_TIME SF_SLOT(32)    // move continue_time
+#define SF_HPG SF_SLOT(33)
+#define SF_HPW SF_SLOT(34)
+#define SF_MV_LANE SF_SLOT(35)    // MoveState lane
+#define SF_L_SIDE_INS SF_SLOT(36) // side room in_space
+#define SF_L_SIDE_OUTS SF_SLOT(37) // side room out_space
+#define SF_WORLD_X SF_SLOT(38)    // geometry world cursor x
+#define SF_WORLD_Y SF_SLOT(39)    // geometry world cursor y
+#define SF_BLOCKER_GAP SF_SLOT(40) // front_blocker gap, f32
+#define SF_SPURT_MAX SF_SLOT(26)  // race-constant maximum_spurt_speed (front_cache slot)
+#define SF_DUEL_PRE SF_SLOT(44)   // duel_preupdate_speed (observed at tick start)
+#define SF_AS_VALUE SF_SLOT(48)   // asitame accel effect modifier
+#define SF_CP_GELAP SF_SLOT(49)   // conserve gain_elapsed (f32 accumulator)
+#define SF_CP_GTHRESH SF_SLOT(50) // conserve gain_threshold
+#define SCR_LISTS (SCR_SF + SF_STRIDE)
 // Lane lists, SCR_LISTS + LIST_STRIDE * r. The targets list occupies the
 // first RACE_MAXR slots, then the visible list.
 #define LIST_STRIDE 48
@@ -285,24 +336,46 @@
 #define RS_DONE 4
 #define RS_ORDER 8            // 24: roster indices sorted by position
 #define RS_PREVRANK 32        // 24: rank from the previous tick
-#define SCR_U_WORDS (SCR_RACE + 128)
+#define RS_PM 56              // section pacemaker, +1 (0 none)
+#define RS_PM_SEC 57          // pacemaker section at the last handover
+#define RS_PM_COUNT 58
+#define RS_PM_HANDED 59
+#define RS_PM_HAS 60          // 0 before the constructor's first selection
+#define RS_COUNTS 64          // 8: exact per-strategy counts
+#define RS_STYLE 72           // 24: base-style prefix maxima over the order
+#define RS_STRAIGHT 96        // 24: pre-movement final-straight row flags
+#define RS_LKEYS 120          // 24: resolve-overlaps truncated lane keys
+#define RS_LORDER 144         // 24: resolve-overlaps scan order
+#define RS_ADV 168            // 24: stepped (not gated) flags of the tick
+#define SCR_U_WORDS (SCR_RACE + 192)
 
-// Per-race scratch f64. Runner columns: field base + r.
-#define SD_STRIDE 40
-#define SD_POS 0
-#define SD_LANE 1
-#define SD_LANET 2             // lane_target
-#define SD_LCS 3               // lane_change_speed
-#define SD_LCT 4               // move_lane_continue_time
-#define SD_CS 5                // current_speed
-#define SD_TS 6                // target_speed
-#define SD_MS 7                // min_speed
-#define SD_LSS 8               // last_spurt_speed
-#define SD_BTS 9               // base_target_speed[3]
-#define SD_PKCOEF 12           // pos_keep_speed_coef
-#define SD_SECMOD 15           // section_modifier[25]
+// Per-race scratch f64, one 24-wide column per slot (field base + runner
+// index). Array fields keep 24 slots per element: base + element * 24 + r.
+#define SD_SLOTS 71
+#define SD_STRIDE (SD_SLOTS * 24)
+#define SD_SLOT(n) ((n) * 24)
+#define SD_POS SD_SLOT(0)
+#define SD_LANE SD_SLOT(1)
+#define SD_LANET SD_SLOT(2)       // lane_target
+#define SD_LCS SD_SLOT(3)         // lane_change_speed
+#define SD_LCT SD_SLOT(4)         // move_lane_continue_time
+#define SD_CS SD_SLOT(5)          // current_speed
+#define SD_TS SD_SLOT(6)          // target_speed
+#define SD_MS SD_SLOT(7)          // min_speed
+#define SD_LSS SD_SLOT(8)         // last_spurt_speed
+#define SD_BTS SD_SLOT(9)         // base_target_speed[3], element stride 24
+#define SD_PKCOEF SD_SLOT(12)     // pos_keep_speed_coef
+#define SD_SECMOD SD_SLOT(15)     // section_modifier[25], element stride 24
+#define SD_DUEL SD_SLOT(40)       // duel proximity timers, element j stride 24, -1.0 absent
+#define SD_SPOT_TIMER SD_SLOT(64) // spot_struggle_timer, f64 (f32-rounded steps)
+#define SD_CP_GAUGE SD_SLOT(65)   // conserve power clean ledger gauge
+#define SD_CP_PREVRATE SD_SLOT(66) // conserve previous_rate
+#define SD_CP_INITPW SD_SLOT(67)  // conserve initial_power
+#define SD_CP_ACC SD_SLOT(68)     // legacy cp_acc accumulate
+#define SD_AS_TIMER SD_SLOT(69)   // asitame effect duration timer, counts up to zero
+#define SD_RAWPW SD_SLOT(70)      // horse raw_power from initialization output 2
 #define SRL_RUNNER 0
-#define SRL_HP (40 * 24)       // hp columns, SH_STRIDE per runner
+#define SRL_HP SD_STRIDE          // hp columns, SH_STRIDE per runner
 #define SH_STRIDE 8
 #define SH_MAX 0
 #define SH_HP 1
@@ -400,15 +473,16 @@ static float phys_blocking_speed_cap(__global const double* pd, const float mini
 }
 
 // The host supplies powf(bounded_stat(guts) * spurt[2], spurt[3]) as f32 in
-// PT_POWF; the inputs are race-constant without skills.
+// each runner's PRD_POWF word; the inputs are race constants.
 static float phys_maximum_spurt_speed(__global const double* pd, const float speed,
-    const int strategy, const float aptitude, const float distance) {
+    const int strategy, const float aptitude, const float distance,
+    const double powf_word) {
     const float base = convert_float_rte(
         (double)phys_base_target_speed(pd, speed, strategy, 2, aptitude, distance)
             + (double)phys_course_speed(pd, distance) * (double)phys_f(pd, PT_SPURT));
     const double addition = ((double)phys_root(bounded_stat(speed) * phys_f(pd, PT_SPURT + 1))
         * (double)aptitude) * (double)phys_f(pd, PT_ADD_SPEED);
-    const double guts_add = (double)as_float((uint)pd[PT_POWF]) * (double)phys_f(pd, PT_SPURT + 4);
+    const double guts_add = (double)as_float((uint)powf_word) * (double)phys_f(pd, PT_SPURT + 4);
     return convert_float_rte(
         ((double)base * (double)phys_f(pd, PT_SPURT + 5) + addition) + guts_add);
 }
@@ -459,11 +533,12 @@ static float apply_additive_modifiers(float base, __global const float* mods, co
 }
 
 // TargetSpeed fields the no-skill loop fills; the struct arrives as scalars.
-// spot_struggle and bonus are inert without skills, passed as 0.
+// spot and duel are the CompeteTop/CompeteFight late terms (retail token 1
+// and 4), zero when no token is registered.
 static float phys_target_speed(__global const double* pd, const float base,
     const float section, const float pace, const float force_in, const float power,
     const float slope, const int downhill, const float minimum, const int hp_remaining,
-    __global const float* mods, const int nmods) {
+    __global const float* mods, const int nmods, const float spot, const float duel) {
     float speed = (base + section) * pace + force_in;
     speed = apply_additive_modifiers(speed, mods, nmods);
     // The slope correction evaluates at double and rounds once (doc 13.186).
@@ -478,6 +553,8 @@ static float phys_target_speed(__global const double* pd, const float base,
         correction = 0.f;
     }
     speed += correction;
+    speed += spot;
+    speed += duel;
     if (!hp_remaining) {
         speed = minimum;
     }
@@ -496,10 +573,19 @@ static float phys_base_acceleration(__global const double* pd, const float power
             * (double)phys_phase_accel(pd, strategy, phase));
 }
 
-// acceleration_from_base_iter from retail_physics.rs.
+// acceleration_from_base_iter from retail_physics.rs. Without skills the
+// chain is the duel token, then the Conserve Power (asitame) token, applied
+// before the start-dash add.
 static float phys_acceleration_from_base(__global const double* pd, float base,
-    const int start_dash, __global const float* mods, const int nmods) {
+    const int start_dash, __global const float* mods, const int nmods,
+    const float duel, const int has_duel, const float asit, const int has_asit) {
     base = apply_additive_modifiers(base, mods, nmods);
+    if (has_duel) {
+        base += duel;
+    }
+    if (has_asit) {
+        base += asit;
+    }
     if (start_dash) {
         base += phys_f(pd, PT_ACCEL + 3);
     }
@@ -1242,19 +1328,18 @@ static int lane_reachable(const int can_in, const int can_out, const float in_sp
 }
 
 // A peer is blocked when any qualifying front runner exists. The first match
-// stops the scan; tie order is irrelevant here.
+// stops the scan, and tie order is irrelevant. The query is anchored on the
+// candidate's cached row; every roster slot is a blocker row.
 static int lane_has_front_blocker(__global const float* cached, const int n,
     const int r, const float position, const float lane, const float front_distance,
     const float front_lane) {
     int j = 0;
     while (j < n) {
-        if (j != r) {
-            const float gap = cached[4 * (LIST_STRIDE * r + j)] - position;
-            const float lane_gap = fabs(cached[4 * (LIST_STRIDE * r + j) + 1] - lane);
-            if (gap > 0. && gap < front_distance && lane_gap <= lane_front_lane_limit(
-                gap, front_distance, front_lane)) {
-                return 1;
-            }
+        const float gap = cached[4 * (LIST_STRIDE * r + j)] - position;
+        const float lane_gap = fabs(cached[4 * (LIST_STRIDE * r + j) + 1] - lane);
+        if (gap > 0. && gap < front_distance && lane_gap <= lane_front_lane_limit(
+            gap, front_distance, front_lane)) {
+            return 1;
         }
         j += 1;
     }
@@ -1345,13 +1430,15 @@ static void lane_collect(__global uint* si, __global float* sf, __global uint* l
     si[SI_L_FRONT_IDX + r] = (uint)front;
     sf[SF_L_FRONT_POS + r] = position;
     sf[SF_L_FRONT_LANE + r] = lane;
-    sf[SF_FORCE_IN + r] = empty_in_move && phase < 1
-        && lane >= convert_float_rte(pd[PL_FORCE_IN_THRESHOLD]) && inner_nearby ? 1.f : 0.f;
+    // The flag drives the target add; SF_FORCE_IN keeps the horse's
+    // coefficient from the initialization chain.
+    si[SI_L_FORCEIN + r] = (uint)(empty_in_move && phase < 1
+        && lane >= convert_float_rte(pd[PL_FORCE_IN_THRESHOLD]) && inner_nearby);
 }
 
 // update_targets from retail_lane.rs over the collect snapshot and live rows.
-static int lane_eligible(__global uint* si, __global float* cached,
-    __global const double* sd, __global const float* sf0, const int r, const int n,
+static int lane_eligible(__global float* cached, __global const double* sd,
+    __global const float* sf0, const int r, const int n,
     __global const double* pd, const int front, const int j, const float position,
     const float owner_speed, const float owner_target) {
     const int k = j;
@@ -1363,28 +1450,30 @@ static int lane_eligible(__global uint* si, __global float* cached,
     const float other_target = convert_float_rte(sd[SD_TS + k]);
     const float gap_f = convert_float_rte((double)gap);
     const float speed_gap_f = convert_float_rte((double)speed_gap);
+    int res;
     if (gap_f < -1.f) {
-        return 0;
-    }
-    if (directly) {
-        return other_speed < owner_target;
-    }
-    if (!(gap_f >= 1.f && gap_f <= 20.f) || speed_gap_f <= 0.f
+        res = 0;
+    } else if (directly) {
+        res = other_speed < owner_target;
+    } else if (!(gap_f >= 1.f && gap_f <= 20.f) || speed_gap_f <= 0.f
         || gap_f / speed_gap_f > 15.f) {
-        return 0;
+        res = 0;
+    } else {
+        const float owner_target_f = convert_float_rte((double)owner_target);
+        const int blocked_result = other_speed < owner_target_f;
+        const int unblocked_result = other_target < owner_target_f;
+        if (blocked_result == unblocked_result) {
+            res = blocked_result;
+        } else if (lane_has_front_blocker(cached, n, r,
+            cached[4 * (LIST_STRIDE * r + k)], cached[4 * (LIST_STRIDE * r + k) + 1],
+            convert_float_rte(pd[PT_BLOCKING]),
+            convert_float_rte(pd[PL_FRONT_LANE]))) {
+            res = blocked_result;
+        } else {
+            res = unblocked_result;
+        }
     }
-    const float owner_target_f = convert_float_rte((double)owner_target);
-    const int blocked_result = other_speed < owner_target_f;
-    const int unblocked_result = other_target < owner_target_f;
-    if (blocked_result == unblocked_result) {
-        return blocked_result;
-    }
-    if (lane_has_front_blocker(cached, n, r, convert_float_rte(sd[SD_POS + r]),
-        convert_float_rte(sd[SD_LANE + r]), convert_float_rte(pd[PT_BLOCKING]),
-        convert_float_rte(pd[PL_FRONT_LANE]))) {
-        return blocked_result;
-    }
-    return unblocked_result;
+    return res;
 }
 
 static void lane_update_targets(__global uint* si, __global float* sf, __global uint* lists,
@@ -1442,7 +1531,7 @@ static void lane_update_targets(__global uint* si, __global float* sf, __global 
             }
             t += 1;
         }
-        if (!contains && lane_eligible(si, cached, sd, sf0, r, n, pd, front, j,
+        if (!contains && lane_eligible(cached, sd, sf0, r, n, pd, front, j,
             position, owner_speed, owner_target)) {
             targets[targets_len++] = (uint)j;
         }
@@ -1453,7 +1542,7 @@ static void lane_update_targets(__global uint* si, __global float* sf, __global 
     t = 0;
     while (t < targets_len) {
         const int ordinal = t + 1;
-        if (ordinal > existing_count || lane_eligible(si, cached, sd, sf0, r, n, pd,
+        if (ordinal > existing_count || lane_eligible(cached, sd, sf0, r, n, pd,
             front, (int)targets[t], position, owner_speed, owner_target)) {
             targets[write++] = targets[t];
         }
@@ -1792,41 +1881,165 @@ static int lane_move_step(__global uint* si, __global float* sf, const int r,
     return moved;
 }
 
-// resolve_overlaps_with_order over the post-movement rows. For the field of
-// one this only clears the force flag; the general pass keeps the loaded
-// comparison-sort equal-key permutation and shifts later rows outward.
-static void lane_resolve_overlaps(__global uint* si, __global double* sd, const int n) {
-    int order[RACE_MAXR];
+// comparison_sort from src/retail_sort.rs over a local (key, order) pair.
+// The engine sorts roster indices by the truncated lane key, and the
+// introsort's equal-key permutation is observable, so this mirrors the
+// same structure as sort_candidates with an int comparator.
+static int ro_cmp(const int a, const int b) {
+    return (a > b) ? 1 : ((a < b) ? -1 : 0);
+}
+
+static void ro_swap(__global uint* key, __global uint* order, const int i, const int j) {
+    if (i == j) {
+        return;
+    }
+    uint tmp = order[i];
+    order[i] = order[j];
+    order[j] = tmp;
+    tmp = key[i];
+    key[i] = key[j];
+    key[j] = tmp;
+}
+
+static void ro_swap_if_greater(__global uint* key, __global uint* order,
+    const int i, const int j) {
+    if (i != j && ro_cmp((int)key[i], (int)key[j]) > 0) {
+        ro_swap(key, order, i, j);
+    }
+}
+
+static void ro_down_heap(__global uint* key, __global uint* order, int i,
+    const int size, const int lo) {
+    const int vt = (int)key[lo + i - 1];
+    const uint vx = order[lo + i - 1];
+    while (2 * i <= size) {
+        int child = 2 * i;
+        if (child < size && ro_cmp((int)key[lo + child - 1], (int)key[lo + child]) < 0) {
+            child += 1;
+        }
+        if (ro_cmp(vt, (int)key[lo + child - 1]) >= 0) {
+            break;
+        }
+        key[lo + i - 1] = key[lo + child - 1];
+        order[lo + i - 1] = order[lo + child - 1];
+        i = child;
+    }
+    key[lo + i - 1] = (uint)vt;
+    order[lo + i - 1] = vx;
+}
+
+static void ro_sort(__global uint* key, __global uint* order, const int len) {
+    if (len <= 1) {
+        return;
+    }
+    int lo_stack[64];
+    int hi_stack[64];
+    int depth_stack[64];
+    int sp = 1;
+    lo_stack[0] = 0;
+    hi_stack[0] = len - 1;
+    depth_stack[0] = 2 * (32 - clz((uint)len));
+    while (sp > 0) {
+        int lo = lo_stack[sp - 1];
+        int hi = hi_stack[sp - 1];
+        int depth = depth_stack[sp - 1];
+        sp -= 1;
+        while (hi > lo) {
+            const int size = hi - lo + 1;
+            if (size <= 16) {
+                if (size == 2) {
+                    ro_swap_if_greater(key, order, lo, hi);
+                } else if (size == 3) {
+                    ro_swap_if_greater(key, order, lo, hi - 1);
+                    ro_swap_if_greater(key, order, lo, hi);
+                    ro_swap_if_greater(key, order, hi - 1, hi);
+                } else {
+                    int i = lo;
+                    while (i < hi) {
+                        const int vt = (int)key[i + 1];
+                        const uint vx = order[i + 1];
+                        int j = i;
+                        while (j >= lo && ro_cmp(vt, (int)key[j]) < 0) {
+                            key[j + 1] = key[j];
+                            order[j + 1] = order[j];
+                            j -= 1;
+                        }
+                        key[j + 1] = (uint)vt;
+                        order[j + 1] = vx;
+                        i += 1;
+                    }
+                }
+                break;
+            }
+            if (depth == 0) {
+                int i = size / 2;
+                while (i >= 1) {
+                    ro_down_heap(key, order, i, size, lo);
+                    i -= 1;
+                }
+                i = size;
+                while (i >= 2) {
+                    ro_swap(key, order, lo, lo + i - 1);
+                    ro_down_heap(key, order, 1, i - 1, lo);
+                    i -= 1;
+                }
+                break;
+            }
+            depth -= 1;
+            const int middle = lo + (hi - lo) / 2;
+            ro_swap_if_greater(key, order, lo, middle);
+            ro_swap_if_greater(key, order, lo, hi);
+            ro_swap_if_greater(key, order, middle, hi);
+            ro_swap(key, order, middle, hi - 1);
+            const int pivot = (int)key[hi - 1];
+            int left = lo;
+            int right = hi - 1;
+            while (left < right) {
+                left += 1;
+                while (ro_cmp((int)key[left], pivot) < 0) {
+                    left += 1;
+                }
+                right -= 1;
+                while (ro_cmp(pivot, (int)key[right]) < 0) {
+                    right -= 1;
+                }
+                if (left >= right) {
+                    break;
+                }
+                ro_swap(key, order, left, right);
+            }
+            ro_swap(key, order, left, hi - 1);
+            lo_stack[sp] = left + 1;
+            hi_stack[sp] = hi;
+            depth_stack[sp] = depth;
+            sp += 1;
+            hi = left - 1;
+        }
+    }
+}
+
+// resolve_overlaps_with_order over the post-movement rows. The engine's
+// comparison_sort permutes equal keys non-stably, and the outward shifts
+// then apply in that order.
+static void lane_resolve_overlaps(__global uint* si, __global double* sd, const int n,
+    __global uint* keys, __global uint* order) {
     int i = 0;
     while (i < n) {
-        order[i] = i;
+        keys[i] = (uint)convert_int_rtz(sd[SD_LANE + i]);
+        order[i] = (uint)i;
         i += 1;
     }
-    // Insertion sort by the truncated lane key. The engine sort's equal-key
-    // permutation only matters for overlapping lanes, and overlaps then
-    // apply in this scan order.
-    int k = 1;
-    while (k < n) {
-        const int elem = order[k];
-        const int key = convert_int_rtz(sd[SD_LANE + elem]);
-        int m = k;
-        while (m > 0 && convert_int_rtz(sd[SD_LANE + order[m - 1]]) > key) {
-            order[m] = order[m - 1];
-            m -= 1;
-        }
-        order[m] = elem;
-        k += 1;
-    }
+    ro_sort(keys, order, n);
     i = 0;
     while (i < n) {
-        si[SI_L_FORCE + order[i]] = 0u;
+        si[SI_L_FORCE + (int)order[i]] = 0u;
         i += 1;
     }
     const float rail = convert_float_rte(0.4 / 18.);
     i = 0;
     while (i + 1 < n) {
-        const int previous = order[i];
-        const int current = order[i + 1];
+        const int previous = (int)order[i];
+        const int current = (int)order[i + 1];
         const float gap_position = convert_float_rte(sd[SD_POS + current])
             - convert_float_rte(sd[SD_POS + previous]);
         const float gap_lane = convert_float_rte(sd[SD_LANE + current])
@@ -1875,4 +2088,580 @@ static void lane_blocking_sample(__global const double* sd, __global const uint*
         }
         i += 1;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-runner field state: RaceField::update, the section pacemaker machine
+// and the duel and spot competition state machines.
+
+static int field_style(const int strategy) {
+    return (strategy == 5) ? 1 : strategy;
+}
+
+// update_pacemaker (race_field.rs). It reads the order published by the
+// previous update with live positions, once per field_update call.
+static void field_pacemaker(__global uint* scr, __global const uint* si,
+    __global const double* sd, const int n, const float dist_f, const float end_f,
+    const double course_distance, const float range, const int threshold) {
+    __global uint* rs = scr + SCR_RACE;
+    __global const uint* order = rs + RS_ORDER;
+    int overall = -1;
+    for (int k = 0; k < n; k++) {
+        const int i = (int)order[k];
+        if (sd[SD_POS + i] < course_distance) { overall = i; break; }
+    }
+    if (overall < 0) {
+        return;
+    }
+    const float pos_overall = convert_float_rte(sd[SD_POS + overall]);
+    const int section = phys_section(pos_overall, dist_f);
+    const int has = (int)rs[RS_PM_HAS];
+    const int handed = (int)rs[RS_PM_HANDED];
+    if (has && (float)section >= end_f && !handed) {
+        return;
+    }
+    int active[RACE_MAXR];
+    int na = 0;
+    for (int k = 0; k < n; k++) {
+        const int i = (int)order[k];
+        if (sd[SD_POS + i] < course_distance) active[na++] = i;
+    }
+    int forward = 64;
+    for (int k = 0; k < na; k++) {
+        const int st = field_style((int)si[SI_STRATEGY + active[k]]);
+        if (st < forward) forward = st;
+    }
+    int leader = active[0];
+    for (int k = 0; k < na; k++) {
+        if (field_style((int)si[SI_STRATEGY + active[k]]) == forward) { leader = active[k]; break; }
+    }
+    int selected = has ? (int)rs[RS_PM] - 1 : leader;
+    const int old_section = has ? (int)rs[RS_PM_SEC] : 0;
+    if (!has) {
+        rs[RS_PM] = (uint)(leader + 1);
+        rs[RS_PM_SEC] = 0u;
+        rs[RS_PM_HAS] = 1u;
+    }
+    int pm_count = (int)rs[RS_PM_COUNT];
+    int pm_handed = handed;
+    const int style_overall = field_style((int)si[SI_STRATEGY + overall]);
+    const int style_leader = field_style((int)si[SI_STRATEGY + leader]);
+    const int entering = section > old_section && (float)section < end_f;
+    if (entering) {
+        if (style_overall == forward && !pm_handed) {
+            selected = leader;
+        }
+        if ((forward > 1 || pm_handed)
+            && pos_overall - convert_float_rte(sd[SD_POS + leader]) >= range) {
+            int best = -1;
+            for (int k = 0; k < na; k++) {
+                const int i = active[k];
+                if (pos_overall - convert_float_rte(sd[SD_POS + i]) < range
+                    && (best < 0 || field_style((int)si[SI_STRATEGY + i])
+                        < field_style((int)si[SI_STRATEGY + best]))) {
+                    best = i;
+                }
+            }
+            selected = best < 0 ? overall : best;
+            pm_count = 0;
+        }
+        if (style_overall != forward) {
+            pm_count += 1;
+            const int below = pm_count < threshold;
+            if (!below || pm_handed) {
+                if (!below) pm_count = 0;
+                int candidate = overall;
+                if (style_overall >= 3) {
+                    candidate = -1;
+                    for (int k = 0; k < na; k++) {
+                        const int i = active[k];
+                        if (field_style((int)si[SI_STRATEGY + i]) < style_overall
+                            && pos_overall - convert_float_rte(sd[SD_POS + i]) <= range) {
+                            candidate = i;
+                            break;
+                        }
+                    }
+                    if (candidate < 0) candidate = overall;
+                }
+                if (!below || (field_style((int)si[SI_STRATEGY + candidate]) == forward
+                    && forward <= 1)) {
+                    selected = candidate;
+                    if (field_style((int)si[SI_STRATEGY + candidate]) != forward) {
+                        pm_count = 0;
+                        pm_handed = 1;
+                    }
+                }
+            }
+        }
+        rs[RS_PM] = (uint)(selected + 1);
+        rs[RS_PM_SEC] = (uint)section;
+    }
+    if (!entering && (pm_handed || pm_count >= threshold)) {
+        int pos_leader = -1, pos_selected = -1;
+        for (int k = 0; k < na; k++) {
+            if (active[k] == leader) pos_leader = k;
+            if (active[k] == selected) pos_selected = k;
+        }
+        if (style_overall == forward
+            || (leader != selected && pos_leader < pos_selected)) {
+            int returning = -1;
+            for (int k = 0; k < na && active[k] != selected; k++) {
+                if (field_style((int)si[SI_STRATEGY + active[k]]) == forward) {
+                    returning = active[k];
+                }
+            }
+            rs[RS_PM] = (uint)((returning < 0 ? leader : returning) + 1);
+            rs[RS_PM_SEC] = (uint)section;
+            pm_count = 0;
+            pm_handed = 0;
+        }
+    }
+    rs[RS_PM_COUNT] = (uint)pm_count;
+    rs[RS_PM_HANDED] = (uint)pm_handed;
+}
+
+// RaceField::update: prev rank copy, the (position descending, index
+// ascending) rank pass, style prefix maxima and the pacemaker pass. The
+// overtake cooldown block and order-band tracking only feed skill state.
+static void field_update(__global uint* scr, __global uint* si,
+    __global const double* sd, const int n, const float dist_f, const float end_f,
+    const double course_distance, const float range, const int threshold) {
+    __global uint* rs = scr + SCR_RACE;
+    __global uint* order = rs + RS_ORDER;
+    for (int s = 0; s < 8; s++) rs[RS_COUNTS + s] = 0u;
+    for (int i = 0; i < n; i++) rs[RS_COUNTS + (int)si[SI_STRATEGY + i]] += 1u;
+    for (int i = 0; i < n; i++) rs[RS_PREVRANK + i] = si[SI_RANKCOL + i];
+    for (int i = 0; i < n; i++) order[i] = (uint)i;
+    for (int k = 1; k < n; k++) {
+        const int i = (int)order[k];
+        int m = k;
+        while (m > 0) {
+            const int p = (int)order[m - 1];
+            const int shift = (sd[SD_POS + i] > sd[SD_POS + p])
+                || (sd[SD_POS + i] == sd[SD_POS + p] && p > i);
+            if (!shift) {
+                break;
+            }
+            order[m] = order[m - 1];
+            m -= 1;
+        }
+        order[m] = (uint)i;
+    }
+    for (int r = 0; r < n; r++) si[SI_RANKCOL + (int)order[r]] = (uint)(r + 1);
+    int highest = 0;
+    for (int k = 0; k < n; k++) {
+        const int i = (int)order[k];
+        rs[RS_STYLE + i] = (uint)highest;
+        const int st = field_style((int)si[SI_STRATEGY + i]);
+        if (st > highest) highest = st;
+    }
+    field_pacemaker(scr, si, sd, n, dist_f, end_f, course_distance, range, threshold);
+}
+
+// collect_retail_duel_proximity: the preupdate snapshots and the proximity
+// timer map (SD_DUEL, absent slots are -1.0). straight_flags hold the
+// final-straight row flags of the pre-movement rows.
+static void duel_collect(__global uint* si, __global float* sf, __global double* sd,
+    const int r, const int n, __global const double* pd, const float dt,
+    const double course_distance, const int any_straight,
+    __global const uint* straight_flags) {
+    sf[SF_DUEL_PRE + r] = sf[SF_OBSERVED + r];
+    const int crossing = (int)si[SI_GOAL_SNAP + r];
+    si[SI_GOAL_SNAP + r] = 0u;
+    const float position = convert_float_rte(sd[SD_POS + r]);
+    const float lane = convert_float_rte(sd[SD_LANE + r]);
+    const int straight = (int)straight_flags[r];
+    si[SI_DUEL_PRE_FIN + r] =
+        (uint)(position >= convert_float_rte(course_distance) && !crossing);
+    si[SI_DUEL_PRE_STR + r] = (uint)(straight || crossing);
+    for (int j = 0; j < n; j++) {
+        __global double* slot = sd + SD_DUEL + j * RACE_MAXR + r;
+        if (!straight && !any_straight) {
+            *slot = -1.0;
+            continue;
+        }
+        const int ok = (j != r)
+            && fabs(convert_float_rte(sd[SD_POS + j]) - position)
+                <= convert_float_rte(pd[PD_CF_DIST])
+            && fabs(convert_float_rte(sd[SD_LANE + j]) - lane)
+                <= convert_float_rte(pd[PD_CF_LANE])
+            && (straight || (int)straight_flags[j]);
+        if (!ok) {
+            *slot = -1.0;
+            continue;
+        }
+        const double v = *slot;
+        *slot = (v >= 0.) ? (double)(convert_float_rte(v) + dt) : 0.0;
+    }
+}
+
+static void duel_activate(__global uint* si, const int x) {
+    si[SI_DUEL_ACTIVE + x] = 1u;
+    si[SI_DUEL_FIGHT + x] += 1u;
+    si[SI_DUEL_TOKEN + x] = 1u;
+}
+
+// update_dueling, the retail path. duel_low_hp uses the plain f64 ratio,
+// eligible_straight uses the preupdate snapshots with the corner state, and
+// the duel draws no RNG.
+static void duel_update(__global uint* si, __global const float* sf,
+    __global const double* sd, __global double* shl, const int r, const int n,
+    const double course_distance, const int has_corner_events) {
+    if (!has_corner_events) {
+        return;
+    }
+    if ((int)si[SI_DUEL_ACTIVE + r]) {
+        int nearby_participant = 0;
+        for (int j = 0; j < n; j++) {
+            if (j == r) {
+                continue;
+            }
+            if ((int)si[SI_DUEL_FIGHT + j] > 0
+                && (int)si[SI_DUEL_GROUP + j] == (int)si[SI_DUEL_GROUP + r]
+                && fabs(sd[SD_POS + j] - sd[SD_POS + r]) <= 5.0) {
+                nearby_participant = 1;
+                break;
+            }
+        }
+        const double self_ratio =
+            fmax(shl[r * SH_STRIDE + SH_HP] / shl[r * SH_STRIDE + SH_MAX], 0.0);
+        if (self_ratio < 0.05 || !nearby_participant) {
+            si[SI_DUEL_ACTIVE + r] = 0u;
+            si[SI_DUEL_TOKEN + r] = 0u;
+        }
+        return;
+    }
+    const int eligible_straight = (int)si[SI_DUEL_PRE_STR + r]
+        || ((int)si[SI_DUEL_PRE_FIN + r] && (int)si[SI_FINALE + r]
+            && (int)si[SI_CORNER + r] == 0);
+    if (!eligible_straight || (int)si[SI_DUEL_FIGHT + r] > 0) {
+        return;
+    }
+    const int rank_half = ((n + 1) / 2 > 1) ? (n + 1) / 2 : 1;
+    const int top_half = (int)si[SI_RANKCOL + r] <= rank_half;
+    const double self_ratio =
+        fmax(shl[r * SH_STRIDE + SH_HP] / shl[r * SH_STRIDE + SH_MAX], 0.0);
+    if (self_ratio < 0.15) {
+        return;
+    }
+    int nearby = -1, eligible = -1, ready = -1;
+    for (int j = 0; j < n; j++) {
+        if (j == r) {
+            continue;
+        }
+        const double timer = sd[SD_DUEL + j * RACE_MAXR + r];
+        if (timer < 0.) {
+            continue;
+        }
+        if (nearby < 0) {
+            nearby = j;
+        }
+        const double other_ratio =
+            fmax(shl[j * SH_STRIDE + SH_HP] / shl[j * SH_STRIDE + SH_MAX], 0.0);
+        const int qualifies = other_ratio >= 0.15
+            && fabs((double)sf[SF_DUEL_PRE + j] - (double)sf[SF_DUEL_PRE + r])
+                <= (double)0.6f
+            && (top_half || (int)si[SI_RANKCOL + j] <= rank_half);
+        if (qualifies) {
+            if (eligible < 0) eligible = j;
+            if (timer >= 2.0 && (ready < 0 || timer > sd[SD_DUEL + ready * RACE_MAXR + r])) {
+                ready = j;
+            }
+        }
+    }
+    const int target = ready >= 0 ? ready : (eligible >= 0 ? eligible : nearby);
+    if (ready < 0) {
+        return;
+    }
+    const int j = target;
+    if ((int)si[SI_DUEL_FIGHT + j] > 0 && !(int)si[SI_DUEL_ACTIVE + j]) {
+        return;
+    }
+    const int peer_group = (int)si[SI_DUEL_GROUP + j];
+    const int own_group = (int)si[SI_DUEL_GROUP + r];
+    const int group = peer_group >= 0 ? peer_group
+        : (own_group >= 0 ? own_group : (r < j ? r : j));
+    if (own_group < 0) si[SI_DUEL_GROUP + r] = (uint)group;
+    if (peer_group < 0) si[SI_DUEL_GROUP + j] = (uint)group;
+    duel_activate(si, r);
+    if (!(int)si[SI_DUEL_ACTIVE + j] && (int)si[SI_DUEL_FIGHT + j] == 0) {
+        duel_activate(si, j);
+    }
+}
+
+// latch_active_spot_cutoff plus update_spot_struggle, the Nige/Oonige state
+// machine. Timers were advanced in prepare, the token bit drives the target
+// chain, and no part of it draws RNG.
+static void spot_update(__global uint* scr, __global uint* si, __global double* sd,
+    const int r, const int n, __global const double* pd, const double section_length) {
+    const int strategy = (int)si[SI_STRATEGY + r];
+    if (strategy != 1 && strategy != 5) {
+        return;
+    }
+    const double pos = sd[SD_POS + r];
+    const double lane = sd[SD_LANE + r];
+    const double timer = sd[SD_SPOT_TIMER + r];
+    __global uint* rs = scr + SCR_RACE;
+    if ((int)si[SI_SPOT_STARTED + r]) {
+        if ((int)si[SI_SPOT_ACTIVE + r] && !(int)si[SI_SPOT_EXITED + r]) {
+            int distance_exit = 1;
+            for (int j = 0; j < n; j++) {
+                if (j == r) {
+                    continue;
+                }
+                const int holds = (int)si[SI_STRATEGY + j] == strategy
+                    && (int)si[SI_SPOT_STARTED + j]
+                    && fabs(sd[SD_POS + j] - pos) <= 5.0
+                    && fabs(sd[SD_LANE + j] - lane) < 0.416;
+                if (holds) {
+                    distance_exit = 0;
+                    break;
+                }
+            }
+            if (distance_exit) si[SI_SPOT_EXITED + r] = 1u;
+        }
+        if ((int)si[SI_SPOT_ACTIVE + r] && timer < 0.0
+            && pos >= section_length * 8.0) {
+            si[SI_SPOT_LATCH + r] = 1u;
+        }
+        int group_cutoff = (int)si[SI_SPOT_LATCH + r];
+        if (!group_cutoff) {
+            for (int j = 0; j < n; j++) {
+                if (j != r && (int)si[SI_SPOT_STARTED + j] && (int)si[SI_SPOT_LATCH + j]) {
+                    group_cutoff = 1;
+                    break;
+                }
+            }
+        }
+        if ((int)si[SI_SPOT_ACTIVE + r]
+            && ((int)si[SI_SPOT_EXITED + r] || timer >= 0.0 || group_cutoff)) {
+            si[SI_SPOT_ACTIVE + r] = 0u;
+            si[SI_SPOT_TOKEN + r] = 0u;
+        }
+        return;
+    }
+    if ((int)si[SI_SPOT_CLOSED + r] || (int)rs[RS_COUNTS + strategy] < 2) {
+        return;
+    }
+    const double entry_end = section_length * 6.0;
+    double race_front = -INFINITY;
+    int eligible_front_rank = 0x7fffffff;
+    int front_idx = -1;
+    double front_pos = -INFINITY, front_lane = 0.0;
+    int group_len = 0, group_late = 1;
+    for (int j = 0; j < n; j++) {
+        const int j_strategy = (int)si[SI_STRATEGY + j];
+        const int j_rank = (int)si[SI_RANKCOL + j];
+        if (j_rank == 1) race_front = sd[SD_POS + j];
+        if (strategy == 5 || j_strategy != 5) {
+            if (j_rank < eligible_front_rank) eligible_front_rank = j_rank;
+        }
+        if (j_strategy == strategy) {
+            if ((int)si[SI_SPOT_STARTED + j]) {
+                return;
+            }
+            group_len += 1;
+            if (sd[SD_POS + j] < entry_end) group_late = 0;
+            if (front_idx < 0 || j_rank < (int)si[SI_RANKCOL + front_idx]) {
+                front_pos = sd[SD_POS + j];
+                front_lane = sd[SD_LANE + j];
+                front_idx = j;
+            }
+        }
+    }
+    if (group_late) {
+        si[SI_SPOT_CLOSED + r] = 1u;
+        return;
+    }
+    if (group_len < 2 || race_front < 150.0) {
+        return;
+    }
+    if ((int)si[SI_RANKCOL + front_idx] != eligible_front_rank) {
+        return;
+    }
+    int count = 0, early = 0, started[RACE_MAXR];
+    for (int j = 0; j < n; j++) {
+        if ((int)si[SI_STRATEGY + j] != strategy) {
+            continue;
+        }
+        const int invited = front_pos - sd[SD_POS + j] <= 3.75
+            && fabs(front_lane - sd[SD_LANE + j]) <= 0.165
+            && (j == front_idx || sd[SD_POS + j] < entry_end);
+        started[j] = invited;
+        if (invited) {
+            count += 1;
+            if (sd[SD_POS + j] < entry_end) early = 1;
+        }
+    }
+    if (count < 2 || !early) {
+        return;
+    }
+    for (int j = 0; j < n; j++) {
+        if (!started[j]) {
+            continue;
+        }
+        const uint base = (uint)(PD_RUN0 + j * PD_RUN_STRIDE);
+        si[SI_SPOT_ACTIVE + j] = 1u;
+        si[SI_SPOT_STARTED + j] = 1u;
+        si[SI_SPOT_TOKEN + j] = 1u;
+        sd[SD_SPOT_TIMER + j] = -pd[base + PRD_SPOT_D];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The Conserve Power ledger (conserve_power.rs) and the asitame release the
+// builder attaches to every retail runner (race_solver.rs, race_solver_builder.rs).
+
+// ConservePowerState::duration when supported; the clean-coefficient table
+// returns zero for unlisted distance types.
+static double cp_clean_duration(__global const double* sd, const int r,
+    const double distance, const int dtype) {
+    double coef;
+    if (dtype == 1) {
+        coef = 0.45;
+    } else if (dtype == 2) {
+        coef = 1.;
+    } else if (dtype == 3) {
+        coef = 0.875;
+    } else if (dtype == 4) {
+        coef = 0.8;
+    } else {
+        return 0.;
+    }
+    return (double)convert_float_rte(
+        sd[SD_CP_GAUGE + r] * sqrt(distance) * coef / 1450.);
+}
+
+// asitame_release_duration: K times the distance-type activity coefficient
+// times the legacy gauge.
+static double cp_legacy_duration(const double acc, const int dtype) {
+    const double dtc = (dtype == 1) ? 0.45
+        : ((dtype == 2) ? 1. : ((dtype == 3) ? 0.875 : 0.8));
+    return (double)convert_float_rte(0.0185 * dtc * acc);
+}
+
+// conserve_release_duration: the clean ledger when supported, else legacy.
+static double cp_release_duration(__global const uint* si, __global const double* sd,
+    const int r, const double distance, const int dtype) {
+    const uint flags = si[SI_CPFLAGS + r];
+    if ((flags & CP_INITSET) && !(flags & CP_UNSUPPORTED)) {
+        return cp_clean_duration(sd, r, distance, dtype);
+    }
+    return cp_legacy_duration(sd[SD_CP_ACC + r], dtype);
+}
+
+// ConservePowerState::update, minus the trace-only now clock.
+static void cp_update(__global uint* si, __global float* sf, __global double* sd,
+    const int r, const double distance, const int strategy, const float dt,
+    const int blocked, const int pace_down, const int rushing, const int spot) {
+    uint flags = si[SI_CPFLAGS + r];
+    if (flags & CP_UNSUPPORTED) {
+        return;
+    }
+    if (flags & CP_CLOCK) {
+        sf[SF_CP_GELAP + r] += dt;
+    }
+    const int accumulating = sd[SD_POS + r] < floor(distance / 24.0) * 10.0;
+    if (accumulating) {
+        const double power = sd[SD_RAWPW + r];
+        if (power <= 1200. || strategy < 1 || strategy > 5
+            || ((flags & CP_INITSET) && sd[SD_CP_INITPW + r] != power)) {
+            si[SI_CPFLAGS + r] = flags | CP_UNSUPPORTED;
+            return;
+        }
+        if (!(flags & CP_INITSET)) {
+            sd[SD_CP_INITPW + r] = power;
+            sf[SF_CP_GELAP + r] = 0.f;
+            sf[SF_CP_GTHRESH + r] = 1.f;
+            flags |= CP_INITSET | CP_CLOCK | CP_HASTH;
+        }
+    }
+    if (!(flags & CP_CUTOFF)) {
+        while ((flags & CP_HASTH)
+            && sf[SF_CP_GELAP + r] >= sf[SF_CP_GTHRESH + r]) {
+            sd[SD_CP_GAUGE + r] += sd[SD_CP_PREVRATE + r];
+            sf[SF_CP_GTHRESH + r] += 1.f;
+        }
+    }
+    if (rushing && !(flags & CP_WASRUSH)) {
+        sd[SD_CP_GAUGE + r] *= 0.8;
+    }
+    if (spot && !(flags & CP_WASSPOT)) {
+        sd[SD_CP_GAUGE + r] *= 0.95;
+    }
+    flags = (flags & ~(CP_WASRUSH | CP_WASSPOT))
+        | (rushing ? CP_WASRUSH : 0u) | (spot ? CP_WASSPOT : 0u);
+    if (!accumulating) {
+        si[SI_CPFLAGS + r] = flags | CP_CUTOFF;
+        return;
+    }
+    sd[SD_CP_PREVRATE + r] = (pace_down ? 6.7 : 4.2)
+        * ((strategy == 2) ? 0.75 : ((strategy == 4) ? 0.7 : 1.0));
+    if (blocked || rushing || spot) {
+        flags |= CP_WASBLK;
+        flags &= ~CP_HASTH;
+    } else if (flags & CP_WASBLK) {
+        sf[SF_CP_GELAP + r] = 0.f;
+        sf[SF_CP_GTHRESH + r] = 2.5f;
+        flags |= CP_HASTH;
+        flags &= ~CP_WASBLK;
+    }
+    si[SI_CPFLAGS + r] = flags;
+}
+
+// activate_skill for the injected asitame Accel effect, from the release
+// path. The modifier follows the release-conserve parameters and the effect
+// timer counts up from the negated scaled duration.
+static void asitame_release(__global uint* si, __global float* sf,
+    __global double* sd, const int r, __global const double* pd,
+    const double distance, const int strategy) {
+    uint flags = si[SI_CPFLAGS + r];
+    if (flags & CP_FIRED) {
+        return;
+    }
+    const double pos = sd[SD_POS + r];
+    if (!(pos >= distance * 2.0 / 3.0 && pos < distance)) {
+        return;
+    }
+    const double power = sd[SD_RAWPW + r];
+    if (!(power > 1200.)) {
+        return;
+    }
+    const int dtype = (int)pd[PD_DTYPE];
+    if ((flags & CP_INITSET) && !(flags & CP_UNSUPPORTED)
+        && !(cp_clean_duration(sd, r, distance, dtype)
+            >= (double)convert_float_rte(0.2f))) {
+        return;
+    }
+    double coef;
+    if (dtype == 1) {
+        coef = (strategy == 2) ? 0.7 : ((strategy == 3) ? 0.75
+            : ((strategy == 4) ? 0.7 : ((strategy == 0) ? 0. : 1.)));
+    } else if (dtype == 2) {
+        coef = (strategy == 2) ? 0.8 : ((strategy == 3) ? 0.7
+            : ((strategy == 4) ? 0.75 : ((strategy == 0) ? 0. : 1.)));
+    } else if (dtype == 3) {
+        coef = (strategy == 2) ? 0.9 : ((strategy == 3) ? 0.875
+            : ((strategy == 4) ? 0.86 : ((strategy == 0) ? 0. : 1.)));
+    } else if (dtype == 4) {
+        coef = (strategy == 2) ? 0.9 : ((strategy == 3) ? 1.
+            : ((strategy == 4) ? 0.9 : ((strategy == 0) ? 0. : 1.)));
+    } else {
+        coef = 0.;
+    }
+    const float arg = fmax((convert_float_rte(power) - 1200.f) * 130.f, 0.f);
+    const float root = convert_float_rte(sqrt((double)arg));
+    double modifier = (double)convert_float_rte((double)root
+        * (double)convert_float_rte(0.001f)
+        * (double)convert_float_rte((float)coef));
+    if (flags & CP_STRUGGLE) {
+        modifier *= 0.98;
+    }
+    if (flags & CP_KAKARI) {
+        modifier *= 0.8;
+    }
+    flags |= CP_FIRED | CP_ASIT;
+    sf[SF_AS_VALUE + r] = convert_float_rte(modifier);
+    sd[SD_AS_TIMER + r] = -cp_release_duration(si, sd, r, distance, dtype);
+    si[SI_CPFLAGS + r] = flags;
 }

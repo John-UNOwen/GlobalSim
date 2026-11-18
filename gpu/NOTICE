@@ -27,7 +27,8 @@ it is checked against is that repo's `tests/fixtures/restricted_trace.json`.
 
 `gpu/src/kernels/race.cl` and `gpu/src/kernels/retail_core.cl` are OpenCL
 ports written from the engine's `race_solver_retail.rs`, `race_field.rs`,
-`race_field_retail.rs`, `retail_lane.rs`, `retail_position_keep.rs`,
+`race_field_retail.rs`, `race_solver.rs`, `race_solver_builder.rs`,
+`conserve_power.rs`, `retail_lane.rs`, `retail_position_keep.rs`,
 `retail_states.rs`, `retail_spurt.rs` and `starting_grid.rs`, alongside the
 already-listed vendored modules. No engine code is copied into them and no
 engine file is modified for them.

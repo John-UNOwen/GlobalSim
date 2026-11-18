@@ -16,9 +16,9 @@ use ocl::{Buffer, Queue, flags};
 pub const RACE_MAXR: usize = 24;
 pub const RACE_MAX_TICKS: usize = 6144;
 pub const RI_STRIDE: usize = 320;
-pub const RIL_STRIDE: usize = 448;
+pub const RIL_STRIDE: usize = 576;
 pub const ST_STRIDE: usize = 112;
-pub const SCR_U_WORDS: usize = SCR_RACE + 128;
+pub const SCR_U_WORDS: usize = SCR_RACE + 192;
 pub const SRL_WORDS: usize = SRL_HP_OUT_L + 24 * 64;
 pub const DT: f32 = 0.0666;
 
@@ -33,6 +33,8 @@ pub const RI_STARTUP: usize = 6;
 pub const RI_GEOM_ON: usize = 7;
 pub const RI_HOST_FLAG: usize = 8;
 pub const RI_NSLOPES: usize = 10;
+pub const RI_NSTR: usize = 11;
+pub const RI_NCOR: usize = 12;
 pub const RI_LOT_MIN: usize = 13;
 pub const RI_LOT_MAX: usize = 14;
 pub const RI_EMPTY_MOVE: usize = 15;
@@ -47,9 +49,22 @@ pub const RR_CSS0: usize = 5;
 pub const RR_CSSN: usize = 9;
 pub const RR_STAPT: usize = 10;
 pub const RR_SUAPT: usize = 11;
-pub const PT_POWF: usize = 84;
 pub const PT_SPURT: usize = 51;
 pub const PI_DISTANCE: usize = 106;
+pub const PD_CF_DIST: usize = 400;
+pub const PD_CF_LANE: usize = 401;
+pub const PD_CF_SPEED: usize = 402;
+pub const PD_CF_ACCEL: usize = 405;
+pub const PD_PM_RANGE: usize = 408;
+pub const PD_PM_NOTFWD: usize = 409;
+pub const PD_DTYPE: usize = 410;
+pub const PD_RUN0: usize = 448;
+pub const PD_RUN_STRIDE: usize = 5;
+pub const PRD_POWF: usize = 0;
+pub const PRD_DUEL_T: usize = 1;
+pub const PRD_DUEL_A: usize = 2;
+pub const PRD_SPOT_M: usize = 3;
+pub const PRD_SPOT_D: usize = 4;
 pub const PC_LAST_STRAIGHT_START: usize = 184;
 pub const PC_LAST_CORNER_START: usize = 186;
 pub const PC_FIRST_MOVE_POINT: usize = 187;
@@ -63,7 +78,7 @@ pub const ST_TICKS: usize = 2;
 pub const ST_FINISH0: usize = 8;
 // Scratch bases, mirrors of retail_core.cl.
 const IIU: usize = 96;
-const SF_STRIDE: usize = 44;
+const SF_STRIDE: usize = 52;
 const LIST_STRIDE: usize = 48;
 const CAND_MAX: usize = 101;
 const SCR_STATS_IN: usize = 0;
@@ -73,12 +88,12 @@ const SCR_INIT_OUT: usize = SCR_INIT_IN + IIU;
 const SCR_HP_IN: usize = SCR_INIT_OUT + 992;
 const SCR_HP_OUT: usize = SCR_HP_IN + 24 * IIU;
 const SCR_STATE: usize = SCR_HP_OUT + 24 * 180;
-const SCR_SF: usize = SCR_STATE + 48 * 24;
+const SCR_SF: usize = SCR_STATE + 64 * 24;
 const SCR_LISTS: usize = SCR_SF + SF_STRIDE * 24;
 const SCR_CAND: usize = SCR_LISTS + LIST_STRIDE * 24;
 const SCR_CACHED: usize = (SCR_CAND + 3 * CAND_MAX + 63) & !63;
 const SCR_RACE: usize = SCR_CACHED + 4 * LIST_STRIDE * 24;
-const SRL_HP: usize = 40 * 24;
+const SRL_HP: usize = 71 * 24;
 const RD_WORDS: usize = 8 * 24 + SRL_HP + 32;
 const SRL_STATS_IN_L: usize = RD_WORDS;
 const SRL_INIT_IN_L: usize = SRL_STATS_IN_L + 24 * 48;
@@ -105,6 +120,10 @@ pub struct RaceGpu {
     pub kernel_arg: u32,
     pub finish_step: Option<f64>,
     pub finish_raw: Option<f64>,
+    /// Per runner in roster order, the same bits the solo fields carry for
+    /// runner 0. Runners that never crossed read as None.
+    pub finish_step_all: Vec<Option<f64>>,
+    pub finish_raw_all: Vec<Option<f64>>,
     /// The loop's own end time, the engine's finish value for runners that
     /// never crossed the line.
     pub loop_end: f64,
@@ -302,6 +321,19 @@ fn pack_shared_parameters(globals: &Value, pd: &mut [f64]) -> Result<(), String>
     pd[145] = keep_number("PaseDownBaseTargetSpeedMultiplyPhaseMiddle")?;
     pd[146] = keep_number("PaseUpExBaseTargetSpeedMultiply")?;
     pd[147] = pd[146];
+    pd[PD_PM_RANGE] = number(keep, "PaseMakerChangeForwardRunningStyleRange")?;
+    pd[PD_PM_NOTFWD] = number(keep, "PaseMakerChangeTopHorseNotMostForwardStyleCount")?;
+    let fight = group(p, "CompeteFight")?;
+    copy_keys(pd, PD_CF_DIST, fight, &[
+        "DistanceGap",
+        "LaneGap",
+        "AddParam1Coef1",
+        "AddParam1Coef2",
+        "AddParam1Coef3",
+        "AddParam2Coef1",
+        "AddParam2Coef2",
+        "AddParam2Coef3",
+    ])?;
 
     copy_keys(pd, 160, temptation, &[
         "TemptationEndCheckTime",
@@ -386,7 +418,7 @@ fn prepare(request: &str, seed: i64, globals: &Value, grids: &Value, courses: &V
     let horses = root.get_array("horses")?;
     let course = courses.get(&course_id.to_string()).ok_or("course_data.json has no entry for the course")?;
 
-    // Domain gates first; each maps to a kernel fallback code.
+    // Domain gates first, each mapping to a kernel fallback code.
     let flagged = |reason: &str| Ok(Prepared {
         ri: vec![0u32; RI_STRIDE],
         pd: vec![0f64; RIL_STRIDE],
@@ -415,6 +447,10 @@ fn prepare(request: &str, seed: i64, globals: &Value, grids: &Value, courses: &V
     let mut geometry = None;
     pack_shared_parameters(globals, &mut pd)?;
     let nslopes = pack_course_scalars(course, &mut pd)?;
+    // The duel path only runs when the course has both straights and corners,
+    // matching update_dueling's guard.
+    ri[RI_NSTR] = course.get("straights").and_then(Value::as_array).is_some_and(|a| !a.is_empty()) as u32;
+    ri[RI_NCOR] = course.get("corners").and_then(Value::as_array).is_some_and(|a| !a.is_empty()) as u32;
 
     let surface = course.get_i64("surface")? as i32;
     let ground = ground_id(root.get_str("groundCondition")?)?;
@@ -453,6 +489,7 @@ fn prepare(request: &str, seed: i64, globals: &Value, grids: &Value, courses: &V
     ri[RI_EMPTY_MOVE] = empty_move as u32;
     pd[PI_DISTANCE] = distance;
     pd[PC_FIRST_MOVE_POINT] = first_move;
+    pd[PD_DTYPE] = course.get_i64("distanceType")? as f64;
 
     if root.get("experimentalRetailGeometry").and_then(Value::as_bool) == Some(true) {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/course_geometry");
@@ -543,20 +580,47 @@ pub fn run(requests: &[(String, i64)]) -> Result<RaceRun, String> {
     let mut offset = 0usize;
     for &i in &launched {
         let count = prepared[i].stats.len();
-        // PT_POWF carries one value, so it is exact only for one runner.
-        // Multi-runner launches reach a kernel fallback before the slot.
-        let guts = match &prepass {
-            Some(out) => match &out.outs[offset] {
-                Out::Stats(s) => s.adjusted_f64()[3],
-                _ => return Err("stats pre-pass decode".into()),
-            },
-            None => 0.,
-        };
-        offset += count;
-        let bounded = (guts as f32).clamp(1., 2000.);
         let spurt_coef = prepared[i].pd[PT_SPURT + 2] as f32;
         let spurt_pow = prepared[i].pd[PT_SPURT + 3] as f32;
-        prepared[i].pd[PT_POWF] = f64::from((bounded * spurt_coef).powf(spurt_pow).to_bits());
+        let duel_speed = [
+            prepared[i].pd[PD_CF_SPEED] as f32,
+            prepared[i].pd[PD_CF_SPEED + 1] as f32,
+            prepared[i].pd[PD_CF_SPEED + 2] as f32,
+        ];
+        let duel_accel = [
+            prepared[i].pd[PD_CF_ACCEL] as f32,
+            prepared[i].pd[PD_CF_ACCEL + 1] as f32,
+            prepared[i].pd[PD_CF_ACCEL + 2] as f32,
+        ];
+        let proficiency = [1.1f64, 1.0, 0.85, 0.75, 0.6, 0.4, 0.2, 0.1];
+        for r in 0..count {
+            let raw_guts = match &prepass {
+                Some(out) => match &out.outs[offset + r] {
+                    Out::Stats(s) => s.adjusted_f64()[3],
+                    _ => return Err("stats pre-pass decode".into()),
+                },
+                None => 0.,
+            };
+            let base = PD_RUN0 + PD_RUN_STRIDE * r;
+            let bounded = (raw_guts as f32).clamp(1., 2000.);
+            prepared[i].pd[base + PRD_POWF] =
+                f64::from((bounded * spurt_coef).powf(spurt_pow).to_bits());
+            let guts = raw_guts.max(1.0);
+            let duel = |c: [f32; 3]| {
+                let argument = (guts as f32) * c[0];
+                let power = (argument as f64).powf(c[1] as f64) as f32;
+                (power * c[2]) as f64
+            };
+            prepared[i].pd[base + PRD_DUEL_T] = duel(duel_speed);
+            prepared[i].pd[base + PRD_DUEL_A] = duel(duel_accel);
+            let argument = (guts as f32) * 500.0_f32;
+            let power = (argument as f64).powf(0.6_f32 as f64) as f32;
+            prepared[i].pd[base + PRD_SPOT_M] = (power * 0.0001_f32) as f64;
+            let stapt = prepared[i].ri[RI_RUN0 + RI_RUN_STRIDE * r + RR_STAPT] as usize;
+            prepared[i].pd[base + PRD_SPOT_D] =
+                (700.0 * guts).powf(0.5) * 0.012 * proficiency[stapt];
+        }
+        offset += count;
     }
 
     // One geometry table set shared by every launched race.
@@ -575,7 +639,7 @@ pub fn run(requests: &[(String, i64)]) -> Result<RaceRun, String> {
         }
     }
     if table_sets.is_empty() {
-        // OpenCL rejects zero-length buffers; a geometry-off launch never
+        // OpenCL rejects zero-length buffers, so a geometry-off launch never
         // reads these.
         let zeros = |k: usize| vec![0f64; k];
         table_sets.push(retail_geometry::FlatCourse {
@@ -682,6 +746,8 @@ pub fn run(requests: &[(String, i64)]) -> Result<RaceRun, String> {
             kernel_arg: 0,
             finish_step: None,
             finish_raw: None,
+            finish_step_all: Vec::new(),
+            finish_raw_all: Vec::new(),
             loop_end: 0.,
         };
         if race.host_fallback.is_none() {
@@ -708,6 +774,12 @@ pub fn run(requests: &[(String, i64)]) -> Result<RaceRun, String> {
                     .collect();
                 out.finish_step = read_f64(st, ST_FINISH0);
                 out.finish_raw = read_f64(st, ST_FINISH0 + 2);
+                out.finish_step_all = (0..race.n)
+                    .map(|r| read_f64(st, ST_FINISH0 + 4 * r))
+                    .collect();
+                out.finish_raw_all = (0..race.n)
+                    .map(|r| read_f64(st, ST_FINISH0 + 4 * r + 2))
+                    .collect();
             }
         }
         races.push(out);
@@ -750,6 +822,20 @@ pub fn solo_request(request: &str, course: i32, seed: i64) -> Result<String, Str
     if let Some(Value::Array(horses)) = map.get_mut("horses") {
         horses.clear();
         horses.push(horse);
+    }
+    map.insert("courseId".into(), Value::Number(f64::from(course)));
+    map.insert("seed".into(), Value::Number(seed as f64));
+    let mut out = String::new();
+    json::to_string_into(&value, &mut out);
+    Ok(out)
+}
+
+/// The v77 roster line for a course and a seed, every horse kept in place.
+pub fn multi_request(request: &str, course: i32, seed: i64) -> Result<String, String> {
+    let mut value = json::parse(request)?;
+    let Value::Object(map) = &mut value else { return Err("request is not a JSON object".into()) };
+    if !map.get("horses").is_some_and(|h| h.as_array().is_some()) {
+        return Err("request has no horses array".into());
     }
     map.insert("courseId".into(), Value::Number(f64::from(course)));
     map.insert("seed".into(), Value::Number(seed as f64));

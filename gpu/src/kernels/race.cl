@@ -7,8 +7,10 @@
 // Domain: retail runtime, no skills, no paired streams, no startup mode.
 // Anything else sets ST_FALLBACK with the domain code in ST_ARG (1 bad n,
 // 2 paired, 3 startup, 4 host flag, 5 initialization input, 6 geometry).
-// Multi-runner races stay on the CPU until duel and spot are ported, so the
-// rank, style-ahead and pacemaker inputs below carry the one-runner values.
+// The field logic (ranks, pacemaker, lane blocking and movement, duel and
+// spot competition) runs in the work item in roster order. Skills keep
+// their own streams on the CPU, so a request carrying any skill still
+// falls back at the host.
 
 #define FB_N 1u
 #define FB_PAIRED 2u
@@ -62,7 +64,8 @@ static float race_apt_spurt(const int apt) {
 // columns are the roster, so the dirty-refresh re-snapshot has nothing to
 // rebuild and the start-delay rest path returns 0.0 like the engine.
 // Returns the movement distance, or -1.0 for the gated rest tick.
-static float race_step(__global uint* si, __global float* sf, __global double* sd,
+static float race_step(__global uint* si, __global uint* scr, __global float* sf,
+    __global double* sd,
     __global double* shl, __global uint* lists, __global float* cached,
     __global uint* bank, __global float* c_start, __global float* c_speed,
     __global float* c_time, __global const double* pd, __global const double* rd,
@@ -101,8 +104,7 @@ static float race_step(__global uint* si, __global float* sf, __global double* s
     }
 
     // update_retail_pace. The collect loop keeps lane_max current, and the
-    // corner-state and duel proximity passes have no consumer without
-    // skills, so they are absent here.
+    // duel proximity pass feeds only the duel, which takes no pace input.
     if (!finished) {
         const int kakari = (int)si[SI_KAKARI + r];
         if ((int)si[SI_PS_MODE + r] == 7 && !kakari && !(int)si[SI_PS_RUSHING + r]
@@ -115,22 +117,45 @@ static float race_step(__global uint* si, __global float* sf, __global double* s
             si[SI_PACEDOWN + r] = 0u;
             sd[SD_PKCOEF + r] = (double)sf[SF_PS_COEF + r];
         } else {
-            // distance_to_behind at one runner: rank 0 (the tick-0 default)
-            // reads order[0], which is the runner itself, for a zero gap.
+            const __global uint* rs = scr + SCR_RACE;
             const int rank = (int)si[SI_RANKCOL + r];
+            const int pm = (int)rs[RS_PM] - 1;
             int has_behind = 0;
             float behind_gap = 0.f;
             if (rank < n) {
                 has_behind = 1;
-                behind_gap = convert_float_rte(
-                    fmax(sd[SD_POS + r] - sd[SD_POS + rank], 0.0));
+                behind_gap = convert_float_rte(fmax(
+                    sd[SD_POS + r] - sd[SD_POS + (int)rs[RS_ORDER + rank]], 0.0));
             }
             pace_update(si, sf, r, dt, pd, bank, dist_f,
                 convert_float_rte(sd[SD_POS + r]), sf[SF_HPW + r], strategy,
-                kakari, (int)si[SI_RMODE + r], phase, rank, rank, strategy,
-                0.f, 1, 0, (int)rd[RD_NIGE], has_behind, behind_gap, 0);
+                kakari, (int)si[SI_RMODE + r], phase, rank,
+                (int)si[SI_RANKCOL + pm], (int)si[SI_STRATEGY + pm],
+                convert_float_rte(sd[SD_POS + pm] - sd[SD_POS + r]), pm == r,
+                (int)rs[RS_STYLE + r] > field_style(strategy),
+                (int)rs[RS_COUNTS + 1], has_behind, behind_gap,
+                (int)si[SI_SPOT_TOKEN + r] || (int)si[SI_DUEL_TOKEN + r]);
             si[SI_PACEDOWN + r] = ((int)si[SI_PS_MODE + r] == 3) ? 1u : 0u;
             sd[SD_PKCOEF + r] = (double)sf[SF_PS_COEF + r];
+        }
+        // The v8 legacy conserve gauge runs in the position-keep window,
+        // with the truncated-section divisor rather than the rounded one.
+        const double cp_sec = (double)(long)(course_distance / 24.0);
+        if (cp_sec * (convert_float_rte(pd[PK_START_SECTION]) - 1.0)
+                <= sd[SD_POS + r]
+            && sd[SD_POS + r] < cp_sec * convert_float_rte(pd[PK_END_SECTION])) {
+            const int cp_mode = (int)si[SI_PS_MODE + r];
+            const double rate = (cp_mode == 7) ? 6.7 : ((cp_mode == 3) ? 4.2 : 0.);
+            sd[SD_CP_ACC + r] += (double)dt * rate
+                * ((strategy == 2) ? 0.75 : ((strategy == 4) ? 0.7 : 1.));
+            uint cpfl = si[SI_CPFLAGS + r];
+            if ((int)si[SI_SPOT_ACTIVE + r]) {
+                cpfl |= CP_STRUGGLE;
+            }
+            if (kakari) {
+                cpfl |= CP_KAKARI;
+            }
+            si[SI_CPFLAGS + r] = cpfl;
         }
     }
 
@@ -158,20 +183,34 @@ static float race_step(__global uint* si, __global float* sf, __global double* s
         si[SI_RMODE + r] = si[SI_RS_MODE + r];
     }
 
+    // The clean conserve ledger, skipped once the last spurt has started.
+    if (!finished && !(int)si[SI_SP_ACTIVE + r]) {
+        const int cp_mode = (int)si[SI_PS_MODE + r];
+        cp_update(si, sf, sd, r, course_distance, strategy, dt,
+            cp_mode != 7 && cp_mode != 3, (int)si[SI_PACEDOWN + r],
+            (int)si[SI_KAKARI + r],
+            (int)si[SI_SPOT_ACTIVE + r] && sd[SD_SPOT_TIMER + r] < 0.0);
+    }
+
     // update_retail_spurt. The plan closure only runs when the state needs a
     // new plan, which is where the search's lotteries live.
+    const int was_spurting = (int)si[SI_SP_ACTIVE + r];
     if (phase >= 2) {
         float out_start = 0.f, out_speed = 0.f;
         int out_result = 0;
         if ((int)si[SI_SP_COUNT + r] == 0 || (int)si[SI_SP_PENDING + r]) {
             spurt_choose(pd, shl_r, sf[SF_HPG + r], sf[SF_HPW + r], dist_f,
                 position_f, convert_float_rte(shl_r[SH_HP]), sf[SF_SPURT_MAX + r],
-                convert_float_rte(sd[SD_BTS + 2 + r]), bank, c_start, c_speed,
+                convert_float_rte(sd[SD_BTS + 2 * RACE_MAXR + r]), bank, c_start, c_speed,
                 c_time, &out_start, &out_speed, &out_result);
         }
         si[SI_SP_ACTIVE + r] = (uint)spurt_state_update(si, sf, r, position_f,
             out_start, out_speed, out_result);
         sd[SD_LSS + r] = (double)sf[SF_SP_SPEED + r];
+        // The Conserve Power release rides the last-spurt transition.
+        if (!was_spurting && (int)si[SI_SP_ACTIVE + r]) {
+            asitame_release(si, sf, sd, r, pd, course_distance, strategy);
+        }
     }
 
     // Downhill mode from the slope region, drawing its lottery.
@@ -179,21 +218,32 @@ static float race_step(__global uint* si, __global float* sf, __global double* s
     downhill_update(si, sf, r, slope_per < 0., sf[SF_HPW + r], dt, pd, bank);
     si[SI_DOWNHILL + r] = si[SI_DS_ACTIVE + r];
 
+    // The expired spot receiver is removed before the target chain, after
+    // the pace context already read its token.
+    if ((int)si[SI_SPOT_ACTIVE + r] && sd[SD_SPOT_TIMER + r] >= 0.0) {
+        si[SI_SPOT_TOKEN + r] = 0u;
+    }
+    const float spot_token = (int)si[SI_SPOT_TOKEN + r]
+        ? convert_float_rte(pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_SPOT_M]) : 0.f;
+    const float duel_t_token = (int)si[SI_DUEL_TOKEN + r]
+        ? convert_float_rte(pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_DUEL_T]) : 0.f;
+
     // Target speed. The SectionIndex walk equals the quotient port.
     const int section_index = phys_section(position_f, dist_f);
     const int target_phase = phys_phase_of_section(section_index);
     const int last_spurt = (int)si[SI_SP_ACTIVE + r];
     const float base = last_spurt ? convert_float_rte(sd[SD_LSS + r])
-        : convert_float_rte(sd[SD_BTS + target_phase + r]);
+        : convert_float_rte(sd[SD_BTS + target_phase * RACE_MAXR + r]);
     const float section = last_spurt ? 0.f
-        : convert_float_rte(sd[SD_SECMOD + section_index + r]);
+        : convert_float_rte(sd[SD_SECMOD + section_index * RACE_MAXR + r]);
     if (!finished) {
         const float slope = convert_float_rte(slope_per / 10000.);
         sd[SD_TS + r] = (double)phys_target_speed(pd, base, section,
             convert_float_rte(sd[SD_PKCOEF + r]),
             (int)si[SI_L_FORCEIN + r] ? sf[SF_FORCE_IN + r] : 0.f,
             power, slope, (int)si[SI_DOWNHILL + r], minimum,
-            (int)(shl_r[SH_HP] > 0.), (__global const float*)0, 0);
+            (int)(shl_r[SH_HP] > 0.), (__global const float*)0, 0,
+            spot_token, duel_t_token);
     }
     float cap = 30.f;
     if (blocker >= 0) {
@@ -231,7 +281,10 @@ static float race_step(__global uint* si, __global float* sf, __global double* s
             race_apt_distance((int)si[SI_DISTAPT + r]),
             strategy, phase, slope_per > 0.);
         acceleration = phys_acceleration_from_base(pd, base_accel,
-            (int)si[SI_DASH + r], (__global const float*)0, 0);
+            (int)si[SI_DASH + r], (__global const float*)0, 0,
+            convert_float_rte(pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_DUEL_A]),
+            (int)si[SI_DUEL_TOKEN + r],
+            sf[SF_AS_VALUE + r], (int)si[SI_CPFLAGS + r] & CP_ASIT);
     }
     float speed = current + acceleration * dt;
     speed = (current <= target) ? fmin(speed, target) : fmax(speed, target);
@@ -249,13 +302,15 @@ static float race_step(__global uint* si, __global float* sf, __global double* s
         advance_distance = convert_float_rte((double)advance_distance * gate_fraction);
     }
 
-    // HP tick, the retail branch. compete_top stays 0 without spot struggle.
+    // HP tick, the retail branch. Competing is the live spot struggle with
+    // an unexpired timer, shared by the dash and normal paths.
     const int runaway = (strategy == 5) ? 1 : 0;
+    const int competing = (int)si[SI_SPOT_ACTIVE + r] && sd[SD_SPOT_TIMER + r] < 0.0;
     if (!finished && (int)si[SI_DASH + r]) {
-        hp_tick_start_dash(pd, shl_r, (int)si[SI_KAKARI + r], 0, runaway,
+        hp_tick_start_dash(pd, shl_r, (int)si[SI_KAKARI + r], competing, runaway,
             (int)si[SI_PACEDOWN + r], (int)si[SI_DOWNHILL + r], dt);
     } else if (!finished) {
-        hp_tick(pd, shl_r, sf[SF_HPG + r], (int)si[SI_KAKARI + r], 0, runaway,
+        hp_tick(pd, shl_r, sf[SF_HPG + r], (int)si[SI_KAKARI + r], competing, runaway,
             (int)si[SI_PACEDOWN + r], (int)si[SI_DOWNHILL + r], phase,
             sd[SD_CS + r], (double)dt);
     }
@@ -295,7 +350,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
     st[ST_TICKS] = 0u;
 
     const int n = (int)ri[RI_N];
-    if (n < 1 || n > RACE_MAXR || n > 1) {
+    if (n < 1 || n > RACE_MAXR) {
         race_fb(st, FB_N);
         return;
     }
@@ -518,6 +573,36 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         si[SI_L_FORCEIN + r] = 0u;
         si[SI_RANKCOL + r] = 0u;
         si[SI_SP_ACTIVE + r] = 0u;
+        si[SI_CORNER + r] = 0u;
+        si[SI_FINALE + r] = 0u;
+        si[SI_LS_ENTERED + r] = 0u;
+        si[SI_DUEL_ACTIVE + r] = 0u;
+        si[SI_DUEL_FIGHT + r] = 0u;
+        si[SI_DUEL_GROUP + r] = 0xFFFFFFFFu;
+        si[SI_DUEL_PRE_FIN + r] = 0u;
+        si[SI_DUEL_PRE_STR + r] = 0u;
+        si[SI_GOAL_SNAP + r] = 0u;
+        si[SI_SPOT_ACTIVE + r] = 0u;
+        si[SI_SPOT_STARTED + r] = 0u;
+        si[SI_SPOT_EXITED + r] = 0u;
+        si[SI_SPOT_LATCH + r] = 0u;
+        si[SI_SPOT_CLOSED + r] = 0u;
+        si[SI_SPOT_TOKEN + r] = 0u;
+        si[SI_DUEL_TOKEN + r] = 0u;
+        si[SI_CPFLAGS + r] = 0u;
+        sd[SD_SPOT_TIMER + r] = 0.0;
+        sd[SD_CP_GAUGE + r] = 0.0;
+        sd[SD_CP_PREVRATE + r] = 0.0;
+        sd[SD_CP_INITPW + r] = 0.0;
+        sd[SD_CP_ACC + r] = 0.0;
+        sd[SD_AS_TIMER + r] = 0.0;
+        sf[SF_AS_VALUE + r] = 0.f;
+        sf[SF_CP_GELAP + r] = 0.f;
+        sf[SF_CP_GTHRESH + r] = 0.f;
+        sf[SF_DUEL_PRE + r] = 3.f;
+        for (int j = 0; j < RACE_MAXR; j++) {
+            sd[SD_DUEL + j * RACE_MAXR + r] = -1.0;
+        }
 
         const uint runb = SCR_INIT_OUT + OS_RUN0 + IRS_STRIDE * r;
         si[SI_SECT + r] = (uint)(int)(scr[runb + OR_RPRESENT]
@@ -525,6 +610,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
 
         sf[SF_FORCE_IN + r] = as_float(scr[runb + OR_FORCE]);
         sf[SF_ACCEL_BASE + r] = convert_float_rte(as_double(scol[9]));
+        sd[SD_RAWPW + r] = as_double(scol[2]);
         sf[SF_PENDING_HP + r] = 0.f;
         sf[SF_AFTER_GOAL + r] = 0.f;
         sf[SF_DELAY + r] = as_float(scr[runb + OR_DELAY]);
@@ -575,7 +661,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
 
         const float aptitude = race_apt_spurt((int)rb[RR_DISTAPT]);
         for (int ph = 0; ph < 3; ph++) {
-            sd[SD_BTS + ph + r] = (double)phys_base_target_speed(pd, speed,
+            sd[SD_BTS + ph * RACE_MAXR + r] = (double)phys_base_target_speed(pd, speed,
                 strategy, ph, aptitude, dist_f);
         }
         sd[SD_POS + r] = 0.0;
@@ -592,22 +678,38 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         sf[SF_BMIN_VAL + r] = minimum_speed;
         si[SI_BMIN_BITS + r] = as_uint(guts);
         sd[SD_LSS + r] = (double)phys_maximum_spurt_speed(pd, speed, strategy,
-            aptitude, dist_f);
+            aptitude, dist_f, pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_POWF]);
         sf[SF_SPURT_MAX + r] = convert_float_rte(sd[SD_LSS + r]);
         for (int s = 0; s < 24; s++) {
-            sd[SD_SECMOD + s + r] =
+            sd[SD_SECMOD + s * RACE_MAXR + r] =
                 (double)as_float(scr[runb + OR_SECTIONS + s]);
         }
-        sd[SD_SECMOD + 24 + r] = 0.0;
+        sd[SD_SECMOD + 24 * RACE_MAXR + r] = 0.0;
         sd[SD_PKCOEF + r] = 1.0;
     }
+
+    // RaceField::new runs update() once: at zero positions that publishes
+    // rank i+1, order 0..n, prev rank 0 and the min-style leader as section
+    // pacemaker, which the first pace context then reads.
+    __global uint* rs = scr + SCR_RACE;
+    rs[RS_PM] = 0u;
+    rs[RS_PM_SEC] = 0u;
+    rs[RS_PM_COUNT] = 0u;
+    rs[RS_PM_HANDED] = 0u;
+    rs[RS_PM_HAS] = 0u;
+    const double section_length = course_distance / 24.0;
+    const float pace_end_f = convert_float_rte(rds[RD_PACE_END]);
+    const float pm_range = convert_float_rte(pd[PD_PM_RANGE]);
+    const int pm_notfwd = (int)pd[PD_PM_NOTFWD];
+    const int has_corner_events = (int)ri[RI_NSTR] && (int)ri[RI_NCOR];
+    field_update(scr, si, sd, n, dist_f, pace_end_f, course_distance,
+        pm_range, pm_notfwd);
 
     // Frame 0 is the pre-loop capture (lib.rs), the initial snapshot.
     for (int r = 0; r < n; r++) {
         race_frame(frames_all, id, 0, n, r, sd[SD_POS + r],
             (double)sf[SF_OBSERVED + r], fmax(shl[r * SH_STRIDE + SH_HP], 0.0),
             sd[SD_LANE + r], (double)(int)si[SI_RMODE + r], -1.0);
-
     }
 
     double t = 0.0;
@@ -620,8 +722,24 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
     int tick = 0;
     int any_open = 1;
     while (any_open && t < 400.0) {
-        // Collect: pre-movement lane caches, refreshed lane_max first.
+        // Rows over the pre-movement state: the last-straight flags feed the
+        // duel collect and the duel entry test.
+        uint any_straight = 0u;
         for (int r = 0; r < n; r++) {
+            uint flag = 0u;
+            if (has_corner_events
+                && sd[SD_POS + r] >= pd[PC_LAST_STRAIGHT_START]
+                && sd[SD_POS + r] < pd[PC_LAST_STRAIGHT_END]) {
+                flag = 1u;
+            }
+            rs[RS_STRAIGHT + r] = flag;
+            any_straight |= flag;
+        }
+        // Collect: duel proximity timers, then lane caches with refreshed
+        // lane_max. All read the same pre-movement columns.
+        for (int r = 0; r < n; r++) {
+            duel_collect(si, sf, sd, r, n, pd, dt, course_distance,
+                (int)any_straight, rs + RS_STRAIGHT);
             if (geom_on) {
                 sf[SF_LANEMAX + r] = geo_lane_max_at(cb, lm_b, lm_l,
                     convert_float_rte(sd[SD_POS + r]));
@@ -631,11 +749,29 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
                 convert_float_rte(sd[SD_LANE + r]),
                 convert_float_rte(sd[SD_POS + r]));
         }
-        // prepare_retail_tick. The corner-state read feeds only skill
-        // conditions, so it stays out of the no-skill kernel.
+        // prepare_retail_tick: after-goal, the spot timer step, the corner
+        // state read and the slope events.
         for (int r = 0; r < n; r++) {
             if ((int)si[SI_FINISHED + r]) {
                 sf[SF_AFTER_GOAL + r] += dt;
+            }
+            sd[SD_SPOT_TIMER + r] =
+                (double)(convert_float_rte((float)sd[SD_SPOT_TIMER + r]) + dt);
+            // The asitame effect timer steps and expires with the same pass
+            // the engine advances timers and runs expire_skill_effects.
+            if ((int)si[SI_CPFLAGS + r] & CP_ASIT) {
+                const double at =
+                    (double)(convert_float_rte((float)sd[SD_AS_TIMER + r]) + dt);
+                sd[SD_AS_TIMER + r] = at;
+                if (at >= 0.0) {
+                    si[SI_CPFLAGS + r] &= ~CP_ASIT;
+                }
+            }
+            if (geom_on) {
+                geo_corner_state(cb, ce_b, ce_e, ce_i, ce_f,
+                    convert_float_rte(sd[SD_POS + r]),
+                    (int)si[SI_EVENTS_READY + r],
+                    &si[SI_CORNER + r], &si[SI_FINALE + r]);
             }
             if ((int)si[SI_EVENTS_READY + r]) {
                 slope_update(si, sf, r, (int)ri[RI_NSLOPES], pd,
@@ -654,12 +790,14 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         }
         // Movement in roster order; the live columns are the roster.
         for (int r = 0; r < n; r++) {
-            const float advance_distance = race_step(si, sf, sd, shl, lists,
+            const float advance_distance = race_step(si, scr, sf, sd, shl, lists,
                 cached, bank, c_start, c_speed, c_time, pd, rds, r, n,
                 empty_move, dt, course_distance);
+            rs[RS_ADV + r] = 0u;
             if (advance_distance < 0.f) {
                 continue;  // gated rest: no movement, dash or goal test
             }
+            rs[RS_ADV + r] = 1u;
             // Geometry advance with the world cursor.
             float next;
             if (geom_on) {
@@ -680,6 +818,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             sd[SD_POS + r] = (double)next;
             if ((int)si[SI_FINISHED + r] == 0 && sd[SD_POS + r] > course_distance) {
                 si[SI_FINISHED + r] = 1u;
+                si[SI_GOAL_SNAP + r] = 1u;
             }
             if ((int)si[SI_DASH + r]
                 && sf[SF_OBSERVED + r] >= phys_start_dash_speed(pd, dist_f)) {
@@ -687,14 +826,35 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             }
         }
         // Overlap resolution over the post-movement rows.
-        lane_resolve_overlaps(si, sd, n);
-        // update(): at one runner the insertion sort settles at rank 1 after
-        // the first call, which the constructor's zeros did not have.
+        lane_resolve_overlaps(si, sd, n, rs + RS_LKEYS, rs + RS_LORDER);
+        // The duel start pass first: a fresh participant keeps its partner
+        // created in the same tick before any exit evaluation runs.
         for (int r = 0; r < n; r++) {
-            if (tick == 0) {
-                si[SI_RANKCOL + r] = 1u;
+            if (rs[RS_ADV + r] && !(int)si[SI_DUEL_ACTIVE + r]
+                && (int)si[SI_DUEL_FIGHT + r] == 0) {
+                duel_update(si, sf, sd, shl, r, n, course_distance,
+                    has_corner_events);
             }
         }
+        for (int r = 0; r < n; r++) {
+            if (rs[RS_ADV + r] && (int)si[SI_SPOT_ACTIVE + r]
+                && sd[SD_SPOT_TIMER + r] < 0.0
+                && sd[SD_POS + r] >= section_length * 8.0) {
+                si[SI_SPOT_LATCH + r] = 1u;
+            }
+        }
+        // step_field_conditions: spot struggle then duel per advanced row.
+        for (int r = 0; r < n; r++) {
+            if (!rs[RS_ADV + r]) {
+                continue;
+            }
+            spot_update(scr, si, sd, r, n, pd, section_length);
+            duel_update(si, sf, sd, shl, r, n, course_distance,
+                has_corner_events);
+        }
+        // update(): ranks, order and the pacemaker, read next tick.
+        field_update(scr, si, sd, n, dist_f, pace_end_f, course_distance,
+            pm_range, pm_notfwd);
         // lib.rs finish detection, then the f32 time sum, then the capture.
         const float end_f = convert_float_rte(t) + dt;
         for (int r = 0; r < n; r++) {
@@ -719,7 +879,6 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
                 (double)sf[SF_OBSERVED + r], fmax(shl[r * SH_STRIDE + SH_HP], 0.0),
                 sd[SD_LANE + r], (double)(int)si[SI_RMODE + r],
                 (double)(int)si[SI_BLOCKER + r]);
-
             prev_pos[r] = sd[SD_POS + r];
         }
         any_open = 0;
