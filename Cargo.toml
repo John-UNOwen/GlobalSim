@@ -1,6 +1,8 @@
 [package]
 name = "race_engine_rs"
-version = "0.1.0"
+# 0.1.1 so the app's addon resolves this engine and vendor/GlobalSim (0.1.0) in
+# one lockfile: two same-name same-version path packages collide there.
+version = "0.1.1"
 edition = "2021"
 
 # Bin crate that speaks the same JSON-on-stdin/stdout contract the existing
@@ -29,6 +31,9 @@ fast-alloc = ["dep:mimalloc"]
 # binary's size) out of the build; hosts register a course's geometry at
 # runtime with `register_course_geometry` before preparing a race on it.
 external-geometry = []
+# Drop the #[no_mangle] C exports (src/ffi.rs) from the lib build. An artifact
+# that also links vendor/GlobalSim gets duplicate globalsim_* symbols otherwise.
+no-ffi-exports = []
 # Opt-in third-party comparison profile. See docs/EXPERIMENTAL.md.
 experimental-umamoe = ["experimental-gap-refresh", "experimental-duel-hp"]
 # Components can be evaluated independently against official captures.

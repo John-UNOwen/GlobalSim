@@ -30,7 +30,9 @@ ocl = { version = "=0.19.7", optional = true }
 # The full engine as a library for the whole-race comparison tool. Path dep
 # only, no copy. default-features off keeps mimalloc and its C toolchain out.
 # external-geometry lets the tool register course geometry like the wasm host.
-globalsim = { package = "race_engine_rs", path = "..", default-features = false, features = ["external-geometry"] }
+# no-ffi-exports: the app's gpu addon links this engine AND vendor/GlobalSim;
+# two copies of the #[no_mangle] globalsim_* C exports collide at link time.
+globalsim = { package = "race_engine_rs", path = "..", default-features = false, features = ["external-geometry", "no-ffi-exports"] }
 
 [[bin]]
 name = "bench"

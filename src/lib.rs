@@ -17,6 +17,9 @@ mod replay_frames;
 mod binary_replay;
 mod api;
 mod seed_sampling;
+// An artifact that also links vendor/GlobalSim (the app's gpu addon) must not carry
+// the C exports twice. See the `no-ffi-exports` feature.
+#[cfg(not(feature = "no-ffi-exports"))]
 mod ffi;
 pub use api::{PreparedRace, Simulation};
 #[cfg(feature = "external-geometry")]
