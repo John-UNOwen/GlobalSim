@@ -8,10 +8,17 @@ Engine dependency: `gpu/src/lib.rs` includes the engine's `retail_physics.rs`,
 `json.rs`, `replay_frames.rs`, `random_gen.rs` and `retail_random.rs` in place via
 `#[path]`, plus `retail_geometry.rs` through a `build.rs`-generated copy with the
 module-leading `//!` lines converted to `//` (see `gpu/README.md`, "Geometry
-port"). Those files remain part of the engine (AGPL-3.0-only, Copyright the
+port"), and, under the `initialization` feature, `course_data.rs`,
+`retail_sort.rs` and `retail_initialization.rs` via `#[path]`. Those files
+remain part of the engine (AGPL-3.0-only, Copyright the
 engine's authors); this crate is therefore AGPL-3.0-only as well. The engine's
 source is the authority on semantics and is never modified to make GPU code pass
 (see `docs/GPU_HANDOFF.md`, "Rules").
+
+The `log10` in `gpu/src/kernels/initialization.cl` is a line-for-line OpenCL
+port of the algorithm in the `libm` crate 0.2.16 (`src/math/log10.rs`, MIT OR
+Apache-2.0, upstream FreeBSD msun `s_log10.c`), written from the published
+source with no file copied.
 
 The restricted tick chain ported here mirrors the Rust oracle
 `tools/restricted_oracle.rs` in the JAX port repo `John-UNOwen/GlobalSim-Jax`

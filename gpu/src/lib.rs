@@ -20,16 +20,28 @@ pub mod random_gen;
 #[path = "../../src/retail_random.rs"]
 pub mod retail_random;
 
-// The course-geometry include stands apart again, behind its own feature.
 // The engine module's own tests read env!("CARGO_MANIFEST_DIR")/data/..., so
-// the include (and the host module over it) must not exist in this crate's
-// unit-test target, even with the feature on (see gpu/README.md, "Geometry
-// port"). Integration tests see both, compiled against the lib without
-// cfg(test).
+// the include (and the host module over it) stay out of this crate's unit-test
+// target, even with the feature on (see gpu/README.md, "Geometry port").
 #[cfg(all(feature = "geometry", not(test)))]
 pub mod retail_geometry;
 #[cfg(all(feature = "geometry", not(test)))]
 pub mod geometry;
+
+// These includes need the json trio and retail_random above. Like the
+// geometry pair they stay out of the lib's unit-test target (see gpu/README.md,
+// "Initialization port").
+#[cfg(all(feature = "initialization", not(test)))]
+#[path = "../../src/course_data.rs"]
+pub mod course_data;
+#[cfg(all(feature = "initialization", not(test)))]
+#[path = "../../src/retail_sort.rs"]
+pub mod retail_sort;
+#[cfg(all(feature = "initialization", not(test)))]
+#[path = "../../src/retail_initialization.rs"]
+pub mod retail_initialization;
+#[cfg(all(feature = "initialization", not(test)))]
+pub mod initialization;
 
 pub mod rng;
 

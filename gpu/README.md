@@ -303,6 +303,135 @@ All comparisons run on the gated B580, and every float is compared through
   the device: the error checks and the wrap leave the sample finite in
   `[0, 1000]`, so `min(convert_int_sat_rtz(sample), 1000)` matches.
 
+## Initialization port (handoff step 6, initialization slice)
+
+`src/kernels/initialization.cl` holds one kernel, `initialization`, one work
+item per chain, with the per-item `mode` selecting the adjusted-stats chain,
+the per-solver Rule30 seeding chain, the retail initialization stream or the
+initial HP chain, ported line for line from `src/retail_initialization.rs`,
+the seeding part of `src/race_solver_builder.rs` and the rng part of
+`RaceSolver::new` in `src/race_solver_retail.rs`. The Rust reference side runs
+the vendored engine modules in place (feature `initialization`), and every
+comparison goes through `to_bits()`. The kernel is concatenated after
+`rng_core.cl` (`INITIALIZATION_KERNEL_SOURCE` in `src/gpu.rs`), so the ported
+`Rule30CARng` and `RetailRandom` helpers, including `uniform_guarded` (a
+mirror of `Rule30CARng::uniform`: mask `0xFFFFFFFF >> ((v | 1) as u32)
+.leading_zeros()`, signed i64 compare), are shared with the gated RNG port and
+`rng_gate` stays green.
+
+What each mode pins:
+
+- `IM_STATS`: `adjust_overcap`, `team_rank_bonus` (f32 thresholds 6/11/16/21/
+  26), `ranked_base_stat` as `initial_base_wisdom((adjust_overcap(raw) as f32
+  + bonus) as f64, mood)` with motivator `1 + 0.02 * mood`, the f32
+  accumulator of `course_speed_modifier` (0.05/0.1/0.15/0.2 per nonzero css
+  entry at the 300/600/900/2000 distance boundaries), the ground-and-turf
+  speed and power tables indexed `[surface][ground]`, and the strategy and
+  distance aptitude tables.
+- `IM_R30`: `seed_lo = (seed + i * 7919) as u32`, the murmur fmix32 race seed
+  hi, the guarded `uniform` pair that seeds the solver and the discarded
+  pacer, then the solver draws in `RaceSolver::new` order: gate roll
+  `uniform(12252240)`, random lot `uniform(100)`, the start-delay random, the
+  hill-pair seeds, the hill gate roll (only when the first slope starts at
+  0.0, `if slope_per < 0.0 && roll < wisdom * 0.0004`), `kakari uniform(7)`,
+  the check random, three section randoms and the 24 section randoms. The
+  hp-seed draw precedes all of them.
+- `IM_INIT`: the retail init stream of `initialize()` and
+  `initialize_sections_and_rushing()`: the force-in-move pass, the wisdom
+  chance (`100 - 9000 / base_wisdom`, floored at 20), the start-delay draws,
+  the 24 section randoms with the f32-rooted base and log ranges, the rushing
+  eligibility draw `chance > (0, 100] integer` and its lot-section draw, the
+  paired mode where each runner's rushing lottery draws from its own
+  `RetailRandom::substream` (FNV-1a of seed, runner and tag, then the
+  shift-multiply avalanche), the f32 `kakari_start` feed the retail runtime
+  writes over the f64 one, six stage draw counters and eight continuation
+  `next_int` plus eight `next_double` draws that pin the shared stream state
+  without needing the tick loop.
+- `IM_HP`: `GameHpState::with_retail` and `init()`: `initial_hp` through the
+  bounded-stat f64 chain with the single f32 store, `course_speed`, the
+  `hp_guts_factor` (f64 `sqrt`, then f32) and the HP ground modifier table.
+
+### log10, the one transcendentally rounded function in the chain
+
+The section and rushing chains call `log10` on f64. `engine_log10` in the
+kernel is a line-for-line OpenCL port of `libm` 0.2.16 `src/math/log10.rs`
+(FreeBSD msun `s_log10.c`), the same algorithm the Rust std compiles for musl
+and wasm targets, with the hex float constants read from the crate source on
+disk. Operands get explicit `(double)` casts everywhere the Rust multiplies in
+f64, because OpenCL evaluates `f32 * f32` in float. On this host the Rust std
+`f64::log10` matched the port bit for bit at every intermediate stage (a
+probe dumped `xr`, `k`, `s`, `r`, `hi`, `lo`, `val_hi`, `y`, `val_lo` and the
+result against a Rust mirror of the same libm code) and across every value the
+576-case retail sweep drew, so the engine side and the kernel side agree. A
+host whose libc ships a different `log10` would move the reference side with
+it. Two transcription slips found this way (a dropped leading mantissa nibble
+of IVLN10HI and a wrong `IVLN10LO` exponent) each moved only the last f64 bits
+and nothing else, which is why only a stage-by-stage probe, not the end value,
+could localize them.
+
+### Kernel data (flat buffers, one stride per case)
+
+`run` in `src/initialization.rs` uploads (`f32` values inside the integer
+arrays travel as raw bits, f64 slots as raw bits):
+
+| Buffer | Type, stride | Contents |
+| --- | --- | --- |
+| `in_u` | u32[96] | mode at 0, scalars at 1..6 (seed, n, paired flag, paired seed, lot min, lot max), css at 7..10, per-runner triple (style, adjusted-wisdom bits, bonus bits) from 16, stride 3 |
+| `in_l` | u64[48] | per mode: stats raws 0..4, r30 first-slope start, value and adjusted wisdom 0..2, init distance at 0, per-runner base wisdom 8..31, parameters 32..41, hp stamina..`hp_drain[4]` 0..14 |
+| `out_u` | u32[864] | RetailRandom bank 0..59, paired RUSH bank 60..119, fallback flag at 120, six stage counters 121..126, r30 scalars 128..159, runner rows at `128 + 30 * r` (force, chance, delay, rush chance, lot section, rush present, 24 sections), continuation `next_int` at 848..855, hp guts and wisdom factors at 170..171 |
+| `out_l` | u64[64] | continuation `next_double` bits at 32..39, init `kakari_start` feed 0..23, hp ground modifier, base speed and max hp at 0..2 |
+
+The first version used a 27-slot row stride, which silently overlapped each
+runner's 30-slot row (6 scalars + 24 sections) into the next one, and
+continuation slots at 160 landed inside runner 1's row. Kernel and host agreed
+on the addresses, so only the written value (last write wins) betrayed it. The
+raw-slot dump in a debug run localized it in one step.
+
+### What `initialization_gate` pins
+
+All comparisons run on the gated B580, and every value is compared through
+`to_bits()`. Verified 2026-11-18 (`single_fp_config 0xbf`,
+`double_fp_config 0x3f`).
+
+- Adjusted stats: 704 cases, 8,448 values. Raw stats at every comparison
+  boundary of `adjust_overcap` and `team_rank_bonus` (119/1200/1200.0000001,
+  ranks around 6/11/16/21/26), moods -2/0/2, and random fills, compared on
+  base and adjusted stats plus the raw-stamina and raw-power rewrites.
+- Rule30 seeding: 38,326 values over 512 random cases and 256 hill-boundary
+  cases (wisdom solved so `roll` sits exactly at `wisdom * 0.0004`, then
+  ULP-1/ULP/ULP+1 probes on both sides). The hill gate fired in 530 cases.
+  The cap flag was never set (guarded `uniform`, rng gate shared).
+- Retail init stream: 576 cases, 224,867 values, 376 paired and 200 drawing
+  a rush. Crafted parameter sets carry negative force coefficients, a negative
+  and a zero delay max, `lot_min == lot_max == 0`, temptation -13, wisdom and
+  bonus edges (10.0, 112.5, 20.000002), and paired seeds `None`, `Some(0)`,
+  `Some(-1)`. Stage counters, all per-row draws, the 24 sections, the
+  `kakari_start` feed and the continuation draws are each compared per runner.
+- Initial HP: 2,880 values, 576 cases, crafted physics with a zero initial
+  coefficient, drain edges 0 and 1, style coefficients 0.5/1/1.02, stamina and
+  guts edges around the 1/2000 bounds including negative.
+- v77 reply pin: the `v77-race.jsonl` line-1 request (course 10504, 9 runners,
+  ground Good) driven through the real engine in-process for seeds 1..8, with
+  the kernel's chains feeding the comparison. Pinned reply fields:
+  `startDelayTime` (the kernel's f32 widened to the f64 the reply writes),
+  `gutsOrder` and `wizOrder` (orders built from the kernel's adjusted stats),
+  and the frame-0 hp column (the kernel's max hp). 4,131 values.
+- Source pins: the needle test asserts the seven engine files the host mirrors
+  and references still contain the exact lines the mirrors were read from.
+
+### Seams and not ported in this slice
+
+- Skill triggers and their rng streams stay out. With no skills in the entry
+  the wisdom lottery is computed but never drawn, and the pacer rng
+  (`race_solver_builder.rs:867`) is drawn into and discarded; its seed pair is
+  pinned only for stream parity. The six stage counters would catch any stream
+  shift if skills joined later.
+- Request-level handling stays host-side: the `gate_perm` entry permutation
+  (`src/api.rs`) and the experimental `startup_pass` (`src/lib.rs:828`, a tick,
+  not initialization). The v77 request uses neither.
+- The gate pins only the reply fields listed above. Everything a tick writes
+  belongs to the loop slice (handoff step 6, remaining).
+
 ## Not covered (step 6 blockers)
 
 Engine calls the restricted chain never reaches, each needing its own port and
@@ -310,8 +439,10 @@ gate:
 
 - RNG: ported and gated for step 6.1 (see "RNG port" below), but the whole-race
   loop still consumes it through paths not yet in the kernel
-- Retail simulation start: case construction (entry, `ReplayConfig` to
-  `Simulation` fields, initial `Runner` states)
+- Retail simulation start: the initialization chain (adjusted stats, seeding,
+  start delay, sections and rushing, initial HP) is ported and gated (see
+  "Initialization port"); the `ReplayConfig` to `Simulation` field
+  construction and the initial `Runner` states are not
 - Geometry queries: the four runtime queries are ported and gated (see
   "Geometry port"); ground and terrain lookups are not
 - Lane and field queries: lane occupancy, `blocking_speed_cap`

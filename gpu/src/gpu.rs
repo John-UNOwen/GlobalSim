@@ -7,7 +7,15 @@ use std::cell::Cell;
 use std::time::Instant;
 
 pub const KERNEL_SOURCE: &str = include_str!("kernels/restricted_tick.cl");
-pub const RNG_KERNEL_SOURCE: &str = include_str!("kernels/rng.cl");
+// The two RNG consumers share one ported helper source, prepended here because
+// OpenCL source strings resolve #include implementation-definedly.
+pub const RNG_KERNEL_SOURCE: &str =
+    concat!(include_str!("kernels/rng_core.cl"), "\n", include_str!("kernels/rng.cl"));
+pub const INITIALIZATION_KERNEL_SOURCE: &str = concat!(
+    include_str!("kernels/rng_core.cl"),
+    "\n",
+    include_str!("kernels/initialization.cl")
+);
 pub const GEOMETRY_KERNEL_SOURCE: &str = include_str!("kernels/geometry.cl");
 pub const BUILD_OPTIONS: &str = "-cl-fp32-correctly-rounded-divide-sqrt";
 

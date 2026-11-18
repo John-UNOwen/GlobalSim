@@ -16,6 +16,10 @@ gpu = ["dep:ocl"]
 # Engine course-geometry runtime (handoff step 6, geometry slice) and its
 # kernel host. Gated out of the lib's test target, see src/lib.rs.
 geometry = []
+# Retail initialization chain (handoff step 6, initialization slice): the
+# vendored retail_initialization host and its kernel. Gated out of the lib's
+# test target, see src/lib.rs.
+initialization = []
 
 [dependencies]
 ocl = { version = "=0.19.7", optional = true }
