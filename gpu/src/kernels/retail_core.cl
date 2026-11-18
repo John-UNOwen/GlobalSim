@@ -254,6 +254,7 @@
 #define SI_DUEL_TOKEN SI_SLOT(60)  // retail target and accel token 4 is registered
 #define SI_CPFLAGS SI_SLOT(62)     // conserve power and asitame bit flags
 #define SI_LS_TICK SI_SLOT(61)     // last_straight_entry_tick of this tick
+#define SI_TEMPT SI_SLOT(63)       // temptation_count: rush starts (rushingStartCount)
 #define CP_UNSUPPORTED 1u
 #define CP_CUTOFF 2u
 #define CP_WASBLK 4u
@@ -318,6 +319,10 @@
 #define SF_AS_VALUE SF_SLOT(48)   // asitame accel effect modifier
 #define SF_CP_GELAP SF_SLOT(49)   // conserve gain_elapsed (f32 accumulator)
 #define SF_CP_GTHRESH SF_SLOT(50) // conserve gain_threshold
+// RushingScore (stadium_score.rs): per-tick countdown while kakari is held;
+// each zero crossing charges one penalty. The count stays an exact integer.
+#define SF_RSCORE SF_SLOT(41)     // penalties charged (integer-valued f32)
+#define SF_RREM SF_SLOT(42)       // countdown remaining, starts at 1.0
 #define SCR_LISTS (SCR_SF + SF_STRIDE)
 // Lane lists, SCR_LISTS + LIST_STRIDE * r. The targets list occupies the
 // first RACE_MAXR slots, then the visible list.
@@ -416,16 +421,47 @@
 
 // ---------------------------------------------------------------------------
 // Per-race status output, u32 words at status + id * ST_STRIDE.
-#define ST_STRIDE 112
+#define ST_STRIDE 232
 #define ST_FALLBACK 0          // 0 none, 1 unsupported domain (tick in ST_ARG)
 #define ST_ARG 1               // tick or argument of the fallback
 #define ST_TICKS 2             // loop iterations (frames carry ST_TICKS+1)
 #define ST_FINISH0 8           // per runner: finish_step bits then finish_raw
+// Compact-reply exports, per runner in roster order, one word each. The last
+// three are f32 bit patterns, widened by the host like the engine's f64 casts.
+#define ST_TEMPT0 112          // temptation_count (rushingStartCount)
+#define ST_RSCORE0 136         // RushingScore count (rushingPenaltyCount)
+#define ST_HPEMPTY0 160        // hp_empty_on_race, 0 or 1
+#define ST_DELAY0 184          // start_delay f32 bits (startDelayTime)
+#define ST_LSS0 208            // SF_SP_START f32 bits (lastSpurtStartDistance)
 
 // Race frames output: frames + (id * RACE_MAX_TICKS + tick) * n_runners * 6
 // + runner * 6, in the engine's row order pos, speed, hp, lane, rushing,
 // blocker.
 #define FR_COLS 6
+
+// Per-race skillEvents log, u32 words at events + id * EV_STRIDE. Word 0 is
+// the entry count, then (runner, id) pairs. id is the skill id, or EV_KAKARI
+// for a rushing episode that ended. The engine's activate hook stores the
+// time and its deactivate hook emits the entry, so one ended episode is one
+// entry; an entry per fire reproduces the reply's (horseIndex, id) multiset.
+// An overflow flags the race (FB_EVENT) instead of dropping an entry.
+#define EV_MAX 512
+#define EV_STRIDE (1 + 2 * EV_MAX)
+#define EV_KAKARI 0xFFFFFFFFu
+#define FB_EVENT 7u
+
+static void race_event(__global uint* ev, __global uint* st, const int runner,
+    const uint id) {
+    const uint count = ev[0];
+    if (count < EV_MAX) {
+        ev[1 + 2 * count] = (uint)runner;
+        ev[2 + 2 * count] = id;
+        ev[0] = count + 1u;
+    } else {
+        st[ST_FALLBACK] = 1u;
+        st[ST_ARG] = FB_EVENT;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Physics ports (src/retail_physics.rs). pd indexes the race's f64 block.
@@ -2888,8 +2924,13 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
 // (engine: cooldown map entry +INF and the pending record removed).
 static void skills_fire(__global const uint* sk, __global uint* sks,
     __global double* skd, __global uint* scr, const int rec, const int r,
-    const double hp, const double gap, const float dist_f) {
+    const double hp, const double gap, const float dist_f,
+    __global uint* ev, __global uint* st) {
     __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
+    // The engine's activation hook emits one skillEvents entry per Own-side
+    // fire (an immediate one, or a pending entry the deactivate hook or the
+    // race-end finalizer writes once). rd[0] is the wire skill id.
+    race_event(ev, st, r, rd[0]);
     __global double* wd = skd + SKD_STRIDE * rec;
     const int eff_base = (int)rd[6];
     const int n_eff = (int)rd[5];
@@ -2926,7 +2967,8 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
 static void skills_scan(__global const uint* sk, __global uint* sks,
     __global double* skd, __global uint* scr, __global const uint* si,
     __global const double* sd, __global const double* shl, __global const uint* rs,
-    const int p, const int n, const float dist_f) {
+    const int p, const int n, const float dist_f,
+    __global uint* ev, __global uint* st) {
     const int nrec = (int)sk[SK_NREC];
     for (int r = 0; r < n; r++) {
         const double pos = sd[SD_POS + r];
@@ -2972,7 +3014,7 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
             }
             const double gap = sd[SD_POS + (int)rs[RS_ORDER + 0]] - pos;
             skills_fire(sk, sks, skd, scr, rec, r, shl[r * SH_STRIDE + SH_HP],
-                fmax(gap, 0.0), dist_f);
+                fmax(gap, 0.0), dist_f, ev, st);
         }
     }
 }

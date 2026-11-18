@@ -61,12 +61,35 @@ fn read_string(device: &Device, param: u32) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 
+#[derive(Clone)]
 pub struct DeviceReport {
     pub platform: String,
     pub name: String,
     pub compute_units: u64,
     pub single_fp_config: u64,
     pub double_fp_config: u64,
+}
+
+/// The exactness gate as one pure function, so a test can feed it device
+/// metadata without opening a device. Empty means the device is accepted.
+pub fn fp_gate_rejections(
+    extensions: &str,
+    single_fp_config: u64,
+    double_fp_config: u64,
+) -> Vec<String> {
+    [
+        (!extensions.split_whitespace().any(|word| word == "cl_khr_fp64"))
+            .then(|| "missing cl_khr_fp64".to_string()),
+        (single_fp_config & CL_FP_DENORM == 0)
+            .then(|| "missing CL_FP_DENORM in single_fp_config".to_string()),
+        (single_fp_config & CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT == 0)
+            .then(|| "missing CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT".to_string()),
+        (double_fp_config & CL_FP_DENORM == 0)
+            .then(|| "missing CL_FP_DENORM in double_fp_config".to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 struct Candidate(DeviceReport, Device, Platform);
@@ -88,22 +111,11 @@ fn candidates() -> Result<(Vec<Candidate>, Vec<(String, String)>), String> {
             };
             // The handoff's exactness gate: GPU class, cl_khr_fp64 with f64
             // subnormals, f32 subnormals, and correctly-rounded f32 divide/sqrt.
-            let reasons = [
-                (!read_string(&device, CL_DEVICE_EXTENSIONS)
-                    .unwrap_or_default()
-                    .split_whitespace()
-                    .any(|word| word == "cl_khr_fp64"))
-                    .then(|| "missing cl_khr_fp64".to_string()),
-                (report.single_fp_config & CL_FP_DENORM == 0)
-                    .then(|| "missing CL_FP_DENORM in single_fp_config".to_string()),
-                (report.single_fp_config & CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT == 0)
-                    .then(|| "missing CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT".to_string()),
-                (report.double_fp_config & CL_FP_DENORM == 0)
-                    .then(|| "missing CL_FP_DENORM in double_fp_config".to_string()),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+            let reasons = fp_gate_rejections(
+                &read_string(&device, CL_DEVICE_EXTENSIONS).unwrap_or_default(),
+                report.single_fp_config,
+                report.double_fp_config,
+            );
             if reasons.is_empty() {
                 accepted.push(Candidate(report, device, platform));
             } else {

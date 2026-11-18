@@ -6,11 +6,11 @@ timing against a 20-thread Rust baseline. See `docs/GPU_HANDOFF.md` in the
 engine repo for the plan this spike implements.
 
 The crate is standalone (empty `[workspace]` table) and vendors the engine's
-`src/retail_physics.rs`, `src/json.rs`, `src/replay_frames.rs`, `src/random_gen.rs`
-and `src/retail_random.rs` in place through `#[path]` includes in `src/lib.rs`,
-plus `src/retail_geometry.rs` behind the `geometry` feature (see "Geometry
-port"). The engine files are never edited to make the GPU pass. License and
-provenance: `NOTICE`.
+`src/retail_physics.rs`, `src/json.rs`, `src/replay_frames.rs`,
+`src/binary_replay.rs`, `src/random_gen.rs` and `src/retail_random.rs` in place
+through `#[path]` includes in `src/lib.rs`, plus `src/retail_geometry.rs`
+behind the `geometry` feature (see "Geometry port"). The engine files are never
+edited to make the GPU pass. License and provenance: `NOTICE`.
 
 ## Prerequisites
 
@@ -43,7 +43,7 @@ Suites:
 
 | Suite | Proves |
 | --- | --- |
-| `lib` (24 tests) | Vendored engine tests pass inside this crate |
+| `lib` (28 tests) | Vendored engine tests pass inside this crate |
 | `reference_trace` | The in-crate runner reproduces `restricted_trace.json` from the Jax oracle byte-for-byte (CRLF normalized) |
 | `layout` | The three `repr(C)` kernel structs are 104/36/244 bytes with the exact field offsets, and `kernel_params()` equals the engine's `Parameters` public methods for every scalar the kernel reads |
 | `comparator` | No device needed: one injected wrong value in a fake GPU outcome reports exactly the injected tick, runner, field and both raw bit patterns, equal frames with a flag are not parity |
@@ -54,6 +54,7 @@ Suites:
 | `solo_race_gate` (gpu + initialization + geometry + race) | See "Race loop port" below |
 | `paired_race_gate` (gpu + initialization + geometry + race) | See "Paired mode" below |
 | `skills_gate` (gpu + initialization + geometry + race) | See "Skills port" below |
+| `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 
 ### What the gate proves
 
@@ -625,13 +626,84 @@ table's 512-byte tag block, so the stress case stops at two runners.
 
 The init pass chained a record's region lists through `sk_chain`, which read
 the list argument at stride 4 words while every caller fills dense f64 pairs
-at stride 2. With one list entry the bug hides (entry 0 is at offset 0); with
+at stride 2. With one list entry the bug hides (entry 0 is at offset 0). With
 four sampled windows it read the wrong pairs and then past the end of the
 private array, where the B580 hands back stack memory an earlier work item
 left behind. The symptoms moved with batch composition: window lists from a
 neighboring race, exact-duplicate windows in solo batches, and a bogus refire
 around tick 1433 that looked like a cooldown bug. The fix is the stride 2 read,
 and the 24-race matrix test above pins the class of it.
+
+## Batch API (handoff step 8)
+
+`facade::GpuRaces` is the lane an app holds. `new` runs the exactness gate,
+loads the engine data and builds the race kernel once, `run_batch(requests,
+seeds)` answers a launch with one `BatchOutcome` per request, in input order.
+
+The contract is the app's `run_compact` path. `meta` is the engine reply
+JSON without frames, restricted to the fields that path reads:
+`playerHorseIndex`, then per runner in roster order `finishTimeRaw`,
+`finishOrder`, `hpEmptyOnRace`, `rushingStartCount`, `rushingPenaltyCount`,
+`lastSpurtStartDistance` and `startDelayTime`, then the `skillEvents`
+`(horseIndex, skillId)` pairs. `packet` is the GSIMRP01 replay packet:
+`src/replay_packet.rs` hands the frames to the vendored
+`binary_replay::encode`, the same call the engine's `into_binary` makes, so
+the framing matches the engine byte for byte and the meta bytes embedded at
+offset 32 equal the returned `meta` string exactly (frame rows start at
+`32 + meta_len`). Frame `k` carries time `loop_end(k)`, the engine's f32
+time sum.
+
+A race a gate rejects (startup, grid, non-retail runtime, a roster outside
+1..24, a skill construct the compiler refuses, an event log past `EV_MAX`
+512, or a request that fails to parse) comes back as `fallback` with meta
+and packet None, and the batch's other races run unaffected.
+`gate_reasons(request, device)` answers the same refusals as a pure
+function, so a caller can pre-filter against known device facts before
+opening one.
+
+Constraints. One `GpuRaces` per thread: it owns the OpenCL queue and
+program and is not Sync. Every launchable race in one `run_batch` shares one
+runner count, the kernel's uniform grid constraint, and a mixed batch is an
+Err for the caller to split. Full replies and CPU replays stay on the CPU
+lanes: the kernel exports no `skillDetailEvents`, `competitionEvents`,
+`positioningPhases` or per-tick frame times inside the meta, and the compact
+contract asks for none of them.
+
+### What `facade_gate` pins
+
+Verified 2026-11-18 on the gated B580 (`single_fp_config 0xbf`,
+`double_fp_config 0x3f`).
+
+- `compact_meta_and_packet_match_the_engine_lane`: one batch of four paired
+  v77 races (course 10504, seeds 1..4) and the six-skill request. Every
+  compact field equals the engine's own `write_json` reply, numbers through
+  `to_bits()`, and the `skillEvents` `(horseIndex, skillId)` multiset equals
+  the engine's, string ids included. The packet carries the engine magic,
+  equal frame and horse counts, and frame bytes equal to the engine
+  `into_binary` packet's (timestamps included), and the meta string equals
+  the packet's embedded meta bytes.
+- `a_startup_request_falls_back_and_its_siblings_stay_whole`: a startup
+  request between two runnable siblings answers `fallback` naming the
+  domain, carries no meta or packet, and its siblings keep theirs.
+- `gate_reasons_names_every_refusal`: every refusal string against
+  synthetic device facts (fp64, single and double fp-config bits, and the
+  no-device case), then grid, startup, runtime and roster refusals for the
+  request. No device is opened.
+
+### skillEvents: the engine writer sites, and what the kernel logs
+
+From `src/lib.rs`: the activate hook records the kakari start time and emits
+nothing, the deactivate hook emits the entry with `skillId` the string
+`"kakari"`. A no-skill race therefore carries one entry per completed rush
+episode and none for a rush still active when the loop ends. A real skill's
+activate hook emits an immediate entry with a numeric `skillId` when its
+duration is already spent, else parks it pending, and the deactivate hook (or
+the race-end finalizer for effects still pending) emits the entry. The kernel
+logs one `(runner, id)` per skill fire (`race_event` in
+`src/kernels/retail_core.cl`) and one per rush end (transition `-1` in
+`race.cl`, `EV_KAKARI`), which reproduces the engine multiset exactly: a
+fire lands one entry, and an episode outliving the race emits an engine
+entry only through the finalizer, one the fire already covers.
 
 ## Not covered (step 6 blockers)
 
@@ -647,4 +719,7 @@ and gate:
   it whenever the key is present (21 to 120 horses), so `prepare` flags any
   request carrying the key
 - Ground and terrain lookups beyond the slope and corner geometry events
-- Replay frame encoding outside the gate's frame comparison
+- Full (non-compact) replies: the version keys, `finishTime`, `gutsOrder`,
+  `wizOrder`, `runningStyle`, `positioningPhases`, the `actualLastSpurt*`
+  pair and the other telemetry channels the compact contract does not read.
+  Those races stay on the CPU lanes (see "Batch API").

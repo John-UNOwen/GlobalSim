@@ -4,6 +4,7 @@
 use globalsim_gpu::reference;
 use globalsim_gpu::retail_physics::{Acceleration, TargetSpeed};
 
+#[cfg(feature = "race")]
 #[test]
 fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     // The kernel's retail_core.cl scratch map grows by the skill regions, and

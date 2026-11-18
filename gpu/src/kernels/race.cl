@@ -7,10 +7,11 @@
 // Domain: retail runtime, no skills, no startup mode. Paired mode gives each
 // runner its own RUN substream bank, fresh from the race seed. Anything else
 // sets ST_FALLBACK with the domain code in ST_ARG (1 bad n, 3 startup,
-// 4 host flag, 5 initialization input, 6 geometry). The field logic (ranks,
-// pacemaker, lane blocking and movement, duel and spot competition) runs in
-// the work item in roster order. Skills keep their own streams on the CPU, so
-// a request carrying any skill still falls back at the host.
+// 4 host flag, 5 initialization input, 6 geometry, 7 event log overflow).
+// The field logic (ranks, pacemaker, lane blocking and movement, duel and
+// spot competition) runs in the work item in roster order. Skills keep their
+// own streams on the CPU, so a request carrying any skill still falls back
+// at the host.
 
 #define FB_N 1u
 #define FB_STARTUP 3u
@@ -69,7 +70,8 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
     __global uint* bank, __global float* c_start, __global float* c_speed,
     __global float* c_time, __global const double* pd, __global const double* rd,
     const int r, const int n, const int empty_move, const float dt,
-    const double course_distance, __global const uint* skt) {
+    const double course_distance, __global const uint* skt,
+    __global uint* ev, __global uint* st) {
     const int strategy = (int)si[SI_STRATEGY + r];
     const float dist_f = convert_float_rte(course_distance);
     const int finished = (int)si[SI_FINISHED + r];
@@ -175,9 +177,17 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
     // The move engine reads the freshly written lane target.
     sf[SF_MV_TARGET + r] = convert_float_rte(sd[SD_LANET + r]);
 
-    // Rushing transition, skipped once finished; the gates mirror step().
+    // Rushing transition, skipped once finished. The gates mirror step().
+    // A start bumps temptation_count. An end is where the deactivate hook
+    // emits the kakari skillEvents entry.
     if (!finished) {
-        rushing_step(si, sf, r, position_f, dist_f, dt, pd, bank);
+        const int rush = rushing_step(si, sf, r, position_f, dist_f, dt, pd, bank);
+        if (rush == 1) {
+            si[SI_TEMPT + r] += 1u;
+        }
+        if (rush == -1) {
+            race_event(ev, st, r, EV_KAKARI);
+        }
         si[SI_KAKARI + r] = si[SI_RS_ACTIVE + r];
         si[SI_RMODE + r] = si[SI_RS_MODE + r];
     }
@@ -345,16 +355,18 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
     __global const float* sg_qd, __global const float* lm_b,
     __global const float* lm_l, __global const float* ce_b, __global const float* ce_e,
     __global const uint* ce_i, __global const uint* ce_f,
-    __global const uint* sk_all) {
+    __global const uint* sk_all, __global uint* events_all) {
     const int id = get_global_id(0);
     __global const uint* ri = ri_all + id * RI_STRIDE;
     __global const double* pd = rd_all + id * RIL_STRIDE;
     __global uint* scr = scr_u_all + (long)id * SCR_U_WORDS;
     __global double* scr_d = scr_d_all + (long)id * SRL_WORDS;
     __global uint* st = status_all + id * ST_STRIDE;
+    __global uint* ev = events_all + id * EV_STRIDE;
     st[ST_FALLBACK] = 0u;
     st[ST_ARG] = 0u;
     st[ST_TICKS] = 0u;
+    ev[0] = 0u;
 
     // The skill table block for this race, zero-filled (NREC 0) when the
     // host compiled no skills. Views over it stay live for every race.
@@ -572,6 +584,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         si[SI_FINISHED + r] = 0u;
         si[SI_BLOCKER + r] = 0xFFFFFFFFu;
         si[SI_HPEMPTY + r] = 0u;
+        si[SI_TEMPT + r] = 0u;
         si[SI_SECT + r] = 0u;
         si[SI_RS_ACTIVE + r] = 0u;
         si[SI_RS_USED + r] = 0u;
@@ -637,6 +650,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         sf[SF_PENDING_HP + r] = 0.f;
         sf[SF_AFTER_GOAL + r] = 0.f;
         sf[SF_DELAY + r] = as_float(scr[runb + OR_DELAY]);
+        st[ST_DELAY0 + r] = scr[runb + OR_DELAY];
         sf[SF_RS_CHECK + r] = 0.f;
         sf[SF_RS_MAXREM + r] = 0.f;
         sf[SF_DS_REM + r] = 0.f;
@@ -658,6 +672,8 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         sf[SF_MV_SPEED + r] = 0.f;
         sf[SF_MV_TIME + r] = 0.f;
         sf[SF_BLOCKER_GAP + r] = 0.f;
+        sf[SF_RSCORE + r] = 0.f;
+        sf[SF_RREM + r] = 1.f;
         sf[SF_OBSERVED + r] = 3.f;
         sf[SF_MIN + r] = 3.f;
 
@@ -816,8 +832,8 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         // fire gate, then the live Horse rows the sample below reads.
         if (sk_on) {
             skills_advance(skt, sks, skd, scr, dt, n, dist_f);
-            skills_scan(skt, sks, skd, scr, si, sd, shl, rs, 1, n, dist_f);
-            skills_scan(skt, sks, skd, scr, si, sd, shl, rs, 0, n, dist_f);
+            skills_scan(skt, sks, skd, scr, si, sd, shl, rs, 1, n, dist_f, ev, st);
+            skills_scan(skt, sks, skd, scr, si, sd, shl, rs, 0, n, dist_f, ev, st);
             sk_columns(skt, scr, sd, n);
         }
         // blocking_sample over the post-skill rows, which skills left alone.
@@ -836,7 +852,17 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
                 paired ? scr + SCR_BANKS + r * BANK_WORDS : bank;
             const float advance_distance = race_step(si, scr, sf, sd, shl, lists,
                 cached, runner_bank, c_start, c_speed, c_time, pd, rds, r, n,
-                empty_move, dt, course_distance, skt);
+                empty_move, dt, course_distance, skt, ev, st);
+            // stadium_score::RushingScore.update(is_kakari, dt), after the
+            // step and before the gated continue, as the engine loop does.
+            if ((int)si[SI_KAKARI + r]) {
+                float rem = sf[SF_RREM + r] - dt;
+                if (rem <= 0.f) {
+                    rem = 1.f;
+                    sf[SF_RSCORE + r] += 1.f;
+                }
+                sf[SF_RREM + r] = rem;
+            }
             rs[RS_ADV + r] = 0u;
             if (advance_distance < 0.f) {
                 continue;  // gated rest: no movement, dash or goal test
@@ -942,6 +968,12 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
     st[ST_TICKS] = (uint)tick;
     // Runners never past the line finish at the loop's own end time, which
     // the host recomputes from the tick count with the same f32 sum.
+    for (int r = 0; r < n; r++) {
+        st[ST_TEMPT0 + r] = si[SI_TEMPT + r];
+        st[ST_RSCORE0 + r] = convert_uint(sf[SF_RSCORE + r]);
+        st[ST_HPEMPTY0 + r] = si[SI_HPEMPTY + r];
+        st[ST_LSS0 + r] = as_uint(sf[SF_SP_START + r]);
+    }
 }
 
 

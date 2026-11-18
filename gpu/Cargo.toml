@@ -40,3 +40,8 @@ required-features = ["gpu"]
 [[bin]]
 name = "gpu-race-diff"
 path = "src/bin/gpu_race_diff.rs"
+
+[[bin]]
+name = "skills_bench"
+path = "src/bin/skills_bench.rs"
+required-features = ["race"]

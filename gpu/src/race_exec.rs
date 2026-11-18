@@ -17,7 +17,7 @@ pub const RACE_MAXR: usize = 24;
 pub const RACE_MAX_TICKS: usize = 6144;
 pub const RI_STRIDE: usize = 320;
 pub const RIL_STRIDE: usize = 576;
-pub const ST_STRIDE: usize = 112;
+pub const ST_STRIDE: usize = 232;
 // Skill scratch mirrors of retail_core.cl and skills.cl.
 pub const SK_STRIDE: usize = crate::skills_compile::SK_STRIDE;
 const SK_RMAX: usize = 32;
@@ -89,6 +89,18 @@ pub const ST_FALLBACK: usize = 0;
 pub const ST_ARG: usize = 1;
 pub const ST_TICKS: usize = 2;
 pub const ST_FINISH0: usize = 8;
+// Compact-reply exports per runner, mirrors of retail_core.cl. The f32 ones
+// carry raw bits, which the facade widens exactly like the engine's casts.
+pub const ST_TEMPT0: usize = 112;
+pub const ST_RSCORE0: usize = 136;
+pub const ST_HPEMPTY0: usize = 160;
+pub const ST_DELAY0: usize = 184;
+pub const ST_LSS0: usize = 208;
+// skillEvents log, mirror of retail_core.cl: word 0 is the entry count,
+// then (runner, id) pairs, id EV_KAKARI for a completed rush episode.
+pub const EV_MAX: usize = 512;
+pub const EV_STRIDE: usize = 1 + 2 * EV_MAX;
+pub const EV_KAKARI: u32 = 0xFFFF_FFFF;
 // Scratch bases, mirrors of retail_core.cl.
 const IIU: usize = 96;
 const SF_STRIDE: usize = 52;
@@ -122,6 +134,7 @@ pub const FB_STARTUP: u32 = 3;
 pub const FB_HOST: u32 = 4;
 pub const FB_INIT: u32 = 5;
 pub const FB_GEOMETRY: u32 = 6;
+pub const FB_EVENT: u32 = 7;
 
 /// One race as the kernel ran it. `frames` holds the ticks plus the pre-loop
 /// frame 0, each row the six replay values per runner. `finish_*` stays None
@@ -141,6 +154,16 @@ pub struct RaceGpu {
     /// The loop's own end time, the engine's finish value for runners that
     /// never crossed the line.
     pub loop_end: f64,
+    /// Compact-reply exports per runner in roster order: the two count words,
+    /// the hp-empty flag and the two f32 quantities the engine widens to f64.
+    pub tempt_all: Vec<u32>,
+    pub rscore_all: Vec<u32>,
+    pub hp_empty_all: Vec<bool>,
+    pub delay_all: Vec<f64>,
+    pub lss_all: Vec<f64>,
+    /// The race's skillEvents (horseIndex, id) pairs in kernel order, id
+    /// EV_KAKARI for a completed rush episode.
+    pub events: Vec<(usize, u32)>,
 }
 
 pub struct RaceRun {
@@ -413,7 +436,7 @@ fn pack_course_scalars(course: &Value, pd: &mut [f64]) -> Result<usize, String> 
 
 /// Everything the launch needs about one race before the powf slot (it
 /// waits for the adjusted-guts pre-pass) and before the geometry tables.
-struct Prepared {
+pub(crate) struct Prepared {
     ri: Vec<u32>,
     pd: Vec<f64>,
     n: usize,
@@ -424,9 +447,34 @@ struct Prepared {
     sk: Vec<u32>,
 }
 
+impl Prepared {
+    /// A flagged placeholder keeping the batch aligned when one request fails
+    /// to parse at all. It never reaches the launch.
+    pub(crate) fn stub(reason: String) -> Prepared {
+        Prepared {
+            ri: Vec::new(),
+            pd: Vec::new(),
+            n: 0,
+            stats: Vec::new(),
+            host_fallback: Some(reason),
+            geometry: None,
+            seed: 0,
+            sk: Vec::new(),
+        }
+    }
+}
+
 /// Parses one request into kernel inputs. A domain the kernel cannot answer
 /// bit-exactly comes back as `host_fallback`, and the race skips the launch.
-fn prepare(request: &str, seed: i64, globals: &Value, grids: &Value, courses: &Value) -> Result<Prepared, String> {
+/// Geometry files load and flatten once per course through the registry.
+fn prepare(
+    request: &str,
+    seed: i64,
+    globals: &Value,
+    grids: &Value,
+    courses: &Value,
+    registry: &mut GeometryRegistry,
+) -> Result<Prepared, String> {
     let root = json::parse(request)?;
     let course_id = root.get_i64("courseId")? as i32;
     let seed_i32 = i32::try_from(seed).map_err(|_| "seed does not fit an i32".to_string())?;
@@ -512,13 +560,11 @@ fn prepare(request: &str, seed: i64, globals: &Value, grids: &Value, courses: &V
     pd[PD_DTYPE] = course.get_i64("distanceType")? as f64;
 
     if root.get("experimentalRetailGeometry").and_then(Value::as_bool) == Some(true) {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/course_geometry");
-        let loaded = retail_geometry::CourseGeometry::load(&dir, course_id, distance as f32)
-            .map_err(|e| format!("world geometry for {course_id}: {e}"))?;
-        // With geometry on, the lane machine reads first_move_lane_point
-        // from the geometry, not the course file.
-        pd[PC_FIRST_MOVE_POINT] = f64::from(loaded.first_move_lane_point);
-        geometry = Some(retail_geometry::flatten_course(&loaded));
+        // first_move_lane_point drives the lane machine when geometry is on,
+        // so the registry carries it beside the flattened tables.
+        let (flat, first_move) = registry.course(course_id, distance as f32)?;
+        pd[PC_FIRST_MOVE_POINT] = f64::from(first_move);
+        geometry = Some(flat);
     }
 
     // Dense gate rank drives the retail starting lane.
@@ -598,18 +644,66 @@ pub fn run_kernel_only(requests: &[(String, i64)], warm: usize, timed: usize) ->
     bench.ok_or_else(|| "kernel-only run found no launchable race".into())
 }
 
-fn run_inner(
-    requests: &[(String, i64)],
-    timing: Option<(usize, usize)>,
-) -> Result<(RaceRun, Option<KernelBench>), String> {
-    let globals = initialization::engine_parameters_value()?;
-    let grids = json::parse(&dep_cpu::engine_data("starting_grids.json")?)?;
-    let courses = initialization::engine_json("data/course_data.json")?;
+/// Flattened course tables, cached per course by `RaceContext` and by the
+/// module-level runs. The f32 is the geometry's first_move_lane_point.
+#[derive(Default)]
+pub struct GeometryRegistry {
+    courses: std::collections::HashMap<i32, (retail_geometry::FlatCourse, f32)>,
+}
 
-    let mut prepared: Vec<Prepared> = Vec::with_capacity(requests.len());
-    for (request, seed) in requests {
-        prepared.push(prepare(request, *seed, &globals, &grids, &courses)?);
+impl GeometryRegistry {
+    fn course(&mut self, course_id: i32, distance: f32) -> Result<(retail_geometry::FlatCourse, f32), String> {
+        if let Some((flat, first_move)) = self.courses.get(&course_id) {
+            return Ok((flat.clone(), *first_move));
+        }
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/course_geometry");
+        let loaded = retail_geometry::CourseGeometry::load(&dir, course_id, distance)
+            .map_err(|e| format!("world geometry for {course_id}: {e}"))?;
+        let first_move = loaded.first_move_lane_point;
+        let flat = retail_geometry::flatten_course(&loaded);
+        self.courses.insert(course_id, (flat.clone(), first_move));
+        Ok((flat, first_move))
     }
+}
+
+/// Launch state kept between batches: one gated device, one built race
+/// program, engine data loaded once and the geometry cache. Not Sync, the
+/// OpenCL queue and program belong to the thread that opened them.
+pub struct RaceContext {
+    globals: Value,
+    grids: Value,
+    courses: Value,
+    spike: crate::gpu::Spike,
+    program: ocl::Program,
+    registry: GeometryRegistry,
+}
+
+impl RaceContext {
+    /// Runs the device gate, loads the engine data and builds the race
+    /// program once. A failing gate never loads the data.
+    pub fn open() -> Result<RaceContext, String> {
+        let spike = crate::gpu::Spike::open()?;
+        let program = spike.build_program(crate::gpu::RACE_KERNEL_SOURCE)?;
+        let globals = initialization::engine_parameters_value()?;
+        let grids = json::parse(&dep_cpu::engine_data("starting_grids.json")?)?;
+        let courses = initialization::engine_json("data/course_data.json")?;
+        Ok(RaceContext { globals, grids, courses, spike, program, registry: GeometryRegistry::default() })
+    }
+
+    /// The gated device the batches run on.
+    pub fn device(&self) -> &crate::gpu::DeviceReport {
+        &self.spike.device
+    }
+
+    /// One request into kernel inputs. The Err arm is a parse failure the
+    /// batch caller reports per race instead of failing the batch.
+    pub(crate) fn prepare(&mut self, request: &str, seed: i64) -> Result<Prepared, String> {
+        prepare(request, seed, &self.globals, &self.grids, &self.courses, &mut self.registry)
+    }
+
+    /// Launches the unflagged entries in one kernel run and decodes every
+    /// entry, flagged ones included, in input order.
+    pub(crate) fn run_prepared(&mut self, prepared: &mut [Prepared], timing: Option<(usize, usize)>) -> Result<(RaceRun, Option<KernelBench>), String> {
     let launched: Vec<usize> = (0..prepared.len()).filter(|&i| prepared[i].host_fallback.is_none()).collect();
     if launched.windows(2).any(|w| prepared[w[0]].n != prepared[w[1]].n) {
         return Err("one launch needs one uniform runner count".into());
@@ -717,9 +811,7 @@ fn run_inner(
     }
     let tables = crate::geometry::course_tables(&table_sets);
 
-    let spike = crate::gpu::Spike::open()?;
-    let program = spike.build_program(crate::gpu::RACE_KERNEL_SOURCE)?;
-    let queue = spike.queue();
+    let queue = self.spike.queue();
 
     let m = launched.len();
     let mut ri_all = vec![0u32; m.max(1) * RI_STRIDE];
@@ -739,6 +831,7 @@ fn run_inner(
     let b_scr_d = read_write(&queue, &vec![0f64; m.max(1) * SRL_WORDS])?;
     let b_frames = read_write(&queue, &vec![0f64; m.max(1) * RACE_MAX_TICKS * n * 6])?;
     let b_status = read_write(&queue, &vec![0u32; m.max(1) * ST_STRIDE])?;
+    let b_events = read_write(&queue, &vec![0u32; m.max(1) * EV_STRIDE])?;
     let b_cs = read_only(&queue, &tables.cs)?;
     let b_sg_x = read_only(&queue, &tables.sg_x)?;
     let b_sg_xd = read_only(&queue, &tables.sg_xd)?;
@@ -756,7 +849,7 @@ fn run_inner(
     let mut bench: Option<KernelBench> = None;
     if m > 0 {
         let kernel = ocl::Kernel::builder()
-            .program(&program)
+            .program(&self.program)
             .name("race")
             .queue(queue.clone())
             .global_work_size(m)
@@ -780,6 +873,7 @@ fn run_inner(
             .arg(&b_ce_i)
             .arg(&b_ce_f)
             .arg(&b_sk)
+            .arg(&b_events)
             .build()
             .map_err(|e| e.to_string())?;
         if let Some((warm, timed)) = timing {
@@ -798,8 +892,8 @@ fn run_inner(
             }
             let launch_ms = start.elapsed().as_secs_f64() * 1e3 / timed as f64;
             bench = Some(KernelBench {
-                device: spike.device.name.clone(),
-                build_ms: spike.build_ms,
+                device: self.spike.device.name.clone(),
+                build_ms: self.spike.build_ms,
                 races: m,
                 runners: m * n,
                 total_ticks,
@@ -812,13 +906,15 @@ fn run_inner(
     queue.finish().map_err(|e| e.to_string())?;
 
     let mut status = vec![0u32; m.max(1) * ST_STRIDE];
+    let mut events_all = vec![0u32; m.max(1) * EV_STRIDE];
     let mut frames_all = if timing.is_some() { Vec::new() } else { vec![0f64; m.max(1) * RACE_MAX_TICKS * n * 6] };
     if m > 0 && timing.is_none() {
         b_status.cmd().read(&mut status).enq().map_err(|e| e.to_string())?;
+        b_events.cmd().read(&mut events_all).enq().map_err(|e| e.to_string())?;
         b_frames.cmd().read(&mut frames_all).enq().map_err(|e| e.to_string())?;
     }
 
-    let mut races: Vec<RaceGpu> = Vec::with_capacity(requests.len());
+    let mut races: Vec<RaceGpu> = Vec::with_capacity(prepared.len());
     let mut slot = 0usize;
     for race in prepared.iter() {
         let mut out = RaceGpu {
@@ -832,9 +928,16 @@ fn run_inner(
             finish_step_all: Vec::new(),
             finish_raw_all: Vec::new(),
             loop_end: 0.,
+            tempt_all: Vec::new(),
+            rscore_all: Vec::new(),
+            hp_empty_all: Vec::new(),
+            delay_all: Vec::new(),
+            lss_all: Vec::new(),
+            events: Vec::new(),
         };
         if race.host_fallback.is_none() && timing.is_none() {
             let st = &status[slot * ST_STRIDE..][..ST_STRIDE];
+            let ev = &events_all[slot * EV_STRIDE..][..EV_STRIDE];
             slot += 1;
             out.kernel_flag = st[ST_FALLBACK];
             out.kernel_arg = st[ST_ARG];
@@ -863,12 +966,40 @@ fn run_inner(
                 out.finish_raw_all = (0..race.n)
                     .map(|r| read_f64(st, ST_FINISH0 + 4 * r + 2))
                     .collect();
+                out.tempt_all = (0..race.n).map(|r| st[ST_TEMPT0 + r]).collect();
+                out.rscore_all = (0..race.n).map(|r| st[ST_RSCORE0 + r]).collect();
+                out.hp_empty_all = (0..race.n).map(|r| st[ST_HPEMPTY0 + r] != 0).collect();
+                out.delay_all = (0..race.n)
+                    .map(|r| f64::from(f32::from_bits(st[ST_DELAY0 + r])))
+                    .collect();
+                out.lss_all = (0..race.n)
+                    .map(|r| f64::from(f32::from_bits(st[ST_LSS0 + r])))
+                    .collect();
+                let count = (ev[0] as usize).min(EV_MAX);
+                out.events = (0..count)
+                    .map(|k| (ev[1 + 2 * k] as usize, ev[2 + 2 * k]))
+                    .collect();
             }
         }
         races.push(out);
     }
 
-    Ok((RaceRun { device: spike.device, build_ms: spike.build_ms, races }, bench))
+    Ok((RaceRun { device: self.spike.device.clone(), build_ms: self.spike.build_ms, races }, bench))
+    }
+}
+
+/// The module-level entry: open a context, prepare every request (one parse
+/// failure fails the whole call, as it always has) and launch once.
+fn run_inner(
+    requests: &[(String, i64)],
+    timing: Option<(usize, usize)>,
+) -> Result<(RaceRun, Option<KernelBench>), String> {
+    let mut ctx = RaceContext::open()?;
+    let mut prepared: Vec<Prepared> = Vec::with_capacity(requests.len());
+    for (request, seed) in requests {
+        prepared.push(ctx.prepare(request, *seed)?);
+    }
+    ctx.run_prepared(&mut prepared, timing)
 }
 
 /// The finish bits the kernel stored, or None for a runner that never
@@ -885,6 +1016,7 @@ fn kernel_fallback(flag: u32, arg: u32) -> Option<String> {
         (FB_HOST, code) => format!("kernel host flag {code}"),
         (FB_INIT, _) => "the initialization chain flagged".into(),
         (FB_GEOMETRY, _) => "geometry rejected a query".into(),
+        (FB_EVENT, _) => "event log overflow".into(),
         (other, a) => format!("kernel fallback {other} arg {a}"),
     })
 }

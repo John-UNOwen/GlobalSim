@@ -20,6 +20,28 @@ pub struct CpuRace {
     pub detail_events: Vec<(usize, i64, i64, f64)>,
 }
 
+/// The engine's own binary-lane output for one race: the full reply text as
+/// `write_json` writes it, the metadata string and the GSIMRP01 packet as
+/// `into_binary` produces them.
+pub struct CpuBinary {
+    pub reply: String,
+    pub metadata: String,
+    pub packet: Vec<u8>,
+}
+
+/// Runs the engine on (request, seed) with every frame retained and takes
+/// both output lanes, the same path the app's non-compact host drives.
+pub fn run_cpu_binary(request: &str, seed: i64) -> Result<CpuBinary, String> {
+    let mut prepared = globalsim::PreparedRace::new(&with_retain_all_frames(request)?)?;
+    let simulation = prepared.run(seed)?;
+    let mut reply = String::new();
+    simulation.write_json(&mut reply);
+    let mut metadata = String::new();
+    let mut packet = Vec::new();
+    simulation.into_binary(&mut metadata, &mut packet);
+    Ok(CpuBinary { reply, metadata, packet })
+}
+
 pub fn course_id(request: &str) -> Result<i32, String> {
     Ok(json::parse(request)?.get_i64("courseId")? as i32)
 }
