@@ -13,6 +13,9 @@ description = "Spike: OpenCL port of the GlobalSim restricted flat no-skills loo
 default = []
 # OpenCL host, kernel, correctness gate and bench. Needs OpenCL.lib on LIB.
 gpu = ["dep:ocl"]
+# Engine course-geometry runtime (handoff step 6, geometry slice) and its
+# kernel host. Gated out of the lib's test target, see src/lib.rs.
+geometry = []
 
 [dependencies]
 ocl = { version = "=0.19.7", optional = true }

@@ -8,6 +8,7 @@ use std::time::Instant;
 
 pub const KERNEL_SOURCE: &str = include_str!("kernels/restricted_tick.cl");
 pub const RNG_KERNEL_SOURCE: &str = include_str!("kernels/rng.cl");
+pub const GEOMETRY_KERNEL_SOURCE: &str = include_str!("kernels/geometry.cl");
 pub const BUILD_OPTIONS: &str = "-cl-fp32-correctly-rounded-divide-sqrt";
 
 // cl.h values, as raw ids through Device::info_raw.

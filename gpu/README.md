@@ -7,9 +7,10 @@ engine repo for the plan this spike implements.
 
 The crate is standalone (empty `[workspace]` table) and vendors the engine's
 `src/retail_physics.rs`, `src/json.rs`, `src/replay_frames.rs`, `src/random_gen.rs`
-and `src/retail_random.rs` in place through `#[path]` includes in `src/lib.rs`.
-The engine files are never edited to make the GPU pass. License and provenance:
-`NOTICE`.
+and `src/retail_random.rs` in place through `#[path]` includes in `src/lib.rs`,
+plus `src/retail_geometry.rs` behind the `geometry` feature (see "Geometry
+port"). The engine files are never edited to make the GPU pass. License and
+provenance: `NOTICE`.
 
 ## Prerequisites
 
@@ -29,7 +30,8 @@ cargo build --features gpu --release
 ```
 
 Without `--features gpu` the crate is pure Rust (no OpenCL link, no `LIB`
-needed), which covers the reference tests.
+needed), which covers the reference tests. `--features geometry` is pure Rust
+too (see "Geometry port").
 
 ## Test
 
@@ -47,6 +49,7 @@ Suites:
 | `comparator` | No device needed: one injected wrong value in a fake GPU outcome reports exactly the injected tick, runner, field and both raw bit patterns, equal frames with a flag are not parity |
 | `gpu_gate` | See below |
 | `rng_gate` (gpu only) | See "RNG port" below |
+| `geometry_gate` (gpu + geometry only) | See "Geometry port" below |
 | `race_diff` (gpu only) | The whole comparison pipeline on `examples/v77-race.jsonl` line 1 with geometry 10504 and seed 7: the CPU engine runs the whole race (1463 ticks), the stub's ticks diverge, and the outcome carries the fallback flag |
 
 ### What the gate proves
@@ -197,6 +200,109 @@ All comparisons run on the gated B580, and every float is compared through
 hex literal `0x1.0000000200000p-31`, and `rng_gate` ties that literal to the Rust
 value through the bits assertion.
 
+## Geometry port (handoff step 6, geometry slice)
+
+`src/kernels/geometry.cl` holds one kernel, `geometry`, one work item per
+query, and a per-item `mode` selecting `corner_state_at`, `lane_max_at`,
+`position` or `advance` for one course, ported line for line from
+`src/retail_geometry.rs` with the widths of each source expression preserved:
+segment coordinates interpolate in f64 with one f32 store, the quaternion
+lerp normalizes by `(dot(q,q) as f64).sqrt() as f32` with f32 divides, the
+lane-offset chain keeps the f32 `num2..num11` products with one f32 store per
+component, `advance` squares, sums and compares in f64 with single f32 stores,
+and `corner_state_at` scans the sorted corner events in reverse, short
+circuiting at the first event with `distance >= start`. The Rust reference
+side is the engine module itself, `src/retail_geometry.rs`, included in this
+crate behind the `geometry` feature. JSON parsing (`from_value`) stays
+host-side, nothing to port.
+
+### Engine modules with CARGO_MANIFEST_DIR tests must be gated out of `--lib`
+
+`src/retail_geometry.rs` carries `#[cfg(test)]` tests that read
+`env!("CARGO_MANIFEST_DIR")/data/...`. Included as is, those tests compile
+into this crate's unit-test target and look for data under `gpu/`, so they
+fail there even though they pass in the engine. The rule for any engine module
+with tests like that: declare the include behind `#[cfg(all(feature = "...",
+not(test)))]` in `src/lib.rs`, and put its gate in an integration test (the
+`tests/` dir compiles against the lib without `cfg(test)`). `cargo test --lib`
+then never sees the module, and the gate runs through
+`cargo test --features gpu,geometry --test geometry_gate`.
+
+The accessors that read the engine's private runtime state (`flatten_course`,
+`drop_overrun` in `src/retail_geometry.rs`) must sit in the same module as the
+engine code, because struct field privacy is module-scoped. They live in a
+`gpu/src/retail_geometry.rs` that `include!`s the engine file. A direct
+`include!` of the engine file fails (E0753): its leading `//!` doc comment is
+never module-leading inside a macro expansion, so `build.rs` emits a copy with
+those lines turned into plain `//` comments (text preserved) and the one
+nested `include!("retail_geometry_assets.rs")` rewritten to resolve from
+`OUT_DIR`. The engine file on disk is never modified, and `build.rs` panics if
+that include line ever changes shape.
+
+### Kernel data (one course, flat read-only buffers)
+
+`flatten_course` copies the state `CourseGeometry::from_value` built, field
+for field, into `FlatCourse`. For `C` courses and `N` items the kernel reads
+and writes (`run` in `src/geometry.rs` uploads them; f32 values in the
+integer arrays go as raw bits):
+
+| Buffer | Type, length | Contents |
+| --- | --- | --- |
+| `cs` | u32[16 per course] | course table: `distance`, `distance_to_world`, `initial_lane_max`, overrun present + `distance`, `rotation_fix` (4 f32 bits), lane-max and corner block bases and counts, main and overrun segment block bases |
+| `sg_x`, `sg_xd`, `sg_z`, `sg_zd` | f64[2002 per course] | `AnimationSegment` `x`, `x_delta`, `z`, `z_delta`: main 1001-sample block, then overrun block (zeros when the course has none) |
+| `sg_q`, `sg_qd` | f32[8004 per course] | segment `rotation` and `rotation_delta`, f32 x4 per sample |
+| `lm_b`, `lm_l` | f32[total lane changes] | `lane_max_changes` boundary and limit |
+| `ce_b`, `ce_e`, `ce_i`, `ce_f` | f32, f32, u32, u32[total corner events] | `corner_events` start, end, id, flags (bit 0 `final_corner`, bit 1 `straight_clears`) |
+| `it` | u32[8 per item] | course index, mode, ready, distance, lane, movement, previous world x and z |
+| `out` | u32[8 per item] | fallback flag, corner id, final-corner flag, result slots A/B/C (f32 bits) |
+
+Engine errors (bad distance/lane/movement/previous-world, or past the course
+end on a course with no overrun) become the step 5 fallback instead of a
+failure: `OS_FLAG` set and the result slots at the sentinel `f32::NAN` bits
+`0x7fc00000`.
+
+### What `geometry_gate` pins
+
+All comparisons run on the gated B580, and every float is compared through
+`to_bits()`. Verified 2026-11-18 (`single_fp_config 0xbf`,
+`double_fp_config 0x3f`).
+
+- Fixture tie-in: every row of the engine's independent captured-game fixture
+  `tests/fixtures/retail_geometry_port.json` (engine root, read through the
+  repo path) replays through the kernel: 40,440 rows across 119 courses, and
+  the kernel's four outputs (next distance, world x, world z,
+  `lane_max_at`) equal the fixture's `expected_bits`, 161,760 values. Same
+  role as the retail RNG fixture pin.
+- Engine parity: 247,103 items over 10504, 10604, 10613 and 11102: a
+  course-length/4096 distance grid (including the `i == 1000` endpoint), six
+  lanes per distance (0, ±1/18, 6/18, `lane_max_at(d)` itself, 1e6), corner
+  queries with `ready` on and off, all three query modes at each grid
+  distance, ULP-1/ULP/ULP+1 probes around every corner start, corner end and
+  lane-width boundary, `advance` with `previous_world` from
+  `position(d - 0.1, lane)` and movements `0`, f32-denormal-tiny, half and
+  one times the world step and 10 times it and 1000 (clip branch and skip
+  branch both hit), and the 10604 overrun: distances 2001 to 2200 and
+  distances past the end by multiples of the overrun distance (the fmod
+  wrap).
+- Error/fallback: NaN, negative and past-end distances, infinite lanes, NaN,
+  negative and infinite movements and previous-world coordinates each set
+  the flag and write the sentinel, matching the engine's own `is_err()` item
+  by item, with valid items in the same batch staying clean. No valid sweep
+  sample shows the flag or the sentinel bit pattern anywhere.
+
+### Engine behavior that needed a handling decision
+
+- Every captured course ships an overrun animation, so "past the course end
+  without overrun" is unreachable from `load` or `bundled`. The gate reaches
+  it the way the engine's own test does: clone the geometry and clear the
+  overrun through the `drop_overrun` accessor (private field, engine module
+  scope).
+- Rust's f32 `%` (the overrun wrap) is `fmod`, and the remainder of the wrap
+  is exact for both operators, so the OpenCL `fmod` carries the same value.
+- `(sample as usize).min(1000)` in `position` needs no saturation trick on
+  the device: the error checks and the wrap leave the sample finite in
+  `[0, 1000]`, so `min(convert_int_sat_rtz(sample), 1000)` matches.
+
 ## Not covered (step 6 blockers)
 
 Engine calls the restricted chain never reaches, each needing its own port and
@@ -206,7 +312,8 @@ gate:
   loop still consumes it through paths not yet in the kernel
 - Retail simulation start: case construction (entry, `ReplayConfig` to
   `Simulation` fields, initial `Runner` states)
-- Geometry queries: arc versus straight, ground and terrain lookups
+- Geometry queries: the four runtime queries are ported and gated (see
+  "Geometry port"); ground and terrain lookups are not
 - Lane and field queries: lane occupancy, `blocking_speed_cap`
 - Pacing engine: section/pace sources and target-speed changes mid-race
 - Spurt plan: `maximum_spurt_speed`, the only `powf` in the physics module
