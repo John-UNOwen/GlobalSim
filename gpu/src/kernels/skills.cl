@@ -50,6 +50,8 @@
 #define SK_FLAG_WISDOM 2
 #define SK_FLAG_SAMPLED 4
 #define SK_FLAG_DEAD 8
+#define SK_FLAG_ANYACT 16
+#define SK_FLAG_WISDOM_FOLLOW 32
 
 #define SK_TERM_ALL_CORNER 0
 #define SK_TERM_STRAIGHT 1
@@ -91,13 +93,17 @@
 #define FEAT_IFNEAR 18
 #define FEAT_BHNEAR 19
 #define FEAT_ORDER_DELTA 20
-#define FEAT_OUT50 21
+// The order_out_filter band cell, the percentage coming from the comparison
+// argument word (20/40/50/70), always compared ==1 like the engine's filter.
+#define FEAT_OUTBAND 21
 #define FEAT_NEAR 22
 #define FEAT_BASH_BEHIND 23
 #define FEAT_BASH_INFRONT 24
 #define FEAT_LASTSPURT 25
 #define FEAT_BHNEAR1 26
 #define FEAT_SLOPE 27
+// The per-visit changed flag of the engine's observe_anyskill.
+#define FEAT_ANYACT 28
 
 // The (skill, effect) dispatch kinds the port covers.
 #define SK_EFF_SPEEDUP 1
@@ -131,6 +137,9 @@
 #define SKD_A_TIMER 1     // accel effect duration timer
 #define SKD_C_TIMER 2     // current-speed effect duration timer
 #define SKD_L_TIMER 3     // lane-speed effect duration timer
+#define SKD_ANY_LAST 4    // observe_anyskill: last activation count seen
+#define SKD_ANY_TRUES 5   // observe_anyskill: activations already counted
+#define SKD_ANY_RESULT 6  // this visit's changed flag, read by FEAT_ANYACT
 #define SKD_INSTANCE 8    // (skill, detail) instance timer
 #define SKD_COOLDOWN 9    // retail cooldown timer
 #define SKD_TRIG0 10      // trigger start, first merged window start
@@ -513,6 +522,10 @@ static void sk_init_wisdom(__global const uint* sk, __global uint* sks,
         const double base_wisdom = as_double(ilb[wis_slot + r]);
         const double chance = fmax(100.0 - 9000.0 / base_wisdom, 20.0);
         float mult = 1.0f;
+        // The engine's retail init rolls the skill lottery once per skill id,
+        // so one record of each wisdom group rolls and followers inherit it.
+        uint group_sid = 0xffffffffu;
+        uint group_enabled = 1u;
         for (int rec = 0; rec < nrec; rec++) {
             __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
             if ((int)rd[1] != r) continue;
@@ -527,6 +540,10 @@ static void sk_init_wisdom(__global const uint* sk, __global uint* sks,
                     roll = r128_real(bank, 0.0f, 100.0f);
                 }
                 enabled = (double)chance > (double)roll ? 1u : 0u;
+                group_sid = rd[0];
+                group_enabled = enabled;
+            } else if (rd[2] & SK_FLAG_WISDOM_FOLLOW) {
+                enabled = rd[0] == group_sid ? group_enabled : 1u;
             }
             if (!enabled && sks[SKR_STRIDE * rec + SKR_STATE] == (uint)SK_S_READY) {
                 sks[SKR_STRIDE * rec + SKR_STATE] = (uint)SK_S_DISABLED;

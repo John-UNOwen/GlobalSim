@@ -58,6 +58,8 @@ pub const SK_FLAG_RETAIN: u32 = 1;
 pub const SK_FLAG_WISDOM: u32 = 2;
 pub const SK_FLAG_SAMPLED: u32 = 4;
 pub const SK_FLAG_DEAD: u32 = 8;
+pub const SK_FLAG_ANYACT: u32 = 16;
+pub const SK_FLAG_WISDOM_FOLLOW: u32 = 32;
 
 pub const SK_TERM_ALL_CORNER: u32 = 0;
 pub const SK_TERM_STRAIGHT: u32 = 1;
@@ -93,13 +95,14 @@ pub const FEAT_BSIDE: u32 = 17;
 pub const FEAT_IFNEAR: u32 = 18;
 pub const FEAT_BHNEAR: u32 = 19;
 pub const FEAT_ORDER_DELTA: u32 = 20;
-pub const FEAT_OUT50: u32 = 21;
+pub const FEAT_OUTBAND: u32 = 21;
 pub const FEAT_NEAR: u32 = 22;
 pub const FEAT_BASH_BEHIND: u32 = 23;
 pub const FEAT_BASH_INFRONT: u32 = 24;
 pub const FEAT_LASTSPURT: u32 = 25;
 pub const FEAT_BHNEAR1: u32 = 26;
 pub const FEAT_SLOPE: u32 = 27;
+pub const FEAT_ANYACT: u32 = 28;
 
 /// One race's compiled table. `reason` is Some when the race must run on the
 /// CPU, naming the first construct the kernel cannot evaluate.
@@ -159,7 +162,7 @@ pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
                 return c.finish();
             }
             seen_ids.push(sid.clone());
-            c.pack_skill(&sid, level, r, skill_data, course, horse);
+            c.pack_skill(&sid, level, r, skill_data, course, horse, root);
             if c.reason.is_some() {
                 return c.finish();
             }
@@ -393,6 +396,7 @@ impl Compiler {
         skill_data: &Value,
         course: &Value,
         horse: &Value,
+        root: &Value,
     ) {
         let sid_num = match sid.parse::<u32>() {
             Ok(v) => v,
@@ -408,455 +412,513 @@ impl Compiler {
                 return;
             }
         };
+        // build_skill_data installs one record per alternative and skips an
+        // alternative whose region algebra is empty. Records share one
+        // cooldown key per skill id, so the kernel's per-record cooldown can
+        // hold a second live alternative only when it is provably never the
+        // one that fires: identical program, no random term, and the earlier
+        // alternative's scan priority plus the shared key keep it Blocked.
         let alts = match def.get("alternatives").and_then(Value::as_array) {
-            Some(a) if a.len() == 1 => a,
+            Some(a) if !a.is_empty() => a,
             _ => {
-                self.unsupported(format!("skill {sid} has other than one alternative"));
+                self.unsupported(format!("skill {sid} has no alternatives"));
                 return;
             }
         };
-        let alt = &alts[0];
-        let rarity = match def.get("rarity").and_then(Value::as_i64).unwrap_or(0) {
-            v @ (1 | 2 | 6) => v as u32,
-            3..=5 => 3,
-            other => {
-                self.unsupported(format!("skill {sid} rarity {other} is not ported"));
-                return;
-            }
-        };
-        let wisdom = def.get("wisdomCheck").and_then(Value::as_i64).unwrap_or(0) == 1;
-        let priority = def.get("priority").and_then(Value::as_i64).unwrap_or(0);
-        if !(0..=1).contains(&priority) {
-            self.unsupported(format!("skill {sid} priority {priority} is not ported"));
-            return;
-        }
-        if self.nrec >= SK_RMAX {
-            self.unsupported("skill table overflow: too many records");
-            return;
-        }
-        // The engine keeps a primary white/gold/evolution record alive after
-        // its trigger ends, which the kernel mirrors as a retained record.
-        let retain = matches!(rarity, 1 | 2 | 6);
-
-        let condition = alt.get("condition").and_then(Value::as_str).unwrap_or("");
-        let terms = match parse_terms(condition) {
-            Ok(t) => t,
-            Err(why) => {
-                self.unsupported(format!("skill {sid} condition '{condition}': {why}"));
-                return;
-            }
-        };
-        let g = Geometry::new(course);
-        let statics = Statics::new(course, horse);
-        let leaves: Vec<Leaf> = match terms.iter().map(|t| classify(t, &g, &statics)).collect() {
-            Ok(l) => l,
-            Err(why) => {
-                self.unsupported(format!("skill {sid} condition '{condition}': {why}"));
-                return;
-            }
-        };
-
-        // The builder evaluates a precondition over the whole course, clips
-        // the main chain to the first precondition region's start, and checks
-        // precondition membership plus its dynamics as a latched gate.
-        let mut dead = false;
-        let mut seed = vec![(0.0f64, g.distance)];
-        let mut pre_n = 0usize;
-        let mut pre_reg_b = self.nreg;
-        let mut pre_prog_b = self.nprog;
-        let mut pre_prog_len = 0usize;
-        let pre_text = alt.get("precondition").and_then(Value::as_str).unwrap_or("");
-        if !pre_text.is_empty() {
-            let pre_terms = match parse_terms(pre_text) {
-                Ok(t) => t,
-                Err(why) => {
-                    self.unsupported(format!("skill {sid} precondition '{pre_text}': {why}"));
+        let mut live: Option<(String, String)> = None;
+        let mut live_rec: Option<usize> = None;
+        let mut first_record = true;
+        for (alt_index, alt) in alts.iter().enumerate() {
+            let rarity = match def.get("rarity").and_then(Value::as_i64).unwrap_or(0) {
+                v @ (1 | 2 | 6) => v as u32,
+                3..=5 => 3,
+                other => {
+                    self.unsupported(format!("skill {sid} rarity {other} is not ported"));
                     return;
                 }
             };
-            let pre_leaves: Vec<Leaf> =
-                match pre_terms.iter().map(|t| classify(t, &g, &statics)).collect() {
-                    Ok(l) => l,
+            let wisdom = def.get("wisdomCheck").and_then(Value::as_i64).unwrap_or(0) == 1;
+            let priority = def.get("priority").and_then(Value::as_i64).unwrap_or(0);
+            if !(0..=1).contains(&priority) {
+                self.unsupported(format!("skill {sid} priority {priority} is not ported"));
+                return;
+            }
+            if self.nrec >= SK_RMAX {
+                self.unsupported("skill table overflow: too many records");
+                return;
+            }
+            // The engine keeps a primary white/gold/evolution record alive after
+            // its trigger ends, which the kernel mirrors as a retained record.
+            let retain = matches!(rarity, 1 | 2 | 6);
+
+            let condition = alt.get("condition").and_then(Value::as_str).unwrap_or("");
+            let terms = match parse_terms(condition) {
+                Ok(t) => t,
+                Err(why) => {
+                    self.unsupported(format!("skill {sid} condition '{condition}': {why}"));
+                    return;
+                }
+            };
+            let g = Geometry::new(course);
+            let statics = Statics::new(course, horse, root);
+            let leaves: Vec<Leaf> = match terms.iter().map(|t| classify(t, &g, &statics)).collect() {
+                Ok(l) => l,
+                Err(why) => {
+                    self.unsupported(format!("skill {sid} condition '{condition}': {why}"));
+                    return;
+                }
+            };
+
+            // The builder evaluates a precondition over the whole course, clips
+            // the main chain to the first precondition region's start, and checks
+            // precondition membership plus its dynamics as a latched gate.
+            let mut dead = false;
+            let mut seed = vec![(0.0f64, g.distance)];
+            let mut pre_n = 0usize;
+            let mut pre_reg_b = self.nreg;
+            let mut pre_prog_b = self.nprog;
+            let mut pre_prog_len = 0usize;
+            let pre_text = alt.get("precondition").and_then(Value::as_str).unwrap_or("");
+            // A precondition that folds to all-True latches every tick, exactly
+            // like having no precondition at all, which is what the live-
+            // alternative shadow comparison needs.
+            let mut pre_trivial = true;
+            if !pre_text.is_empty() {
+                let pre_terms = match parse_terms(pre_text) {
+                    Ok(t) => t,
                     Err(why) => {
                         self.unsupported(format!("skill {sid} precondition '{pre_text}': {why}"));
                         return;
                     }
                 };
-            if pre_leaves.iter().any(|l| matches!(l, Leaf::Sampled)) {
-                self.unsupported(format!(
-                    "skill {sid} precondition random term is not ported"
-                ));
-                return;
-            }
-            let mut pre_regions: Vec<(f64, f64)> = vec![(0.0, g.distance)];
-            for leaf in pre_leaves.iter() {
-                let next = match leaf {
-                    Leaf::True | Leaf::Dynamic { .. } => pre_regions.clone(),
-                    Leaf::False => Vec::new(),
-                    Leaf::Sampled => unreachable!(),
-                    Leaf::Region(list) | Leaf::RegionDyn(list, _) => {
-                        rmap_multi(&pre_regions, |r| list.iter().map(|b| intersect(*r, *b)).collect())
-                    }
-                };
-                if next.len() > SK_REGMAX {
+                let pre_leaves: Vec<Leaf> =
+                    match pre_terms.iter().map(|t| classify(t, &g, &statics)).collect() {
+                        Ok(l) => l,
+                        Err(why) => {
+                            self.unsupported(format!("skill {sid} precondition '{pre_text}': {why}"));
+                            return;
+                        }
+                    };
+                if pre_leaves.iter().any(|l| matches!(l, Leaf::Sampled)) {
                     self.unsupported(format!(
-                        "skill {sid} precondition exceeds {SK_REGMAX} regions"
+                        "skill {sid} precondition random term is not ported"
                     ));
                     return;
                 }
-                pre_regions = next;
-            }
-            if pre_regions.is_empty() {
-                // The builder skips the whole alternative: continue, with no
-                // record to install.
-                dead = true;
-            } else {
-                let push = self.push_regions(&pre_regions);
-                pre_n = push.0;
-                pre_reg_b = push.1;
-                seed = vec![(pre_regions[0].0, g.distance)];
-                let base = self.nprog;
-                match emit_program(self, &pre_terms, &pre_leaves) {
-                    Ok(len) => {
-                        pre_prog_b = base;
-                        pre_prog_len = len;
-                    }
-                    Err(why) => {
-                        self.nprog = base;
-                        self.unsupported(format!("skill {sid} precondition: {why}"));
+                // take_anyskill_nodes drops nodes parsed in the precondition, so
+                // the engine never observes them; the kernel has no equivalent.
+                if pre_leaves.iter().any(|l| {
+                    matches!(l, Leaf::Dynamic { feat, .. } if *feat == FEAT_ANYACT)
+                }) {
+                    self.unsupported(format!(
+                        "skill {sid} precondition 'is_activate_any_skill' is not ported"
+                    ));
+                    return;
+                }
+                pre_trivial = pre_leaves.iter().all(|l| matches!(l, Leaf::True));
+                let mut pre_regions: Vec<(f64, f64)> = vec![(0.0, g.distance)];
+                for leaf in pre_leaves.iter() {
+                    let next = match leaf {
+                        Leaf::True | Leaf::Dynamic { .. } => pre_regions.clone(),
+                        Leaf::False => Vec::new(),
+                        Leaf::Sampled => unreachable!(),
+                        Leaf::Region(list) | Leaf::RegionDyn(list, _) => {
+                            rmap_multi(&pre_regions, |r| list.iter().map(|b| intersect(*r, *b)).collect())
+                        }
+                    };
+                    if next.len() > SK_REGMAX {
+                        self.unsupported(format!(
+                            "skill {sid} precondition exceeds {SK_REGMAX} regions"
+                        ));
                         return;
                     }
+                    pre_regions = next;
                 }
-            }
-            if self.reason.is_some() {
-                return;
-            }
-        }
-
-        // A top-level '@' group becomes an arm: its own region chain and
-        // dynamic program. At runtime the activation passes when the position
-        // is in the merged window list and one arm's membership and program
-        // hold, mirroring the Or closure the engine's apply builds.
-        let mut groups: Vec<(usize, usize)> = Vec::new();
-        for (i, t) in terms.iter().enumerate() {
-            if i == 0 || t.or {
-                groups.push((i, i + 1));
-            } else {
-                groups.last_mut().unwrap().1 = i + 1;
-            }
-        }
-        if groups.len() > SK_ARMMAX {
-            self.unsupported(format!(
-                "skill {sid} condition has more than {} arms",
-                SK_ARMMAX
-            ));
-            return;
-        }
-        if self.narm + groups.len().max(1) > SK_AMAX {
-            self.unsupported("skill table overflow: too many arms");
-            return;
-        }
-        let mut arms: Vec<([Vec<(f64, f64)>; 2], [usize; 2], usize)> = Vec::new();
-        let mut sampled_count = 0usize;
-        for (start, end) in groups.iter() {
-            let arm_sampled =
-                leaves[*start..*end].iter().filter(|l| matches!(l, Leaf::Sampled)).count();
-            sampled_count += arm_sampled;
-            let mut regions = seed.clone();
-            let mut pre_split: Vec<(f64, f64)> = Vec::new();
-            for (t, leaf) in terms[*start..*end].iter().zip(leaves[*start..*end].iter()) {
-                let next = match leaf {
-                    Leaf::True | Leaf::Dynamic { .. } => regions.clone(),
-                    Leaf::False => Vec::new(),
-                    Leaf::Sampled => {
-                        pre_split = regions.clone();
-                        regions.clone()
-                    }
-                    Leaf::Region(list) | Leaf::RegionDyn(list, _) => {
-                        if !sorted_by_start(list) && list.len() > 1 {
-                            self.unsupported(format!(
-                                "skill {sid} condition '{}' needs a sorted course region list",
-                                t.name
-                            ));
+                if pre_regions.is_empty() {
+                    // The builder skips the whole alternative: continue, with no
+                    // record to install.
+                    dead = true;
+                } else {
+                    let push = self.push_regions(&pre_regions);
+                    pre_n = push.0;
+                    pre_reg_b = push.1;
+                    seed = vec![(pre_regions[0].0, g.distance)];
+                    let base = self.nprog;
+                    match emit_program(self, &pre_terms, &pre_leaves) {
+                        Ok(len) => {
+                            pre_prog_b = base;
+                            pre_prog_len = len;
+                        }
+                        Err(why) => {
+                            self.nprog = base;
+                            self.unsupported(format!("skill {sid} precondition: {why}"));
                             return;
                         }
-                        rmap_multi(&regions, |r| list.iter().map(|b| intersect(*r, *b)).collect())
-                    }
-                };
-                if next.len() > SK_REGMAX {
-                    self.unsupported(format!("skill {sid} condition exceeds {SK_REGMAX} regions"));
-                    return;
-                }
-                regions = next;
-                if regions.is_empty() {
-                    break;
-                }
-            }
-            let sampled_flag = arm_sampled.min(1) | if regions.is_empty() { 2 } else { 0 };
-            if regions.is_empty() {
-                // Keep the collapsed arm as a draw-only entry: the engine
-                // still samples its random term at startup, and an empty
-                // chain never passes the runtime membership gate.
-                arms.push(([pre_split, regions], [sampled_flag, 0], 0));
-                continue;
-            }
-            arms.push(([pre_split, regions], [sampled_flag, 0], 0));
-        }
-        if !arms.is_empty() && arms.iter().all(|a| a.1[0] & 2 != 0) {
-            // Every arm collapsed, so the union is empty and the builder
-            // skips the alternative.
-            dead = true;
-        }
-        if sampled_count > 1 {
-            self.unsupported(format!("skill {sid} has more than one random term"));
-            return;
-        }
-
-        let mut term_word = u32::MAX;
-        let mut skip_draw = false;
-        if sampled_count == 1 {
-            let mut found: Option<(usize, &Term)> = None;
-            for (ai, arm) in arms.iter().enumerate() {
-                if arm.1[0] & 1 != 0 {
-                    let name = terms[groups[ai].0..groups[ai].1]
-                        .iter()
-                        .find(|t| t.name.contains("random"))
-                        .unwrap();
-                    found = Some((ai, name));
-                }
-            }
-            let (arm_at, t) = found.unwrap();
-            let kind = match t.name.as_str() {
-                "all_corner_random" => SK_TERM_ALL_CORNER,
-                "straight_random" => SK_TERM_STRAIGHT,
-                "down_slope_random" => SK_TERM_DOWN_SLOPE,
-                "up_slope_random" => SK_TERM_UP_SLOPE,
-                "phase_random" => SK_TERM_PHASE_RANDOM,
-                "phase_firsthalf_random" => SK_TERM_PHASE_FIRSTHALF,
-                "phase_laterhalf_random" => SK_TERM_PHASE_LATERHALF,
-                "is_finalcorner_random" => SK_TERM_FC_RANDOM,
-                other => {
-                    self.unsupported(format!("skill {sid} random term '{other}' is not ported"));
-                    return;
-                }
-            };
-            let ok_arg = if t.op != 0 {
-                false
-            } else if matches!(
-                kind,
-                SK_TERM_PHASE_RANDOM | SK_TERM_PHASE_FIRSTHALF | SK_TERM_PHASE_LATERHALF
-            ) {
-                (0..=4).contains(&t.arg)
-            } else {
-                t.arg == 1
-            };
-            if !ok_arg {
-                self.unsupported(format!(
-                    "skill {sid} random term '{}' needs == with a supported argument, got {}{}",
-                    t.name,
-                    op_text(t.op),
-                    t.arg
-                ));
-                return;
-            }
-            let corner_idx = if kind == SK_TERM_FC_RANDOM {
-                match fc_random_index(course, g.distance) {
-                    Some(i) => i as i32,
-                    None => {
-                        // Without a qualifying corner the engine draws no
-                        // window, so this term spends no draw. The record is
-                        // inert: mark it dead but take no sampled draw.
-                        dead = true;
-                        skip_draw = true;
-                        -1
                     }
                 }
-            } else {
-                -1
-            };
-            if !skip_draw {
-                if self.nterm >= SK_MMAX {
-                    self.unsupported("skill table overflow: too many sampled terms");
-                    return;
-                }
-                let (tag_off, tag_len) = self.tag(&format!("T{sid}:0:condition:{}", t.name));
-                let at = SK_TERMS + SK_MSTRIDE * self.nterm;
-                self.words[at] = kind;
-                self.words[at + 1] = t.arg as u32;
-                self.words[at + 2] = tag_off as u32;
-                self.words[at + 3] = tag_len as u32;
-                self.words[at + 4] = corner_idx as u32;
-                self.nterm += 1;
-                arms[arm_at].1[1] = (self.nterm - 1) as usize;
-                term_word = (self.nterm - 1) as u32;
-            }
-        }
-
-        let arms_base = self.narm;
-        let mut arms_len = 1usize;
-        let mut arm0_prog = (0usize, 0usize);
-        let mut arm0_pre = (0usize, 0usize);
-        let mut arm0_post = (0usize, 0usize);
-        if dead {
-            // A dead record still spends its random draw: the engine samples
-            // the random term before any region is evaluated, so flag the one
-            // reserved arm as sampled and point it at the term to keep the
-            // shared stream aligned. The inert chain stays empty.
-            let at = SK_ARMS + SK_ASTRIDE * self.narm;
-            if term_word != u32::MAX {
-                self.words[at + 6] = 1;
-                self.words[at + 7] = term_word;
-            }
-            self.narm += 1;
-        } else {
-            arms_len = arms.len();
-            for (ai, (lists, flags, _)) in arms.iter().enumerate() {
-                let (gs, ge) = groups[ai];
-                let (n_pre, pre_b) =
-                    if flags[0] == 1 { self.push_regions(&lists[0]) } else { (0, self.nreg) };
-                let (n_post, post_b) = self.push_regions(&lists[1]);
                 if self.reason.is_some() {
                     return;
                 }
-                let prog_base = self.nprog;
-                let prog_len = match emit_program(self, &terms[gs..ge], &leaves[gs..ge]) {
-                    Ok(len) => len,
-                    Err(why) => {
-                        self.nprog = prog_base;
-                        self.unsupported(format!("skill {sid}: {why}"));
+            }
+
+            // A top-level '@' group becomes an arm: its own region chain and
+            // dynamic program. At runtime the activation passes when the position
+            // is in the merged window list and one arm's membership and program
+            // hold, mirroring the Or closure the engine's apply builds.
+            let mut groups: Vec<(usize, usize)> = Vec::new();
+            for (i, t) in terms.iter().enumerate() {
+                if i == 0 || t.or {
+                    groups.push((i, i + 1));
+                } else {
+                    groups.last_mut().unwrap().1 = i + 1;
+                }
+            }
+            if groups.len() > SK_ARMMAX {
+                self.unsupported(format!(
+                    "skill {sid} condition has more than {} arms",
+                    SK_ARMMAX
+                ));
+                return;
+            }
+            if self.narm + groups.len().max(1) > SK_AMAX {
+                self.unsupported("skill table overflow: too many arms");
+                return;
+            }
+            let mut arms: Vec<([Vec<(f64, f64)>; 2], [usize; 2], usize)> = Vec::new();
+            let mut sampled_count = 0usize;
+            for (start, end) in groups.iter() {
+                let arm_sampled =
+                    leaves[*start..*end].iter().filter(|l| matches!(l, Leaf::Sampled)).count();
+                sampled_count += arm_sampled;
+                let mut regions = seed.clone();
+                let mut pre_split: Vec<(f64, f64)> = Vec::new();
+                for (t, leaf) in terms[*start..*end].iter().zip(leaves[*start..*end].iter()) {
+                    let next = match leaf {
+                        Leaf::True | Leaf::Dynamic { .. } => regions.clone(),
+                        Leaf::False => Vec::new(),
+                        Leaf::Sampled => {
+                            pre_split = regions.clone();
+                            regions.clone()
+                        }
+                        Leaf::Region(list) | Leaf::RegionDyn(list, _) => {
+                            if !sorted_by_start(list) && list.len() > 1 {
+                                self.unsupported(format!(
+                                    "skill {sid} condition '{}' needs a sorted course region list",
+                                    t.name
+                                ));
+                                return;
+                            }
+                            rmap_multi(&regions, |r| list.iter().map(|b| intersect(*r, *b)).collect())
+                        }
+                    };
+                    if next.len() > SK_REGMAX {
+                        self.unsupported(format!("skill {sid} condition exceeds {SK_REGMAX} regions"));
+                        return;
+                    }
+                    regions = next;
+                    if regions.is_empty() {
+                        break;
+                    }
+                }
+                let sampled_flag = arm_sampled.min(1) | if regions.is_empty() { 2 } else { 0 };
+                if regions.is_empty() {
+                    // Keep the collapsed arm as a draw-only entry: the engine
+                    // still samples its random term at startup, and an empty
+                    // chain never passes the runtime membership gate.
+                    arms.push(([pre_split, regions], [sampled_flag, 0], 0));
+                    continue;
+                }
+                arms.push(([pre_split, regions], [sampled_flag, 0], 0));
+            }
+            if !arms.is_empty() && arms.iter().all(|a| a.1[0] & 2 != 0) {
+                // Every arm collapsed, so the union is empty and the builder
+                // skips the alternative.
+                dead = true;
+            }
+            if sampled_count > 1 {
+                self.unsupported(format!("skill {sid} has more than one random term"));
+                return;
+            }
+            if !dead {
+                let pre_sig = if pre_trivial { String::new() } else { pre_text.to_string() };
+                if let Some((live_cond, live_pre)) = &live {
+                    if *live_cond == condition && *live_pre == pre_sig && sampled_count == 0 {
+                        // The engine installs this alternative but the first
+                        // alternative shares its cooldown key, is scanned first,
+                        // and passes exactly when this one does, so this record
+                        // can never be the one that fires. The start-delay
+                        // multiplier still folds every alternative's factor of
+                        // an enabled skill, in alternative order.
+                        if let Some(rec) = live_rec {
+                            let at = SK_RECORDS + SK_RSTRIDE * rec + 17;
+                            let old = f32::from_bits(self.words[at]);
+                            self.words[at] = (old * delay_factor(alt)).to_bits();
+                        }
+                        continue;
+                    }
+                    self.unsupported(format!("skill {sid} has other than one alternative"));
+                    return;
+                }
+                live = Some((condition.to_string(), pre_sig));
+                live_rec = Some(self.nrec);
+            }
+            let anyact =
+                leaves.iter().any(|l| matches!(l, Leaf::Dynamic { feat, .. } if *feat == FEAT_ANYACT));
+
+            let mut term_word = u32::MAX;
+            let mut skip_draw = false;
+            if sampled_count == 1 {
+                let mut found: Option<(usize, &Term)> = None;
+                for (ai, arm) in arms.iter().enumerate() {
+                    if arm.1[0] & 1 != 0 {
+                        let name = terms[groups[ai].0..groups[ai].1]
+                            .iter()
+                            .find(|t| t.name.contains("random"))
+                            .unwrap();
+                        found = Some((ai, name));
+                    }
+                }
+                let (arm_at, t) = found.unwrap();
+                let kind = match t.name.as_str() {
+                    "all_corner_random" => SK_TERM_ALL_CORNER,
+                    "straight_random" => SK_TERM_STRAIGHT,
+                    "down_slope_random" => SK_TERM_DOWN_SLOPE,
+                    "up_slope_random" => SK_TERM_UP_SLOPE,
+                    "phase_random" => SK_TERM_PHASE_RANDOM,
+                    "phase_firsthalf_random" => SK_TERM_PHASE_FIRSTHALF,
+                    "phase_laterhalf_random" => SK_TERM_PHASE_LATERHALF,
+                    "is_finalcorner_random" => SK_TERM_FC_RANDOM,
+                    other => {
+                        self.unsupported(format!("skill {sid} random term '{other}' is not ported"));
                         return;
                     }
                 };
-                let at = SK_ARMS + SK_ASTRIDE * self.narm;
-                self.words[at] = prog_len as u32;
-                self.words[at + 1] = prog_base as u32;
-                self.words[at + 2] = n_pre as u32;
-                self.words[at + 3] = pre_b as u32;
-                self.words[at + 4] = n_post as u32;
-                self.words[at + 5] = post_b as u32;
-                self.words[at + 6] = flags[0] as u32;
-                self.words[at + 7] = flags[1] as u32;
-                self.narm += 1;
-                if ai == 0 {
-                    arm0_prog = (prog_len, prog_base);
-                    arm0_pre = (n_pre, pre_b);
-                    arm0_post = (n_post, post_b);
+                let ok_arg = if t.op != 0 {
+                    false
+                } else if matches!(
+                    kind,
+                    SK_TERM_PHASE_RANDOM | SK_TERM_PHASE_FIRSTHALF | SK_TERM_PHASE_LATERHALF
+                ) {
+                    (0..=4).contains(&t.arg)
+                } else {
+                    t.arg == 1
+                };
+                if !ok_arg {
+                    self.unsupported(format!(
+                        "skill {sid} random term '{}' needs == with a supported argument, got {}{}",
+                        t.name,
+                        op_text(t.op),
+                        t.arg
+                    ));
+                    return;
+                }
+                let corner_idx = if kind == SK_TERM_FC_RANDOM {
+                    match fc_random_index(course, g.distance) {
+                        Some(i) => i as i32,
+                        None => {
+                            // Without a qualifying corner the engine draws no
+                            // window, so this term spends no draw. The record is
+                            // inert: mark it dead but take no sampled draw.
+                            dead = true;
+                            skip_draw = true;
+                            -1
+                        }
+                    }
+                } else {
+                    -1
+                };
+                if !skip_draw {
+                    if self.nterm >= SK_MMAX {
+                        self.unsupported("skill table overflow: too many sampled terms");
+                        return;
+                    }
+                    let (tag_off, tag_len) =
+                        self.tag(&format!("T{sid}:{alt_index}:condition:{}", t.name));
+                    let at = SK_TERMS + SK_MSTRIDE * self.nterm;
+                    self.words[at] = kind;
+                    self.words[at + 1] = t.arg as u32;
+                    self.words[at + 2] = tag_off as u32;
+                    self.words[at + 3] = tag_len as u32;
+                    self.words[at + 4] = corner_idx as u32;
+                    self.nterm += 1;
+                    arms[arm_at].1[1] = (self.nterm - 1) as usize;
+                    term_word = (self.nterm - 1) as u32;
                 }
             }
-        }
 
-        let effect_list = match alt.get("effects").and_then(Value::as_array) {
-            Some(a) if !a.is_empty() => a,
-            _ => {
-                self.unsupported(format!("skill {sid} alternative has no effects"));
-                return;
+            let arms_base = self.narm;
+            let mut arms_len = 1usize;
+            let mut arm0_prog = (0usize, 0usize);
+            let mut arm0_pre = (0usize, 0usize);
+            let mut arm0_post = (0usize, 0usize);
+            if dead {
+                // A dead record still spends its random draw: the engine samples
+                // the random term before any region is evaluated, so flag the one
+                // reserved arm as sampled and point it at the term to keep the
+                // shared stream aligned. The inert chain stays empty.
+                let at = SK_ARMS + SK_ASTRIDE * self.narm;
+                if term_word != u32::MAX {
+                    self.words[at + 6] = 1;
+                    self.words[at + 7] = term_word;
+                }
+                self.narm += 1;
+            } else {
+                arms_len = arms.len();
+                for (ai, (lists, flags, _)) in arms.iter().enumerate() {
+                    let (gs, ge) = groups[ai];
+                    let (n_pre, pre_b) =
+                        if flags[0] == 1 { self.push_regions(&lists[0]) } else { (0, self.nreg) };
+                    let (n_post, post_b) = self.push_regions(&lists[1]);
+                    if self.reason.is_some() {
+                        return;
+                    }
+                    let prog_base = self.nprog;
+                    let prog_len = match emit_program(self, &terms[gs..ge], &leaves[gs..ge]) {
+                        Ok(len) => len,
+                        Err(why) => {
+                            self.nprog = prog_base;
+                            self.unsupported(format!("skill {sid}: {why}"));
+                            return;
+                        }
+                    };
+                    let at = SK_ARMS + SK_ASTRIDE * self.narm;
+                    self.words[at] = prog_len as u32;
+                    self.words[at + 1] = prog_base as u32;
+                    self.words[at + 2] = n_pre as u32;
+                    self.words[at + 3] = pre_b as u32;
+                    self.words[at + 4] = n_post as u32;
+                    self.words[at + 5] = post_b as u32;
+                    self.words[at + 6] = flags[0] as u32;
+                    self.words[at + 7] = flags[1] as u32;
+                    self.narm += 1;
+                    if ai == 0 {
+                        arm0_prog = (prog_len, prog_base);
+                        arm0_pre = (n_pre, pre_b);
+                        arm0_post = (n_post, post_b);
+                    }
+                }
             }
-        };
-        if self.neff + effect_list.len() > SK_EMAX {
-            self.unsupported("skill table overflow: too many effects");
-            return;
-        }
-        let eff_base = self.neff;
-        // The engine keeps the raw scaled value in f64 and rounds to f32 only
-        // where the duration is consumed, so the table stores the f64 product.
-        let base_duration = alt.get("baseDuration").and_then(Value::as_f64).unwrap_or(0.) * 0.0001;
-        let duration_usage = alt.get("durationUsage").and_then(Value::as_i64).unwrap_or(1) as i32;
-        if duration_usage == 4 {
-            self.unsupported(format!(
-                "skill {sid} effect duration_usage 4 (delayed running instance) is not ported"
-            ));
-            return;
-        }
-        let mut kind_seen: Vec<i32> = Vec::new();
-        for ef in effect_list {
-            let kind = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
-            if !matches!(kind, 1 | 9 | 10 | 21 | 22 | 27 | 28 | 31) {
-                self.unsupported(format!("skill {sid} effect type {kind} is not ported"));
-                return;
-            }
-            if kind_seen.contains(&kind) {
-                self.unsupported(format!(
-                    "skill {sid} repeats effect kind {kind}, only one duration per kind is ported"
-                ));
-                return;
-            }
-            kind_seen.push(kind);
-            if ef.get("target").and_then(Value::as_i64).unwrap_or(1) != 1 {
-                self.unsupported(format!(
-                    "skill {sid} effect targeting another runner is not ported"
-                ));
-                return;
-            }
-            if ef.get("additionalActivate").and_then(Value::as_i64).unwrap_or(0) != 0 {
-                self.unsupported(format!("skill {sid} additionalActivate is not ported"));
-                return;
-            }
-            let value_usage = ef.get("valueUsage").and_then(Value::as_i64).unwrap_or(1) as i32;
-            if matches!(value_usage, 8 | 9 | 11 | 14) {
-                self.unsupported(format!(
-                    "skill {sid} effect value_usage {value_usage} is not ported"
-                ));
-                return;
-            }
-            let raw = ef.get("modifier").and_then(Value::as_f64).unwrap_or(0.);
-            let multiplier = match ef
-                .get("levelModifiers")
-                .and_then(Value::as_array)
-                .map(|a| a.get(level.max(1).min(10) as usize - 1).and_then(Value::as_f64))
-            {
-                Some(Some(m)) => m,
-                _ => level_multiplier(kind, level),
+
+            let effect_list = match alt.get("effects").and_then(Value::as_array) {
+                Some(a) if !a.is_empty() => a,
+                _ => {
+                    self.unsupported(format!("skill {sid} alternative has no effects"));
+                    return;
+                }
             };
-            let modifier = retail_skill_value(raw, multiplier);
-            let at = SK_EFFECTS + SK_ESTRIDE * self.neff;
-            self.words[at] = kind as u32;
-            self.words[at + 1] = 1;
-            self.words[at + 2] = value_usage as u32;
-            self.words[at + 3] = duration_usage as u32;
-            let w = f64_words(modifier);
-            self.words[at + 6] = w[0];
-            self.words[at + 7] = w[1];
-            let w = f64_words(base_duration);
-            self.words[at + 8] = w[0];
-            self.words[at + 9] = w[1];
-            self.neff += 1;
-        }
-        let cooldown = alt.get("cooldown").and_then(Value::as_f64).unwrap_or(0.) / 10000.0;
-        let delay_mult = delay_factor(alt);
+            if self.neff + effect_list.len() > SK_EMAX {
+                self.unsupported("skill table overflow: too many effects");
+                return;
+            }
+            let eff_base = self.neff;
+            // The engine keeps the raw scaled value in f64 and rounds to f32 only
+            // where the duration is consumed, so the table stores the f64 product.
+            let base_duration = alt.get("baseDuration").and_then(Value::as_f64).unwrap_or(0.) * 0.0001;
+            let duration_usage = alt.get("durationUsage").and_then(Value::as_i64).unwrap_or(1) as i32;
+            if duration_usage == 4 {
+                self.unsupported(format!(
+                    "skill {sid} effect duration_usage 4 (delayed running instance) is not ported"
+                ));
+                return;
+            }
+            let mut kind_seen: Vec<i32> = Vec::new();
+            for ef in effect_list {
+                let kind = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
+                if !matches!(kind, 1 | 9 | 10 | 21 | 22 | 27 | 28 | 31) {
+                    self.unsupported(format!("skill {sid} effect type {kind} is not ported"));
+                    return;
+                }
+                if kind_seen.contains(&kind) {
+                    self.unsupported(format!(
+                        "skill {sid} repeats effect kind {kind}, only one duration per kind is ported"
+                    ));
+                    return;
+                }
+                kind_seen.push(kind);
+                if ef.get("target").and_then(Value::as_i64).unwrap_or(1) != 1 {
+                    self.unsupported(format!(
+                        "skill {sid} effect targeting another runner is not ported"
+                    ));
+                    return;
+                }
+                if ef.get("additionalActivate").and_then(Value::as_i64).unwrap_or(0) != 0 {
+                    self.unsupported(format!("skill {sid} additionalActivate is not ported"));
+                    return;
+                }
+                let value_usage = ef.get("valueUsage").and_then(Value::as_i64).unwrap_or(1) as i32;
+                if matches!(value_usage, 8 | 9 | 11 | 14) {
+                    self.unsupported(format!(
+                        "skill {sid} effect value_usage {value_usage} is not ported"
+                    ));
+                    return;
+                }
+                let raw = ef.get("modifier").and_then(Value::as_f64).unwrap_or(0.);
+                let multiplier = match ef
+                    .get("levelModifiers")
+                    .and_then(Value::as_array)
+                    .map(|a| a.get(level.max(1).min(10) as usize - 1).and_then(Value::as_f64))
+                {
+                    Some(Some(m)) => m,
+                    _ => level_multiplier(kind, level),
+                };
+                let modifier = retail_skill_value(raw, multiplier);
+                let at = SK_EFFECTS + SK_ESTRIDE * self.neff;
+                self.words[at] = kind as u32;
+                self.words[at + 1] = 1;
+                self.words[at + 2] = value_usage as u32;
+                self.words[at + 3] = duration_usage as u32;
+                let w = f64_words(modifier);
+                self.words[at + 6] = w[0];
+                self.words[at + 7] = w[1];
+                let w = f64_words(base_duration);
+                self.words[at + 8] = w[0];
+                self.words[at + 9] = w[1];
+                self.neff += 1;
+            }
+            let cooldown = alt.get("cooldown").and_then(Value::as_f64).unwrap_or(0.) / 10000.0;
+            let delay_mult = delay_factor(alt);
 
-        let (wis_off, wis_len) = if wisdom { self.tag(&format!("W{sid}")) } else { (0, 0) };
-        let at = SK_RECORDS + SK_RSTRIDE * self.nrec;
-        self.words[at] = sid_num;
-        self.words[at + 1] = runner as u32;
-        self.words[at + 2] = (if retain { SK_FLAG_RETAIN } else { 0 })
-            | (if wisdom { SK_FLAG_WISDOM } else { 0 })
-            | (if sampled_count == 1 && !dead { SK_FLAG_SAMPLED } else { 0 })
-            | (if dead { SK_FLAG_DEAD } else { 0 });
-        self.words[at + 3] = priority as u32;
-        self.words[at + 4] = rarity;
-        self.words[at + 5] = (self.neff - eff_base) as u32;
-        self.words[at + 6] = eff_base as u32;
-        self.words[at + 7] = arm0_prog.0 as u32;
-        self.words[at + 8] = arm0_prog.1 as u32;
-        self.words[at + 9] = if sampled_count == 1 && !dead { 1 } else { 0 };
-        self.words[at + 10] = term_word;
-        self.words[at + 11] = arm0_pre.0 as u32;
-        self.words[at + 12] = arm0_pre.1 as u32;
-        let w = f64_words(cooldown);
-        self.words[at + 13] = w[0];
-        self.words[at + 14] = w[1];
-        self.words[at + 15] = wis_off as u32;
-        self.words[at + 16] = wis_len as u32;
-        self.words[at + 17] = delay_mult.to_bits();
-        self.words[at + 18] = arm0_post.0 as u32;
-        self.words[at + 19] = arm0_post.1 as u32;
-        self.words[at + 20] = arms_len as u32;
-        self.words[at + 21] = arms_base as u32;
-        self.words[at + 22] = pre_n as u32;
-        self.words[at + 23] = pre_reg_b as u32;
-        self.words[at + 24] = pre_prog_len as u32;
-        self.words[at + 25] = pre_prog_b as u32;
-        self.nrec += 1;
+            // retail_initialization rolls the wisdom lottery once per skill id;
+            // the first record of the (runner, skill) group carries the roll and
+            // followers inherit its enablement.
+            let (wis_off, wis_len) =
+                if wisdom && first_record { self.tag(&format!("W{sid}")) } else { (0, 0) };
+            let at = SK_RECORDS + SK_RSTRIDE * self.nrec;
+            self.words[at] = sid_num;
+            self.words[at + 1] = runner as u32;
+            self.words[at + 2] = (if retain { SK_FLAG_RETAIN } else { 0 })
+                | (if wisdom && first_record { SK_FLAG_WISDOM } else { 0 })
+                | (if wisdom && !first_record { SK_FLAG_WISDOM_FOLLOW } else { 0 })
+                | (if sampled_count == 1 && !dead { SK_FLAG_SAMPLED } else { 0 })
+                | (if dead { SK_FLAG_DEAD } else { 0 })
+                | (if anyact { SK_FLAG_ANYACT } else { 0 });
+            self.words[at + 3] = priority as u32;
+            self.words[at + 4] = rarity;
+            self.words[at + 5] = (self.neff - eff_base) as u32;
+            self.words[at + 6] = eff_base as u32;
+            self.words[at + 7] = arm0_prog.0 as u32;
+            self.words[at + 8] = arm0_prog.1 as u32;
+            self.words[at + 9] = if sampled_count == 1 && !dead { 1 } else { 0 };
+            self.words[at + 10] = term_word;
+            self.words[at + 11] = arm0_pre.0 as u32;
+            self.words[at + 12] = arm0_pre.1 as u32;
+            let w = f64_words(cooldown);
+            self.words[at + 13] = w[0];
+            self.words[at + 14] = w[1];
+            self.words[at + 15] = wis_off as u32;
+            self.words[at + 16] = wis_len as u32;
+            self.words[at + 17] = delay_mult.to_bits();
+            self.words[at + 18] = arm0_post.0 as u32;
+            self.words[at + 19] = arm0_post.1 as u32;
+            self.words[at + 20] = arms_len as u32;
+            self.words[at + 21] = arms_base as u32;
+            self.words[at + 22] = pre_n as u32;
+            self.words[at + 23] = pre_reg_b as u32;
+            self.words[at + 24] = pre_prog_len as u32;
+            self.words[at + 25] = pre_prog_b as u32;
+            self.nrec += 1;
+            first_record = false;
+        }
     }
 
     fn push_regions(&mut self, list: &[(f64, f64)]) -> (usize, usize) {
@@ -1032,15 +1094,86 @@ struct Statics {
     distance_type: i64,
     turn: i64,
     strategy: i64,
+    ground_type: i64,
+    track_id: i64,
+    popularity: f64,
+    ground_condition: Option<f64>,
+    weather: Option<f64>,
+    season: Option<f64>,
+    is_dirtgrade: bool,
 }
 
 impl Statics {
-    fn new(course: &Value, horse: &Value) -> Statics {
+    fn new(course: &Value, horse: &Value, root: &Value) -> Statics {
+        let track_id = course.get("raceTrackId").and_then(Value::as_i64).unwrap_or(0);
         Statics {
             distance_type: course.get("distanceType").and_then(Value::as_i64).unwrap_or(0),
             turn: course.get("turn").and_then(Value::as_i64).unwrap_or(0),
             strategy: strategy_code(horse.get("strategy").and_then(Value::as_str).unwrap_or("")),
+            ground_type: course.get("surface").and_then(Value::as_i64).unwrap_or(0),
+            track_id,
+            // v_popularity: HorseParameters.popularity, i32, missing means 0.
+            popularity: horse.get("popularity").and_then(Value::as_i64).unwrap_or(0) as i32 as f64,
+            ground_condition: enum_code(
+                root.get("groundCondition").and_then(Value::as_str),
+                ground_condition_code,
+            ),
+            weather: enum_code(root.get("weather").and_then(Value::as_str), weather_code),
+            season: enum_code(root.get("season").and_then(Value::as_str), season_code),
+            // is_dirtgrade_filter_eq: the request flag wins, else the fixed
+            // dirt-grade track set (activation_conditions.rs:470,735).
+            is_dirtgrade: match root.get("isDirtGrade") {
+                Some(v) => match v.as_bool() {
+                    Some(b) => b,
+                    None => is_dirtgrade_track(track_id),
+                },
+                None => is_dirtgrade_track(track_id),
+            },
         }
+    }
+}
+
+fn is_dirtgrade_track(track_id: i64) -> bool {
+    matches!(track_id, 10101 | 10103 | 10104 | 10105)
+}
+
+/// An enum-coded request string, folded once so a missing or unparsable value
+/// refuses the construct instead of guessing (the engine's own parse fails
+/// the race on the CPU side too).
+fn enum_code(text: Option<&str>, code: fn(&str) -> Option<i64>) -> Option<f64> {
+    code(text.unwrap_or("")).map(|c| c as f64)
+}
+
+/// The race_parameters.rs enum discriminants, parsed the uppercase-case-
+/// insensitive way the engine's parse_* helpers do.
+fn ground_condition_code(text: &str) -> Option<i64> {
+    match text.to_ascii_uppercase().as_str() {
+        "GOOD" => Some(1),
+        "YIELDING" => Some(2),
+        "SOFT" => Some(3),
+        "HEAVY" => Some(4),
+        _ => None,
+    }
+}
+
+fn weather_code(text: &str) -> Option<i64> {
+    match text.to_ascii_uppercase().as_str() {
+        "SUNNY" => Some(1),
+        "CLOUDY" => Some(2),
+        "RAINY" => Some(3),
+        "SNOWY" => Some(4),
+        _ => None,
+    }
+}
+
+fn season_code(text: &str) -> Option<i64> {
+    match text.to_ascii_uppercase().as_str() {
+        "SPRING" => Some(1),
+        "SUMMER" => Some(2),
+        "AUTUMN" => Some(3),
+        "WINTER" => Some(4),
+        "SAKURA" => Some(5),
+        _ => None,
     }
 }
 
@@ -1128,8 +1261,20 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
             arg: Some(dist_rate_threshold(t.arg, d)),
         }),
         "distance_type" if matches!(t.op, 0 | 1) => Ok(fold(s.distance_type as f64, t)),
+        "ground_condition" => match s.ground_condition {
+            Some(v) => Ok(fold(v, t)),
+            None => Err("'ground_condition' needs a parsable groundCondition".into()),
+        },
+        // value_filter fields: course or request constants, folded to True/False
+        // exactly like the engine's static filter emptying the region list.
+        "ground_type" => Ok(fold(s.ground_type as f64, t)),
         "hp_per" if matches!(t.op, 3 | 5) => Ok(dyn_leaf(FEAT_HP_PER, t)),
         "infront_near_lane_time" => Ok(dyn_leaf(FEAT_IFNEAR, t)),
+        // v75 retail observe: per-visit changed flag, see sk_feat_value.
+        "is_activate_any_skill" if t.op == 0 && t.arg == 1 => Ok(dyn_leaf(FEAT_ANYACT, t)),
+        "is_dirtgrade" if matches!(t.op, 0 | 1) => {
+            Ok(fold(if s.is_dirtgrade { 1.0 } else { 0.0 }, t))
+        }
         "is_finalcorner" => Ok(dyn_leaf(FEAT_FINALE, t)),
         "is_finalcorner_laterhalf" => Ok(dyn_leaf(FEAT_FC_HALF, t)),
         "is_last_straight" if t.op == 0 && t.arg == 1 => match g.straights.last() {
@@ -1148,15 +1293,38 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         "near_count" => Ok(dyn_leaf(FEAT_NEAR, t)),
         "order" => Ok(dyn_leaf(FEAT_ORDER, t)),
         "order_rate" => Ok(dyn_leaf(FEAT_ORDER_RATE, t)),
-        "order_rate_out50_continue" if t.op == 0 => Ok(dyn_leaf(FEAT_OUT50, t)),
+        name if name.starts_with("order_rate_out") && name.ends_with("_continue") => {
+            // order_out_filter (activation_conditions.rs:1608-1611): the rate
+            // in the name picks the band cell the retail check reads, and the
+            // filter only accepts ==1 of that cell's set state.
+            let rate = &name["order_rate_out".len()..name.len() - "_continue".len()];
+            match (rate.parse::<i64>(), t.op, t.arg) {
+                (Ok(r @ (20 | 40 | 50 | 70)), 0, 1) => Ok(Leaf::Dynamic {
+                    feat: FEAT_OUTBAND,
+                    cmp: 0,
+                    arg: Some(r as f64),
+                }),
+                _ => Err(format!("'{name}'{}{} is not ported", op_text(t.op), t.arg)),
+            }
+        }
         "phase" => Ok(dyn_leaf(FEAT_PHASE, t)),
+        "popularity" => Ok(fold(s.popularity, t)),
         "remain_distance" => Ok(dyn_leaf(FEAT_REMAIN, t)),
         "rotation" => Ok(fold(s.turn as f64, t)),
         "running_style" if t.op == 0 => {
             Ok(if style_matches(s.strategy, t.arg) { Leaf::True } else { Leaf::False })
         }
+        "season" => match s.season {
+            Some(v) => Ok(fold(v, t)),
+            None => Err("'season' needs a parsable season in the request".into()),
+        },
         "slope" => Ok(dyn_leaf(FEAT_SLOPE, t)),
         "temptation_count" if t.op == 0 => Ok(dyn_leaf(FEAT_TEMPT, t)),
+        "track_id" => Ok(fold(s.track_id as f64, t)),
+        "weather" => match s.weather {
+            Some(v) => Ok(fold(v, t)),
+            None => Err("'weather' needs a parsable weather in the request".into()),
+        },
         "all_corner_random" | "straight_random" | "down_slope_random"
         | "up_slope_random"
             if t.op == 0 && t.arg == 1 =>

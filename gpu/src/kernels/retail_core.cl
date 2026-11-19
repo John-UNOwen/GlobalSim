@@ -195,7 +195,7 @@
 #define SCR_HP_OUT (SCR_HP_IN + 24 * IIU)        // 24 * 180, ob 172 then olb
 #define SCR_STATE (SCR_HP_OUT + 24 * 180)
 // Integer state, one 24-wide column per slot (field base + runner index).
-#define SI_SLOTS 68
+#define SI_SLOTS 72
 #define SI_STRIDE (SI_SLOTS * 24)
 #define SI_SLOT(n) ((n) * 24)
 #define SI_STRATEGY SI_SLOT(0)
@@ -266,6 +266,10 @@
 #define SI_ACT1 SI_SLOT(65)        // activate_count[1], bumped at fire
 #define SI_BND50 SI_SLOT(66)       // out-50 order band cell: 0 None, 1 timer, 2 NaN
 #define SI_L_MOVED SI_SLOT(67)     // moved_lane_this_tick from the previous tick
+#define SI_BND20 SI_SLOT(68)       // out-20 order band cell, same encoding
+#define SI_BND40 SI_SLOT(69)       // out-40 order band cell, same encoding
+#define SI_BND70 SI_SLOT(70)       // out-70 order band cell, same encoding
+#define SI_ACTALL SI_SLOT(71)      // cumulative activations, the v75 anyskill count
 #define CP_UNSUPPORTED 1u
 #define CP_CUTOFF 2u
 #define CP_WASBLK 4u
@@ -2387,19 +2391,25 @@ static void field_update(__global uint* scr, __global uint* si,
         order[m] = (uint)i;
     }
     // Order-band "continue" tracking runs on the previous rank pass, before
-    // the new rank publishes. Only the out-50 cell feeds a ported condition.
-    const double band_thr = round(0.5 * (double)n);
+    // the new rank publishes. The rate in the filter's name picks the cell,
+    // and track_order_bands updates all four out cells every tick.
+    const double band_thr[4] = {round(0.2 * (double)n), round(0.4 * (double)n),
+        round(0.5 * (double)n), round(0.7 * (double)n)};
+    const int band_col[4] = {SI_BND20, SI_BND40, SI_BND50, SI_BND70};
     for (int r = 0; r < n; r++) {
         if (sd[SD_CLOCK + r] < 5.0) {
             continue;
         }
-        const uint cell = si[SI_BND50 + r];
-        const int in_band = (double)(int)rs[RS_PREVRANK + r] >= band_thr;
-        if (cell == 2u) {
-        } else if (!in_band) {
-            si[SI_BND50 + r] = 2u;
-        } else if (cell == 0u) {
-            si[SI_BND50 + r] = 1u;
+        const double prev_rank = (double)(int)rs[RS_PREVRANK + r];
+        for (int b = 0; b < 4; b++) {
+            const uint cell = si[band_col[b] + r];
+            const int in_band = prev_rank >= band_thr[b];
+            if (cell == 2u) {
+            } else if (!in_band) {
+                si[band_col[b] + r] = 2u;
+            } else if (cell == 0u) {
+                si[band_col[b] + r] = 1u;
+            }
         }
     }
     for (int r = 0; r < n; r++) si[SI_RANKCOL + (int)order[r]] = (uint)(r + 1);
@@ -2899,7 +2909,10 @@ static float sk_tok_value(__global const uint* sk, const uint tok, const int kin
 #define SK_NAN ((double)as_float(0x7fc00000u))
 
 // The scan gate's live predicate values, one FEAT_* code per dynamic leaf.
-static double sk_feat_value(const uint code, __global const uint* si,
+// `arg` is the comparison argument word so FEAT_OUTBAND can pick its band
+// cell, and `wd` gives FEAT_ANYACT the record's observe_anyskill state.
+static double sk_feat_value(const uint code, const double arg,
+    __global const double* wd, __global const uint* si,
     __global const double* shl, __global const double* sd, __global const double* pd,
     __global const float* sf, __global const uint* rs, const int r, const int n,
     const double distance) {
@@ -2953,8 +2966,17 @@ static double sk_feat_value(const uint code, __global const uint* si,
         return floor(sd[SD_BHNEAR1 + r]);
     case FEAT_ORDER_DELTA:
         return (double)((int)si[SI_RANKCOL + r] - (int)rs[RS_PREVRANK + r]);
-    case FEAT_OUT50:
-        return (double)(int)si[SI_BND50 + r];
+    case FEAT_OUTBAND: {
+        // The engine's order check is the band cell being set and not NaN,
+        // and the out filter only accepts ==1 of that boolean.
+        const int rate = (int)arg;
+        const uint cell = rate == 20 ? si[SI_BND20 + r]
+            : rate == 40 ? si[SI_BND40 + r]
+            : rate == 70 ? si[SI_BND70 + r] : si[SI_BND50 + r];
+        return cell == 1u ? 1.0 : 0.0;
+    }
+    case FEAT_ANYACT:
+        return wd[SKD_ANY_RESULT];
     case FEAT_NEAR: {
         const double pos = sd[SD_POS + r];
         const double lane = sd[SD_LANE + r];
@@ -3004,8 +3026,13 @@ static int sk_feat_cmp(const uint code, const double v, const double arg, const 
         return 0;
     }
     double b = arg;
-    if ((code >> 3) == FEAT_ORDER_RATE) {
+    const uint feat = code >> 3;
+    if (feat == FEAT_ORDER_RATE) {
         b = round((double)n * (arg / 100.0));
+    } else if (feat == FEAT_OUTBAND) {
+        // The argument word carries the band rate; the engine's filter only
+        // accepts the ==1 form of its boolean.
+        b = 1.0;
     }
     switch (code & 7u) {
     case 0u: return v == b;
@@ -3021,9 +3048,9 @@ static int sk_feat_cmp(const uint code, const double v, const double arg, const 
 // the scan gate. Programs hold AND markers only; the '@' structure lives in
 // the arms table, so sk_eval_arms folds the membership and program results.
 static int sk_eval(__global const uint* sk, const int prog_base, const int prog_len,
-    __global const uint* si, __global const double* shl, __global const double* sd,
-    __global const double* pd, __global const float* sf, __global const uint* rs,
-    const int r, const int n, const double distance) {
+    __global const double* wd, __global const uint* si, __global const double* shl,
+    __global const double* sd, __global const double* pd, __global const float* sf,
+    __global const uint* rs, const int r, const int n, const double distance) {
     int top = 0;
     char stack[64];
     for (int i = 0; i < prog_len; i++) {
@@ -3035,9 +3062,10 @@ static int sk_eval(__global const uint* sk, const int prog_base, const int prog_
         } else if (op == OP_TRUE) {
             stack[top++] = (char)(nd[1] != 0u);
         } else {
-            const double v = sk_feat_value(nd[1], si, shl, sd, pd, sf, rs, r, n, distance);
-            stack[top++] = (char)sk_feat_cmp(nd[1], v,
-                as_double((ulong)nd[2] | ((ulong)nd[3] << 32)), n);
+            const double arg = as_double((ulong)nd[2] | ((ulong)nd[3] << 32));
+            const double v = sk_feat_value(nd[1], arg, wd, si, shl, sd, pd, sf, rs, r, n,
+                distance);
+            stack[top++] = (char)sk_feat_cmp(nd[1], v, arg, n);
         }
     }
     return top > 0 && stack[top - 1];
@@ -3078,7 +3106,8 @@ static int sk_eval_arms(__global const uint* sk, __global const uint* rd,
         if (!sk_win_any(wd, SKD_ARMS + 2 * SK_WINMAX * a, nwin, pos)) {
             continue;
         }
-        if (sk_eval(sk, (int)ar[1], (int)ar[0], si, shl, sd, pd, sf, rs, r, n, distance)) {
+        if (sk_eval(sk, (int)ar[1], (int)ar[0], wd, si, shl, sd, pd, sf, rs, r, n,
+            distance)) {
             return 1;
         }
     }
@@ -3089,9 +3118,9 @@ static int sk_eval_arms(__global const uint* sk, __global const uint* rd,
 // list plus the precondition program, latched once true for the record's
 // lifetime, exactly like the engine's per-tick watch loop.
 static int sk_prereq_check(__global const uint* sk, __global const uint* rd,
-    __global const uint* si, __global const double* shl, __global const double* sd,
-    __global const double* pd, __global const float* sf, __global const uint* rs,
-    const int r, const int n, const double distance) {
+    __global const double* wd, __global const uint* si, __global const double* shl,
+    __global const double* sd, __global const double* pd, __global const float* sf,
+    __global const uint* rs, const int r, const int n, const double distance) {
     const double pos = sd[SD_POS + r];
     const int npre = (int)rd[22];
     const __global uint* rg = sk + SK_REGIONS + SK_GSTRIDE * (int)rd[23];
@@ -3107,7 +3136,8 @@ static int sk_prereq_check(__global const uint* sk, __global const uint* rd,
     if (!member) {
         return 0;
     }
-    return sk_eval(sk, (int)rd[25], (int)rd[24], si, shl, sd, pd, sf, rs, r, n, distance);
+    return sk_eval(sk, (int)rd[25], (int)rd[24], wd, si, shl, sd, pd, sf, rs, r, n,
+        distance);
 }
 
 // SkillEffect::duration_coefficient: the leader-gap ramp, the HP tiers, or
@@ -3294,6 +3324,9 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
     const double cd = as_double((ulong)rd[13] | ((ulong)rd[14] << 32));
     sks[SKR_STRIDE * rec + SKR_STATE] =
         (uint)(cd <= 0.0 ? SK_S_DEAD : SK_S_WAITING);
+    // v75 anyskill count: every own activation counts, and the engine's
+    // excluded skill ids are the non-numeric legacy ones, never a record.
+    si[SI_ACTALL + r] += 1u;
 }
 
 // process_skill_priority for one priority pass: the whole field in roster
@@ -3319,7 +3352,8 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
             continue;
         }
         const int r = (int)rd[1];
-        if (sk_prereq_check(sk, rd, si, shl, sd, pd, sf, rs, r, n, distance)) {
+        if (sk_prereq_check(sk, rd, skd + SKD_STRIDE * rec, si, shl, sd, pd, sf, rs, r,
+            n, distance)) {
             sks[SKR_STRIDE * rec + SKR_LATCH] = 1u;
         }
     }
@@ -3335,6 +3369,28 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
                 continue;
             }
             __global double* wd = skd + SKD_STRIDE * rec;
+            if (rd[2] & SK_FLAG_ANYACT) {
+                // observe_anyskill runs on every visit before the gate: the
+                // engine reads the activation count whenever the record is
+                // checkable, and a visit that is not checkable leaves the
+                // (last, trues) state untouched and reports false.
+                const int ready = state == (uint)SK_S_READY
+                    || (state == (uint)SK_S_COOLDOWN && wd[SKD_COOLDOWN] >= 0.0);
+                const int checkable =
+                    ready && (rd[22] == 0u || sks[SKR_STRIDE * rec + SKR_LATCH] != 0u);
+                if (!checkable) {
+                    wd[SKD_ANY_RESULT] = 0.0;
+                } else {
+                    const double value =
+                        (double)(int)si[SI_ACTALL + r] - wd[SKD_ANY_TRUES];
+                    const int changed = value > wd[SKD_ANY_LAST];
+                    wd[SKD_ANY_LAST] = value;
+                    if (changed) {
+                        wd[SKD_ANY_TRUES] += 1.0;
+                    }
+                    wd[SKD_ANY_RESULT] = (double)changed;
+                }
+            }
             if (pos >= wd[SKD_TRIG1]) {
                 if (!(rd[2] & SK_FLAG_RETAIN)) {
                     sks[SKR_STRIDE * rec + SKR_STATE] = (uint)SK_S_DEAD;

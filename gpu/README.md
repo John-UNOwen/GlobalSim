@@ -56,6 +56,8 @@ Suites:
 | `zero_skill_gate` (gpu + initialization + geometry + race) | See "Zero-skill mixed-style fields" below |
 | `skills_gate` (gpu + initialization + geometry + race) | See "Skills port" below |
 | `app_preset_gate` (gpu + initialization + geometry + race) | Real app mob-preset jobs: zero-fallback compile gate and frame identity both green (see "App mob-preset payloads") |
+| `wave1_folds` | Compile-time gates for the request-static condition folds and the multi-alternative rules, both fold directions plus the still-refused names (see "Wave-1 fallback-histogram constructs") |
+| `wave1_gate` (gpu + initialization + geometry + race) | The six Phase A chart variant jobs, course 10504 seeds 1..3: zero fallback and frame identity, plus a v77-roster race firing the any-skill, shadowed-alternative, wisdom-carrier and out-band constructs bit-exact (see "Wave-1 fallback-histogram constructs") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 
 ### What the gate proves
@@ -593,7 +595,7 @@ the engine and the kernel.
 
 Skills ride the same race kernel, and the kernel does not change with the
 skill set. The host compiles every skill of a race into one flat numeric table
-(`src/skills_compile.rs`, `uint[4480]` per race) and the kernel interprets it:
+(`src/skills_compile.rs`, `uint[34112]` per race) and the kernel interprets it:
 init pass in `src/kernels/skills.cl` (trigger samplers, wisdom lottery, region
 intersection) inside `im_init` before the existing rushing and section draws,
 runtime in `src/kernels/retail_core.cl` (timer step and cooldown start, then
@@ -602,10 +604,11 @@ condition-support matrix, and the unsupported-construct rule are in
 `SKILLS_DESIGN.md`.
 
 The per-tick order mirrors `step_all_retail`: `skills_advance` (timers, expiry,
-cooldown start), `skills_scan` x2 (the fire gate: trigger and window check over
-the record's final window list, cooldown readiness, then the program over the
-six dynamic leaves), `sk_columns` (fold the receiver lists into the live
-columns), and only then the blocking sample that feeds duel and field. The
+cooldown start), `skills_scan` x2 (per-record any-skill observe at the visit
+top, then the fire gate: trigger and window check over the record's final
+window list, precondition latch, cooldown readiness, then the per-arm
+programs), `sk_columns` (fold the receiver lists into the live columns), and
+only then the blocking sample that feeds duel and field. The
 modifiers land in the engine's `AdditiveReceiver` folds at the exact physics
 application points (target chain, accel chain, current speed), so the tick
 chain from "Race loop port" is unchanged.
@@ -662,6 +665,50 @@ seeds 1..3) against the CPU engine.
   natural-deceleration current speed (effect type 22) leaves when it expires,
   which fixes a runner snapping to its lower target instead of decaying to it.
   Both are written up in `SKILLS_DESIGN.md`.
+
+### Wave-1 fallback-histogram constructs
+
+The measured fallback histogram of the app's chart runs named six refusing
+constructs on course 10504 (Phase A: 288 fallbacks, 6 reasons x 48 runs) and
+920011's multi-alternative shape again in the wider sweep (Phase B: 390). All
+six are ported, so both phases' counted fallbacks now compile:
+
+- request-static value_filter fields, folded at compile time like
+  `distance_type`: `ground_type`, `track_id`, `rotation` (course constants),
+  `ground_condition`, `weather`, `season` (request enums), `is_dirtgrade`
+  (request flag, else the engine's dirt-grade track-id list), `popularity`
+  and `running_style` (horse). `lane_type` stays refused: it reads live lane
+  state, not the request.
+- `order_rate_out20/40/50/70_continue`: four order-band cells per runner in
+  race scratch, updated each tick from the previous-tick rank once the clock
+  passes 5 with the engine's permanent false latch. The rate in the name
+  picks the cell and rides in the comparison argument. Only `==1` passes.
+  The in-band cells (`order_rate_in*_continue`) stay refused, the engine
+  never inserts them.
+- `is_activate_any_skill`: the v75 retail observe model, a per-runner
+  cumulative activation counter read through a per-record changed flag
+  evaluated at every scan visit (see `SKILLS_DESIGN.md`).
+- multi-alternative skills: one record per alternative, folded-empty
+  alternatives kept as draw-only dead carriers, one wisdom roll per runner
+  and skill id inherited by the followers, shadowed alternatives (same
+  condition and precondition signature, no sampled term) dropped with only
+  their start-delay factor folded. A second live alternative that is not
+  shadowed stays refused by skill id.
+
+Gates: `gpu/testdata/wave1_variant_jobs.json` holds the six exact Phase A
+variant requests (9-horse chart jobs, course 10504, player skill swap).
+`wave1_gate` runs them over seeds 1..3 (18 races) with zero fallback plus
+frame-for-frame `to_bits()` identity against the CPU engine, and runs a
+v77-roster race where synthetic defs built from 200361's real alternative
+fire the any-skill, shadowed-pair, dead-wisdom-carrier and out-band
+constructs (the chart jobs' late-race gates never fire the real golds, 0/200
+seeds measured, so the exercise race proves the paths are not vacuous).
+`wave1_folds` compiles single synthetic skills and reads the record flags
+back: every static fold in both directions (live record for true, DEAD-flag
+record for false), the dynamic leaves kept live, the refused names still
+named (`lane_type`, `order_rate_out60/continue>=2`, `order_rate_in50`,
+`is_dirtgrade>=`, `is_activate_any_skill==2`, precondition anyskill), and the
+multi-alternative collapse counts.
 
 ### Cost
 
@@ -839,10 +886,14 @@ entry only through the finalizer, one the fire already covers.
 Engine behavior the race loop port does not reach, each needing its own port
 and gate:
 
-- Skills outside the ported subset: the stateful time machines, activation
-  counters, roster reads beyond rank and rank rate, effects outside 27/31/21,
-  and the other constructs named in the `SKILLS_DESIGN.md` matrix. Each flags
-  its race with the construct named
+- Skills outside the ported subset: live lane state (`lane_type`,
+  `is_move_lane`), the remaining stateful time machines and activation
+  history (`is_used_skill_id`, `is_activate_*` beyond any-skill,
+  `near_infront_count`, `compete_fight_count`, `overtake_target*`,
+  `visiblehorse`), the in-band order cells, roster reads beyond rank, rank
+  rate and the bashin gaps, effects outside 1, 9, 10, 21, 22, 27, 28 and 31,
+  and the other constructs named in the `SKILLS_DESIGN.md` matrix. Each
+  flags its race with the construct named
 - The experimental startup pass (flagged, gated)
 - Grid mode (`experimentalGrid`): not ported, host-gated. The engine enables
   it whenever the key is present (21 to 120 horses), so `prepare` flags any

@@ -666,6 +666,10 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         si[SI_ACT1 + r] = 0u;
         si[SI_BND50 + r] = 0u;
         si[SI_L_MOVED + r] = 0u;
+        si[SI_BND20 + r] = 0u;
+        si[SI_BND40 + r] = 0u;
+        si[SI_BND70 + r] = 0u;
+        si[SI_ACTALL + r] = 0u;
         sf[SF_AS_VALUE + r] = 0.f;
         sf[SF_CP_GELAP + r] = 0.f;
         sf[SF_CP_GTHRESH + r] = 0.f;

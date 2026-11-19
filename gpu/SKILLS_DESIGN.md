@@ -46,7 +46,7 @@ bit-exact in solo mode. Paired mode takes the same draws from keyed substreams.
 One `uint[SK_STRIDE]` block per race, kernel argument `sk`. Every f64 payload
 occupies two words (low, high) via bit cast, every f32 payload one word.
 
-Header words 0 to 7: `nrec, nprog, nreg, neff, ntag, nstr, ncor, nslope`.
+Header words 0 to 8: `nrec, nprog, nreg, neff, ntag, nstr, ncor, nslope, nterm`.
 
 Sections (word offsets inside the block):
 
@@ -54,29 +54,46 @@ Sections (word offsets inside the block):
 |---|---|---|---|---|
 | straights | 16 | 2 | 12 | f64 start, end (course JSON, sorted) |
 | corners | 40 | 2 | 12 | f64 start, start+length |
-| slopes | 64 | 2 | 16 | f32 start, f32 length (sign carries up or down) |
-| records | 112 | 20 | 32 | see below |
-| effects | 752 | 10 | 48 | see below |
-| programs | 1232 | 4 | 320 | see below |
-| regions | 2512 | 4 | 256 | f64 start, end ([start,end), compiler statics) |
-| tags | 3536 | 1 | 512 | tag bytes for substream hashing |
-| terms | 4048 | 8 | 48 | see below |
+| slopes | 64 | 3 | 16 | f32 start, f32 end, f32 value |
+| records | 112 | 26 | 160 | see below |
+| effects | 4272 | 10 | 192 | see below |
+| programs | 6192 | 4 | 3072 | see below |
+| arms | 18480 | 8 | 256 | see below |
+| regions | 20528 | 4 | 2048 | f64 start, end ([start,end), compiler statics) |
+| terms | 28720 | 8 | 160 | see below |
+| tags | 30000 | 1 | 4096 | tag bytes for substream hashing |
 
-Record (20 words): `skill_id, runner, flags, priority, rarity, n_eff,
-eff_base, prog_len, prog_base, sampled, term_base, n_static_a, reg_base_a,
-cd_lo, cd_hi, wis_off, wis_len, delay_mult, n_static_b, reg_base_b`. The two
-static lists hold the engine's two region-fold stages: list A before the
-sampled intersection, list B after it. `flags`: bit0 retain-for-random
-(detail 0 and rarity White, Gold or Evolution), bit1 wisdom check (at init a
-failed roll marks the record always-false when retained and drops it
-otherwise), bit2 carries a sampled term, bit3 always-false (the condition
-folded false: the record stays in the table and the kernel skips it). The
-compiler resolves the level before the kernel runs: the effect stores the
+Record (26 words): `skill_id, runner, flags, priority, rarity, n_eff,
+eff_base, arm0_prog_len, arm0_prog_base, sampled, term_index, arm0_pre_n,
+arm0_pre_base, cd_lo/hi (f64), wis_off, wis_len, delay_bits, arm0_post_n,
+arm0_post_base, n_arms, arms_base, pre_n, pre_reg_base, pre_prog_len,
+pre_prog_base`. The arm-0 fields mirror the first arm entry (see arms below)
+for the scan's fast path. `pre_*` hold the alternative's precondition: a
+region list the gate's `sk_prereq_check` reads (its verdict latches into the
+record scratch after the first passing check, mirroring the engine's once
+satisfied) and a program evaluated before the condition. `flags`: bit0
+retain-for-random (detail 0 and rarity White, Gold or Evolution), bit1
+wisdom roll leader (at init a failed roll marks the record always-false when
+retained and drops it otherwise, and the skill's other records inherit the
+verdict), bit2 carries a sampled term, bit3 always-false (the condition
+folded false: the record stays in the table, spends its sampled draw and the
+kernel skips the gate), bit4 any-skill observe (see the matrix), bit5 wisdom
+follower. `delay_bits` is the f32 start-delay multiplier, the folded product
+over the skill's enabled always-conditioned delay effects. The compiler
+resolves the level before the kernel runs: the effect stores the
 level-resolved modifier `retail_skill_value(raw, multiplier)` and
 `baseDuration * 0.0001`, so the kernel does no table work.
 
 Effect (10 words): `effect_type, target(1 only), value_usage, duration_usage,
 0, 0, modifier_lo/hi (f64), base_duration_lo/hi (f64)`.
+
+Arm (8 words): `prog_len, prog_base, pre_n, pre_base, post_n, post_base,
+sampled_flag, term_index`. A top-level `@` in the condition splits it into
+arms, at most two: the gate passes when the position is in one arm's post
+windows and that arm's program holds (the Or closure the engine's apply
+builds). `pre_*` is the arm's window list before the sampled term's
+intersection, `post_*` after it. `sampled_flag` bit0 marks the arm carrying
+the sampled term, bit1 an arm whose region chain collapsed (draw-only).
 
 Program node (4 words): `op, a, b_lo, b_hi`, evaluated postfix on a 64-entry
 boolean stack. Opcodes: 0 TRUE (`a` is the value), 1 AND, 2 OR, 4 FEAT_I. The
@@ -87,14 +104,16 @@ instead of emitting a node. FEAT_I packs `a = feat * 8 + cmp` with the
 comparison in engine token order (0 `==`, 1 `!=`, 2 `<`, 3 `<=`, 4 `>`, 5
 `>=`), and `b` is the f64 argument.
 
-Term (8 words): `kind, arg, tag_off, tag_len, 0, 0, 0, 0`. `kind` is the
-sampler id (0 all_corner_random, 1 straight_random, 2 down_slope_random,
-3 up_slope_random). The sampler runs at init on the shared stream (solo) or a
-keyed substream (paired, tag `T{sid}:{alt}:{col}:{name}`) and produces the
-sampled windows. The init kernel intersects them with the record's static
-region list in engine `rmap_*` order and writes the final windows, trigger and
-single flag into scratch. The runtime checks a sampled record the same way as
-any other: the window gate reads the final windows.
+Term (8 words): `kind, arg, tag_off, tag_len, corner_idx, 0, 0, 0`. `kind` is
+the sampler id (0 all_corner_random, 1 straight_random, 2 down_slope_random,
+3 up_slope_random, 4 phase_random, 5 phase_firsthalf_random,
+6 phase_laterhalf_random, 7 is_finalcorner_random), and `corner_idx` selects
+the qualifying final corner for id 7. The sampler runs at init on the shared
+stream (solo) or a keyed substream (paired, tag `T{sid}:{alt}:condition:{name}`)
+and produces the sampled windows. The init kernel intersects them with the
+record's static region list in engine `rmap_*` order and writes the final
+windows, trigger and single flag into scratch. The runtime checks a sampled
+record the same way as any other: the window gate reads the final windows.
 
 ## Evaluation model (interpreter)
 
@@ -204,33 +223,85 @@ Ported means `classify` lowers the name to a static fold or a dynamic leaf.
 Any name the match does not handle, or a registered name with an unregistered
 comparison, flags the race with the offending construct named.
 
-The compiler lowers each condition term to a `Leaf`. Most leaves are static:
-they fold to TRUE/FALSE or to a window list the init kernel intersects, so the
-program carries only the six dynamic leaves (`order`, `order_rate`, `hp_per`,
-`is_overtake`, `is_temptation`, and the last-straight entry latch). A
-condition whose comparison is not registered for its operator falls to the
-`classify` catch-all and flags the race.
+The compiler lowers each condition term to a `Leaf`. Fold leaves resolve at
+compile time (TRUE, FALSE, or a window list the init kernel intersects), so
+the program carries only the dynamic leaves: `phase`, `distance_rate`,
+`remain_distance`, `corner`, `slope`, `is_finalcorner`,
+`is_finalcorner_laterhalf`, `accumulatetime`, `order`, `order_rate`,
+`change_order_onetime`, `hp_per`, `is_overtake`, `is_temptation`,
+`temptation_count`, `near_count`, `infront_near_lane_time`,
+`behind_near_lane_time`, `behind_near_lane_time_set1`,
+`blocked_side_continuetime`, `bashin_diff_behind`, `bashin_diff_infront`,
+`activate_count_start`, `activate_count_middle`, `is_lastspurt`,
+`is_last_straight_onetime` (entry latch), the out-band cells
+(`order_rate_out*_continue`) and `is_activate_any_skill`. A condition whose
+comparison is not registered for its name falls to the `classify` catch-all
+and flags the race.
+
+Fold columns: `six` is `==,!=,<,<=,>,>=`, the engine's six value_filter
+comparators (`activation_conditions.rs:229-243`).
 
 | name | fold |
 |---|---|
-| always | TRUE/FALSE (`always==1` true, any other comparison false) |
-| phase | static window `[phase_start, phase_end)`, +10 m end for the fudge list, `==,<,<=,>,>=` |
-| distance_rate | static window from `distance*arg/100`, `<=,>=` |
-| remain_distance | static window from `distance-arg`, `==,<=,>=` |
-| furlong | static window `[(arg-1)*201.168, arg*201.168)`, `==` |
-| is_finalcorner | static window split at the last corner start, `==0`/`==1` |
-| is_last_straight | static window over the last straight, course must have straights, `==1` |
+| always | TRUE |
+| phase | dynamic FEAT_PHASE |
+| distance_rate | dynamic FEAT_DIST_RATE, `arg` rescaled by `distance*rate/100` |
+| remain_distance | dynamic FEAT_REMAIN |
+| is_finalcorner | dynamic FEAT_FINALE |
+| is_finalcorner_laterhalf | dynamic FEAT_FC_HALF, the last-corner second half |
+| is_last_straight | static window over the last straight, `==1` |
 | is_last_straight_onetime | static window `[ls.start, ls.start+10)` plus the dynamic FEAT_LS_ENTRY entry latch, `==1` |
-| corner | static windows over the sorted corner list: `!=0` the corner runs, `==0` the complement gaps, `==num` every 4th corner from index `len+num-5` |
-| slope | static windows over the sorted slope list: `==0` the gaps, `==1` up slopes, `==2` down slopes |
+| is_lastspurt | static window over phase 3 plus the dynamic FEAT_LASTSPURT, `==1` |
+| corner | dynamic FEAT_CORNER, corner id at the position |
+| slope | dynamic FEAT_SLOPE, 0 gap, 1 up, 2 down |
 | order | dynamic FEAT_ORDER, 1-based rank |
 | order_rate | dynamic FEAT_ORDER_RATE, rank versus `round(n*rate/100)` |
+| order_rate_out20/40/50/70_continue | dynamic FEAT_OUTBAND, `==1` only, the rate in the name picks the band cell and rides in the comparison argument |
+| is_activate_any_skill | dynamic FEAT_ANYACT, `==1` only, the v75 observe flag (see below) |
+| accumulatetime | dynamic FEAT_CLOCK, the gated race clock |
+| activate_count_start, activate_count_middle | dynamic, `>=` only |
+| change_order_onetime | dynamic FEAT_ORDER_DELTA, rank change over the last tick |
 | hp_per | dynamic FEAT_HP_PER, `trunc(f64(f32(hp)/f32(max))*100)`, `<=,>=` only |
 | is_overtake | dynamic FEAT_IS_OVERTAKE, lane target list non-empty |
 | is_temptation | dynamic FEAT_IS_TEMPTATION, kakari flag, `==` only |
+| temptation_count | dynamic FEAT_TEMPT, the temptation accumulator, `==` only |
+| near_count | dynamic FEAT_NEAR |
+| infront_near_lane_time | dynamic FEAT_IFNEAR |
+| behind_near_lane_time, behind_near_lane_time_set1 | dynamic FEAT_BHNEAR, FEAT_BHNEAR1 |
+| blocked_side_continuetime | dynamic FEAT_BSIDE |
+| bashin_diff_behind, bashin_diff_infront | dynamic neighbour gaps |
+| distance_type | course `distanceType`, six |
+| ground_type | course `surface`, six |
+| track_id | course `raceTrackId`, six |
+| rotation | course `turn`, six |
+| ground_condition | request `groundCondition` enum (`Good=1..Heavy=4`), six, refuses a request without a parsable value |
+| weather | request `weather` enum (`Sunny=1..Snowy=4`), six, refuses a request without a parsable value |
+| season | request `season` enum (`Spring=1..Sakura=5`), six, refuses a request without a parsable value |
+| is_dirtgrade | request `isDirtGrade` flag when present, else `track_id` in `DIRT_GRADE_TRACK_IDS` (`[10101,10103,10104,10105]`), `==,!=` only (`activation_conditions.rs:1572,734-742`) |
+| popularity | horse `popularity` (default 0), six |
+| running_style | horse strategy group, `==` only |
 | all_corner_random, straight_random, down_slope_random, up_slope_random | sampled term (`==1`), init-time windows through the scan gate |
 | phase_random, phase_firsthalf_random, phase_laterhalf_random | sampled term (`==0..4` phase index), window from the six-way phase split |
 | is_finalcorner_random | sampled term, window over the qualifying final corner (an id >= 4 starting within the last 1000 m), else no draw and the record stays inert |
+
+The out-band cells live in race scratch (`SI_BND20/40/50/70` per runner),
+updated every tick in `field_update` from the previous-tick rank once the
+clock passes 5, one cell per rate: unset becomes set while the rank stays at
+or over `round(rate*n)`, and a tick below the threshold latches the cell
+false forever (the engine's NaN latch, `race_field.rs:417-448`). The kernel
+check mirrors the retail one: cell set means true, and only `==1` passes
+(`order_out_filter`, `activation_conditions.rs:1562`).
+
+`is_activate_any_skill` models the engine's filter
+(`activation_conditions.rs:663-703`) and its `observe_anyskill`
+(`race_solver.rs:1883-1899`). The runner carries one cumulative activation
+counter (`SI_ACTALL`), bumped by every skill fire. A record flagged
+`SK_FLAG_ANYACT` observes it at the top of every scan visit, before the
+removal and gate passes, exactly where the engine observes: when the record
+is checkable (cooldown ready, precondition satisfied), the value is the
+count minus the activations already counted, true on a visit that saw the
+count rise. A non-checkable visit reports false without touching the
+per-record state. The per-record slots are `SKD_ANY_LAST/TRUES/RESULT`.
 
 One sampled term per record is required. A second random term in one condition flags
 the race (`skill {sid} has more than one random term`), and a random name outside the
@@ -238,49 +309,62 @@ eight samplers above refuses by name.
 
 Not yet ported (fallback-flagged, plan order in the README):
 
-- stateful time machines: `accumulatetime`, `behind_time`, `near_time`,
-  `infront_time`, `blocked_*`, `temptation_count`, `compete_fight_count`,
-  `overtake_target*`, `near_count`, `near_infront_count`,
-  `infront_near_lane_time`, `change_order_*`, `visiblehorse`, `lane_type`,
-  `is_move_lane`, `lastspurt`
-- activation counters and history: `activate_count*`, `is_used_skill_id`,
-  `is_activate_*`
-- `distance_rate_after_random` (random-term state),
-  `order_rate_in*_continue` and `order_rate_out*_continue` (the retail band
-  cells need their update point verified)
-- roster reads beyond rank and rank rate: `same_style_rate`, `bashin_diff_*`,
-  `distance_diff*` (the ahead and behind neighbour gaps are the next step)
-- `base_*` (base stat reads), `motivation`
-- conditions the `classify` match does not name, so they hit the catch-all and
-  flag the race: `is_finalcorner_laterhalf`, the static context values
-  (`course_distance`, `distance_type`, `ground_condition`, `ground_type`,
-  `grade`, `is_dirtgrade`, `track_id`, `weather`, `season`, `time`,
-  `running_style`, `post_number`), and the remaining sampled family
-  (`corner_random`, `last_straight_random`,
-  `phase_straight_random`, `random_lot`)
+- live lane state: `lane_type` (reads `s.lane`, not a request constant),
+  `is_move_lane`
+- stateful machines beyond the set above: `behind_time`, `near_time`,
+  `infront_time`, `blocked_*` beyond `blocked_side_continuetime`,
+  `near_infront_count`,
+  `compete_fight_count`, `overtake_target*`, `visiblehorse`,
+  `change_order_*` beyond `change_order_onetime`
+- `is_used_skill_id`, `is_activate_*` beyond `is_activate_any_skill`
+  (each registers its own skill-id argument)
+- precondition `is_activate_any_skill`: the engine drops precondition nodes
+  before the observe map is built (`race_solver.rs:551`), so the flag never
+  becomes readable and the compiler refuses it by name
+- in-band cells: `order_rate_in*_continue` (never inserted into the retail
+  `order_band` map, so the engine's filter always errors)
+- `distance_rate_after_random` (random-term state)
+- roster reads beyond rank, rank rate and the two bashin gaps:
+  `same_style_rate`, `distance_diff*`
+- `base_*` (base stat reads), `motivation`, `grade`, `time`, `post_number`,
+  `course_distance`, `furlong`
 - effects outside the accepted set 1, 9, 10, 21, 22, 27, 28 and 31
   (`skills_compile.rs` refuses the rest by kind): `13` ExtendKakari, `35`, `11`,
   `12` lane goals, `32` AllStatusUp, `36` and `37` random skill activation
-- structural: multi-alternative skills (`alternatives` longer than 1), a
-  non-empty `precondition`, `value_usage` in {0,8,9,11,14} (rng draws and
-  green-tag counts), `duration_usage` 4 (the delayed running-instance path),
+- structural: two live alternatives whose condition or precondition differs
+  (refused as `skill {sid} has other than one alternative`, see below),
+  `value_usage` in {0,8,9,11,14} (rng draws and green-tag counts),
+  `duration_usage` 4 (the delayed running-instance path),
   `target` not 1 (application to other runners), `additional_activate` not 0,
   a repeated effect kind on one alternative (only one duration per kind),
   rarity outside 1..6 (3, 4 and 5 all fold to 3), priority outside {0,1}, debuff
   immunity, the legacy non-retail wisdom path, `isGeneralSkill` gates
 
+Multi-alternative skills compile one record per alternative. An alternative
+whose region chain folds empty (a false precondition or condition) stays as a
+draw-only dead record: the engine samples every alternative's random terms and
+rolls wisdom once per runner and skill id, so the first emitted record of the
+skill carries the roll (`SK_FLAG_WISDOM`) and the rest inherit it
+(`SK_FLAG_WISDOM_FOLLOW`). A later live alternative with the same condition
+text, a matching precondition signature and no sampled term is shadowed by
+the first live one (shared cooldown key, scanned first, identical gate), gets
+no record, and only its start-delay factor folds into the first record's
+multiplier. Any other second live alternative is refused by name.
+`accumulatetime`-style precondition terms lower to a precondition program and
+region list the gate checks before the condition, mirroring the engine's
+`pre_condition` pass.
+
 Rule: an unsupported construct is refused by the compiler before upload, the
 host flags the whole race for CPU fallback, and the flag reason names the
-construct (for example `'blocked_time' is not ported`, or `skill 200333 effect
+construct (for example `'lane_type' is not ported`, or `skill 200333 effect
 duration_usage 4 (delayed running instance) is not ported`). The kernel never
 sees a table it cannot run.
 
 ## Bounds (enforced host-side before launch)
 
-`nrec<=32`, `neff<=48`, `nprog<=320`, `ntag<=512`, `nstr<=12`, `ncor<=12`,
-`nslope<=16`, at most 256 regions per race and 16 per record or per sampled
-split, terms at most 48 per race, one sampled term per record, an
-or-condition only when every group is dynamic (mixing region or sampled terms
-with an `or` flags the race), 4 sampled windows per term, 12 receiver entries
-per runner across the three lists, 64 active effect entries per race. Overflow
+`nrec<=160`, `neff<=192`, `nprog<=3072`, `narm<=256` and two arms per record,
+`ntag<=4096`, `nstr<=12`, `ncor<=12`, `nslope<=16`, at most 2048 regions per
+race and 16 per arm chain, terms at most 160 per race, one sampled term per
+record, 4 sampled windows per term, 12 receiver entries per runner across the
+three lists, 64 active effect entries per race. Overflow
 is a host `flagged("skill table overflow ...")`, never a kernel fault.
