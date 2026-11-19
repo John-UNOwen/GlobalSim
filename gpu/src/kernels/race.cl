@@ -466,6 +466,20 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         }
     }
 
+    // Construction-time GutsUp and WisdomUp bumps replace the adjusted fields
+    // before the init lottery, the HP init and the solver bases read them,
+    // matching the engine's constructor applying the stat bumps first.
+    for (int r = 0; r < n; r++) {
+        const uint base = (uint)(PD_RUN0 + PD_RUN_STRIDE * r);
+        __global ulong* scol = (__global ulong*)(scr + SCR_STATS_OUT + r * 160 + 128);
+        if (pd[base + PRD_BOOST_GUTS] > 0.0) {
+            scol[10] = as_ulong(pd[base + PRD_BOOST_GUTS]);
+        }
+        if (pd[base + PRD_BOOST_WIS] > 0.0) {
+            scol[11] = as_ulong(pd[base + PRD_BOOST_WIS]);
+        }
+    }
+
     // One shared initialization block drives force offsets, delays, section
     // modifiers and the rushing lottery from the run's RetailRandom stream.
     // Paired mode sends each runner's rushing lottery to its own RUSH
@@ -487,7 +501,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             __global uint* ib_run = ib + US_R0 + IIS_STRIDE * r;
             ib_run[US_STYLE] = rb[RR_STYLE];
             ib_run[US_WISB] = as_uint(convert_float_rte(as_double(scol[11])));
-            ib_run[US_BONUS] = 0u;
+            ib_run[US_BONUS] = (uint)pd[PD_RUN0 + PD_RUN_STRIDE * r + PRD_RUSH_BONUS];
         }
         __global ulong* ilb = (__global ulong*)(scr_d + SRL_INIT_IN_L);
         ilb[IL_DISTANCE] = as_ulong(course_distance);
@@ -843,7 +857,8 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             lane_collect(si, sf, lists, cached, sd, sf, r, n, pd, empty_move,
                 (int)si[SI_PHASE + r], sf[SF_LANEMAX + r],
                 convert_float_rte(sd[SD_LANE + r]),
-                convert_float_rte(sd[SD_POS + r]));
+                convert_float_rte(sd[SD_POS + r]),
+                sk_on ? convert_float_rte(sk_vision(skt, scr, r)) : 20.0f);
         }
         // prepare_retail_tick: after-goal, the spot timer step, the corner
         // state read and the slope events.

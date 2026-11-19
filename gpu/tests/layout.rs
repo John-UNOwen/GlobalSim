@@ -12,11 +12,9 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     use globalsim_gpu::race_exec as re;
     assert_eq!(re::SK_STRIDE, 34112);
     // The full scratch mirrors: stat rows, race state, banks, then the skill
-    // state block, four token orders, the substream bank and the staging.
-    // 74 u32 slots fit the old word count through the cached-area alignment,
-    // and 104 f64 slots add the cooldown table.
-    assert_eq!(re::SCR_U_WORDS, 51932);
-    assert_eq!(re::SRL_WORDS, 29096);
+    // state block, five token orders, the substream bank and the staging.
+    assert_eq!(re::SCR_U_WORDS, 58332);
+    assert_eq!(re::SRL_WORDS, 30376);
     // Table areas stay inside the stride, header first, then course lists,
     // records, effects, programs, arms, regions, terms and tags.
     assert!(16 <= globalsim_gpu::skills_compile::SK_STRAIGHTS);

@@ -118,11 +118,17 @@
 
 // The (skill, effect) dispatch kinds the port covers.
 #define SK_EFF_SPEEDUP 1
+#define SK_EFF_GUTSUP 4
+#define SK_EFF_WISDOMUP 5
+#define SK_EFF_RUNAWAY 6
+#define SK_EFF_VISION 8
 #define SK_EFF_NOOP 10
+#define SK_EFF_SETDELAY 14
 #define SK_EFF_CURRENT 21
 #define SK_EFF_CURRENT_NAT 22
 #define SK_EFF_TARGET 27
 #define SK_EFF_LANESPEED 28
+#define SK_EFF_KAKARI 29
 #define SK_EFF_ACCEL 31
 #define SK_EFF_RECOVERY 9
 
@@ -142,15 +148,15 @@
 #define SKR_AWIN0 4
 #define SKR_AWIN1 5
 
-// Double layout of one record's dynamic block (SKD_STRIDE doubles).
-#define SKD_STRIDE 140
-#define SKD_T_TIMER 0     // target effect duration timer, negative while active
-#define SKD_A_TIMER 1     // accel effect duration timer
-#define SKD_C_TIMER 2     // current-speed effect duration timer
-#define SKD_L_TIMER 3     // lane-speed effect duration timer
+// Double layout of one record's dynamic block (SKD_STRIDE doubles). The
+// effect timers are indexed by effect slot; an effect fires at most once per
+// (skill, detail) cycle, so one timer chain per slot mirrors the engine's
+// per-receiver duration timers.
+#define SKD_STRIDE 148
+#define SKD_EFF_T 140    // per-effect duration timers, negative while active
 #define SKD_ANY_LAST 4    // observe_anyskill: last activation count seen
 #define SKD_ANY_TRUES 5   // observe_anyskill: activations already counted
-#define SKD_ANY_RESULT 6  // this visit's changed flag, read by FEAT_ANYACT
+#define SKD_ANY_RESULT 6  // observe_anyskill: changed flag, read by FEAT_ANYACT
 #define SKD_INSTANCE 8    // (skill, detail) instance timer
 #define SKD_COOLDOWN 9    // retail cooldown timer
 #define SKD_TRIG0 10      // trigger start, first merged window start

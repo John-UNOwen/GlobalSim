@@ -60,6 +60,8 @@ Suites:
 | `wave1_gate` (gpu + initialization + geometry + race) | The six Phase A chart variant jobs, course 10504 seeds 1..3: zero fallback and frame identity, plus a v77-roster race firing the any-skill, shadowed-alternative, wisdom-carrier and out-band constructs bit-exact (see "Wave-1 fallback-histogram constructs") |
 | `wave2_folds` | Compile-time gates for the wave-2 dynamic leaves and the roster style-count folds: each live leaf stays live, the sampled and folded shapes, and the still-refused value_usage refusals |
 | `wave2_gate` (gpu + initialization + geometry + race) | One real merged skill per ported construct plus a v77-roster race firing each through synthetic defs, seeds 1..3: zero fallback and frame identity, including the constructor-pass defer and the absolute init cooldown (see "Wave-2 condition fields") |
+| `wave2b_folds` | Compile-time gates for the effect side: cross-target records stay live, self-only kinds refuse cross targets, kinds 4 and 5 refuse mid-race fires and record construction-time bumps, the 8-effect cap, the debuff team gate, the `value_usage` refusals and the by-name refusals for kinds 36 to 38 |
+| `wave2b_gate` (gpu + initialization + geometry + race) | Ten real merged skills, one per ported effect family, plus a twelve-skill synthetic battery firing every cross-target and bump path, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-2b effect side") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 
 ### What the gate proves
@@ -735,7 +737,7 @@ player-swapped chart traffic still refused (Phase C, course 10504):
   `SD_POSPREV` and the 24-slot `SD_OVC` overtake pair table). `tests/layout.rs`
   pins the word totals the bump lands on: the u32 side holds at `SCR_U_WORDS`
   51932 (the alignment mask absorbs the added slots) and the f64 side moves to
-  `SRL_WORDS` 29096.
+  `SRL_WORDS` 29096. The wave-2b effect tables moved the pins again, see below.
 - Two constructor-pass behaviors surfaced once multi-fire skills could be gated,
   both pre-existing gaps the earlier single-effect gates never reached. A record
   whose condition reads a field or retail-loop leaf cannot be judged at time zero
@@ -752,8 +754,8 @@ player-swapped chart traffic still refused (Phase C, course 10504):
   refused even though their condition is ported.
 
 The compile-only scratch sweep over the 108 merged skills that carry these
-constructs (plus the wave-1 static recheck) now compiles 62 without a fallback;
-the rest refuse on an unported effect kind (37), a target-another-runner effect,
+constructs (plus the wave-1 static recheck) compiled 62 at the time;
+the rest refused on an unported effect kind (37), a target-another-runner effect,
 or a rescaled `value_usage`, each named in its reason. Gates: `wave2_gate` puts
 one real merged skill per construct on horse 0 of the v77 roster (seeds 1..3) with
 zero fallback and frame identity, and a v77 race where synthetic defs built from
@@ -761,6 +763,76 @@ zero fallback and frame identity, and a v77 race where synthetic defs built from
 real skill, all its users carry an unported target-another effect, so the firing
 gate covers the fold there). `wave2_folds` compiles each construct alone and reads
 the record flags and roster counts back.
+
+### Wave-2b effect side
+
+The fallback histogram's effect tier: records whose effects left the runner
+that owns them. The compiler now accepts effect kinds 1, 4, 5, 6, 8, 9, 10,
+14, 21, 22, 27, 28, 29 and 31 with targets 1 (self), 4 (visible), 9 (ahead,
+nearest first) and 10 (behind, self first), and refuses by name everything the
+kernel cannot run.
+
+- Cross delivery: a queued kind (`TargetSpeed`, `Accel`, `CurrentSpeed`,
+  `CurrentSpeedWithNaturalDeceleration`, `LaneMoveSpeedUp`, `Vision`,
+  `Recovery`) aimed at 9, 10 or 4 resolves receivers from the rank columns of
+  the previous field update and pushes the caster's token into each receiver's
+  order. Recovery lands `f32(receiver max hp) * f32(modifier)` in the
+  receiver's pending-HP bank. A delivery never registers a receiver-side
+  instance: the engine's `apply_external_effect` activates with
+  `follow_up = true` and that path returns before the cooldown-map insert
+  (`race_solver.rs:1325-1328`, `:2644-2653`), verified against a same-skill-id
+  self-plus-ahead delivery that would otherwise couple the two records.
+- Construction-time bumps: `GutsUp(4)`, `WisdomUp(5)` and
+  `ModifyKakariChance(29)` on a static-fire self record apply host-side to
+  the init inputs (the `add_stat_modifier` f32 chain and the kakari-chance
+  fold, `PRD` rows 5 to 7). Kinds 4 and 5 anywhere else refuse ("only ports
+  as a construction-time bump"), kinds 1, 4, 5 and 10 aimed at another runner
+  refuse, and a targeted negative modifier (debuff) refuses unless every
+  roster team id is zero, because the engine silently drops same-team
+  receivers.
+- `Recovery(9)` self fires heal the count, positive-only and self-side only,
+  and bank HP that lands at the step head (a gain in the last two phases
+  defers the last-spurt plan, as in the engine). `Vision(8)` folds per tick
+  with the engine's `fmax(20 + sum, 0)` shape. `RunAway(6)` and
+  `SetStartDelay(14)` fire inert: the RunAway runtime arm is null and the
+  retail physics never reads the reassigned `start_delay`. What RunAway
+  really does is at build time: a Nige that learned a type 6 effect races as
+  Oonige (`race_solver_builder.rs:858-865`), and the prepass applies the same
+  upgrade before initialization or conditions see the strategy (202051 on a
+  Nige seat pinned this).
+- Repeats: several effects of one kind in one record are separate slots with
+  separate duration timers, capped at 8 effects per record (the token cap),
+  40 live tokens per runner and kind, overflow raising the `FB_SKILL_SEQ`
+  fallback. The kind filter in `sk_tok_value` is load-bearing: the current
+  order hosts kinds 21 and 22 together, and a fold that counted the wrong
+  kind double-booked the natural values.
+- Init-defer: engine condition closures that read the field report false in
+  the constructor pass, including the order ones, whose rank input the kernel
+  rank column does populate at init. `order` and `near_count` joined the
+  deferred feature set after a battery bisect caught a same-tick delivery the
+  early kernel fire had consumed the cooldown slot for.
+- Scratch grew to `SCR_U_WORDS` 58332 and `SRL_WORDS` 30376 (the five token
+  orders, the pending-HP bank and the per-effect-slot timers), pinned in
+  `tests/layout.rs`.
+
+`wave2b_folds` compiles each shape alone: cross records of every queued kind
+live, self-only kinds refuse the same target, 4 and 5 refuse mid-race fires,
+static fires record the bump triples, the 8-effect cap and the team gate fire,
+and 36, 37 and 38 refuse by name. `wave2b_gate` replays ten real merged
+skills on horse 0 of the v77 roster, seeds 1..3, zero fallback, frame
+identity, and each skill's id present in the CPU activation events: 201502
+(vision), 201522 (wisdom bump plus vision), 110581 (target-speed repeat with
+current-speed ahead and behind), 910581 (current-speed pair), 201442
+(recovery on the visible field), 202051 (runaway upgrade), 202141
+(start-delay plus wisdom bump), 202511 (kakari chance), 202181 (guts and
+wisdom bumps), 110301 (recovery self plus ahead, spread over three seats
+because its mid-pack condition never holds for the all-Senkou field's horse
+0). The battery (synthetic 663001 to 663012, one per path, forced to fire on
+order and cooldown-free conditions) covers what the real skills cannot
+(accel-behind, lane-speed-behind, natural-speed-behind, vision-debuff-visible).
+A compile-only sweep of the 32 ids the wave-2a histogram refused on effect
+constructs now compiles 29 (solo horse, best over the seven strategy seats);
+the three remain refuse `value_usage` 7 or 11.
 
 ### Cost
 
@@ -943,8 +1015,9 @@ and gate:
   `behind_time`, `near_time`, `infront_time`, `near_infront_count`,
   `visiblehorse`), the in-band order cells, roster reads beyond rank, rank rate,
   the bashin gaps and `distance_diff_top` (`same_style_rate` and the other
-  `distance_diff_*`), effects outside 1, 9, 10, 21, 22, 27, 28 and 31, and the
-  other constructs named in the `SKILLS_DESIGN.md` matrix. Each
+  `distance_diff_*`), effect kinds 11 to 13 and 32 to 38, and the
+  other constructs named
+  in the `SKILLS_DESIGN.md` matrix. Each
   flags its race with the construct named
 - The experimental startup pass (flagged, gated)
 - Grid mode (`experimentalGrid`): not ported, host-gated. The engine enables

@@ -36,6 +36,9 @@ pub const SK_TAGS: usize = 30000;
 
 pub const SK_RSTRIDE: usize = 26;
 pub const SK_ESTRIDE: usize = 10;
+/// Effects per record cap: each effect gets its own duration timer slot and
+/// a token of its own, and the token packs the slot index in three bits.
+pub const SK_EMAXSLOT: usize = 8;
 pub const SK_PSTRIDE: usize = 4;
 pub const SK_GSTRIDE: usize = 4;
 pub const SK_MSTRIDE: usize = 8;
@@ -116,10 +119,13 @@ pub const FEAT_MOVELANE: u32 = 36;
 pub const FEAT_BFRONT: u32 = 37;
 
 /// One race's compiled table. `reason` is Some when the race must run on the
-/// CPU, naming the first construct the kernel cannot evaluate.
+/// CPU, naming the first construct the kernel cannot evaluate. `bumps` are
+/// construction-time stat deltas, (runner, effect kind, modifier), in wire
+/// order, for kinds the kernel cannot apply once the race runs.
 pub struct SkillsPlan {
     pub words: Vec<u32>,
     pub reason: Option<String>,
+    pub bumps: Vec<(usize, i32, f64)>,
 }
 
 pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
@@ -127,6 +133,8 @@ pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
         words: vec![0; SK_STRIDE],
         tags: Vec::new(),
         reason: None,
+        bumps: Vec::new(),
+        cross_debuff: false,
         nrec: 0,
         nprog: 0,
         nreg: 0,
@@ -147,6 +155,12 @@ pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
         return c.finish();
     }
     let entries: Vec<&Value> = horses.as_array().map(|a| a.iter().collect()).unwrap_or_default();
+    // The engine's debuff target filter drops same-team receivers. Porting it
+    // as the identity map needs every roster team at zero, as the parser's
+    // default keeps them.
+    let any_team = entries
+        .iter()
+        .any(|h| h.get("teamId").and_then(Value::as_f64).unwrap_or(0.0) as i64 != 0);
     for (r, horse) in entries.iter().enumerate() {
         let skills = match horse.get("skills") {
             Some(v) => v,
@@ -179,13 +193,17 @@ pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
             }
         }
     }
+    if c.cross_debuff && any_team {
+        c.unsupported("team-filtered debuff targeting is not ported".to_string());
+        return c.finish();
+    }
     c.finish()
 }
 
 /// `skill_id_and_level` in the engine's request parser: an object carries a
 /// string or numeric skillId with a level, a bare string or number is a
 /// level 1 skill.
-fn normalize_skill_entry(entry: &Value) -> Option<(String, i64)> {
+pub fn normalize_skill_entry(entry: &Value) -> Option<(String, i64)> {
     if let Some(obj) = entry.as_object() {
         let id = if let Some(s) = obj.get("skillId").and_then(Value::as_str) {
             s.to_string()
@@ -214,6 +232,8 @@ struct Compiler {
     words: Vec<u32>,
     tags: Vec<u8>,
     reason: Option<String>,
+    bumps: Vec<(usize, i32, f64)>,
+    cross_debuff: bool,
     nrec: usize,
     nprog: usize,
     nreg: usize,
@@ -358,7 +378,8 @@ impl Compiler {
             }
             self.words[SK_TAGS + i] = word;
         }
-        SkillsPlan { words: self.words, reason: self.reason }
+        let bumps = if self.reason.is_some() { Vec::new() } else { std::mem::take(&mut self.bumps) };
+        SkillsPlan { words: self.words, reason: self.reason, bumps }
     }
 
     fn tag(&mut self, text: &str) -> (usize, usize) {
@@ -843,23 +864,44 @@ impl Compiler {
                 ));
                 return;
             }
-            let mut kind_seen: Vec<i32> = Vec::new();
+            if effect_list.len() > SK_EMAXSLOT {
+                self.unsupported(format!(
+                    "skill {sid} alternative has more than {} effects",
+                    SK_EMAXSLOT
+                ));
+                return;
+            }
+            // Every term true with no precondition, random term or cooldown
+            // fires once in the engine's constructor pass and is gone. Its
+            // 4/5/29 bumps are constants the init inputs already consume.
+            let cooldown = alt.get("cooldown").and_then(Value::as_f64).unwrap_or(0.) / 10000.0;
+            let static_fire = !dead
+                && cooldown <= 0.0
+                && !wisdom
+                && term_word == u32::MAX
+                && sampled_count == 0
+                && groups.len() <= 1
+                && pre_text.is_empty()
+                && leaves.iter().all(|l| matches!(l, Leaf::True));
             for ef in effect_list {
                 let kind = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
-                if !matches!(kind, 1 | 9 | 10 | 21 | 22 | 27 | 28 | 31) {
+                if !matches!(kind, 1 | 4 | 5 | 6 | 8 | 9 | 10 | 14 | 21 | 22 | 27 | 28 | 29 | 31) {
                     self.unsupported(format!("skill {sid} effect type {kind} is not ported"));
                     return;
                 }
-                if kind_seen.contains(&kind) {
+                let target = ef.get("target").and_then(Value::as_i64).unwrap_or(1) as i32;
+                if !matches!(target, 1 | 4 | 9 | 10) {
                     self.unsupported(format!(
-                        "skill {sid} repeats effect kind {kind}, only one duration per kind is ported"
+                        "skill {sid} effect target {target} is not ported"
                     ));
                     return;
                 }
-                kind_seen.push(kind);
-                if ef.get("target").and_then(Value::as_i64).unwrap_or(1) != 1 {
+                // SpeedUp bumps the receiver's live speed accumulator and the
+                // delayed multiplier only folds for the self target, so both
+                // stay on the runner that owns the record.
+                if target != 1 && matches!(kind, 1 | 4 | 5 | 10) {
                     self.unsupported(format!(
-                        "skill {sid} effect targeting another runner is not ported"
+                        "skill {sid} effect type {kind} targeting another runner is not ported"
                     ));
                     return;
                 }
@@ -887,11 +929,35 @@ impl Compiler {
                     _ => level_multiplier(kind, level),
                 };
                 let modifier = retail_skill_value(raw, multiplier);
+                // The mid-race stat bump has no kernel consumer and moves live
+                // engine state the kernel caches, so only construction-time
+                // fires of these kinds are portable.
+                if matches!(kind, 4 | 5) && !(static_fire && target == 1) {
+                    self.unsupported(format!(
+                        "skill {sid} effect type {kind} only ports as a construction-time bump"
+                    ));
+                    return;
+                }
+                if static_fire && target == 1 && matches!(kind, 4 | 5 | 29) {
+                    self.bumps.push((runner, kind, modifier));
+                }
+                // The engine drops same-team debuff receivers, an identity
+                // map only while every team is zero (checked for the roster).
+                if target != 1
+                    && matches!(kind, 8 | 9 | 21 | 22 | 27 | 28 | 31)
+                    && modifier < 0.0
+                {
+                    self.cross_debuff = true;
+                }
+                let target_value =
+                    ef.get("targetValue").and_then(Value::as_f64).unwrap_or(0.).max(0.0);
+                let target_value = target_value.min(SK_RMAX as f64) as u32;
                 let at = SK_EFFECTS + SK_ESTRIDE * self.neff;
                 self.words[at] = kind as u32;
-                self.words[at + 1] = 1;
+                self.words[at + 1] = target as u32;
                 self.words[at + 2] = value_usage as u32;
                 self.words[at + 3] = duration_usage as u32;
+                self.words[at + 4] = target_value;
                 let w = f64_words(modifier);
                 self.words[at + 6] = w[0];
                 self.words[at + 7] = w[1];
@@ -900,14 +966,13 @@ impl Compiler {
                 self.words[at + 9] = w[1];
                 self.neff += 1;
             }
-            let cooldown = alt.get("cooldown").and_then(Value::as_f64).unwrap_or(0.) / 10000.0;
             let delay_mult = delay_factor(alt);
             // The engine's constructor pass cannot see field or retail-loop
             // state, so those closures report false at time zero and the record
             // first fires one tick later (retail engine, seed 1..3 probes).
             let init_defer = pre_init_defer || leaves.iter().any(|l| {
-                matches!(leaf_feat(l), FEAT_ORDER_RATE | FEAT_OTIME | FEAT_DDTOP
-                    | FEAT_CHGUP_END | FEAT_LANETYPE | FEAT_BHIN | FEAT_MOVELANE
+                matches!(leaf_feat(l), FEAT_ORDER | FEAT_ORDER_RATE | FEAT_NEAR | FEAT_OTIME
+                    | FEAT_DDTOP | FEAT_CHGUP_END | FEAT_LANETYPE | FEAT_BHIN | FEAT_MOVELANE
                     | FEAT_BFRONT)
             });
 

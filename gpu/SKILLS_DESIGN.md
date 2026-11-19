@@ -102,8 +102,9 @@ resolves the level before the kernel runs: the effect stores the
 level-resolved modifier `retail_skill_value(raw, multiplier)` and
 `baseDuration * 0.0001`, so the kernel does no table work.
 
-Effect (10 words): `effect_type, target(1 only), value_usage, duration_usage,
-0, 0, modifier_lo/hi (f64), base_duration_lo/hi (f64)`.
+Effect (10 words): `effect_type, target (1 self, 4 visible, 9 ahead, 10
+behind), value_usage, duration_usage, target_value (max receivers, clamped to
+the roster cap), 0, modifier_lo/hi (f64), base_duration_lo/hi (f64)`.
 
 Arm (8 words): `prog_len, prog_base, pre_n, pre_base, post_n, post_base,
 sampled_flag, term_index`. A top-level `@` in the condition splits it into
@@ -181,9 +182,41 @@ tiers, 3 and 7 are the retail HP tiers). Modifier dispatch follows retail
 - `CurrentSpeed(21)`: same for the current-speed list (non-natural).
 - `CurrentSpeedWithNaturalDeceleration(22)`: same list, marked natural, so its
   fold sits in the natural group and its expiry is more than a removal (below).
+- `Recovery(9)`: adds `f32(max_hp) * f32(modifier)` to the runner's pending-HP
+  accumulator (the receiver's max when delivered); the heal count the
+  `activate_count_heal` condition reads bumps only for a positive self effect.
+- `Vision(8)`: a receiver token in the vision order, whose fold
+  `fmax(20 + sum, 0)` in f64 with one `convert_float_rte` feeds the lane
+  logic's visible distance.
+- `GutsUp(4)`, `WisdomUp(5)` and `ModifyKakariChance(29)`: portable only as
+  construction-time bumps, the host applies them to the init inputs (stats
+  through the `add_stat_modifier` f32 chain, kakari chance folded into the
+  init roll). A mid-race fire of 4 or 5 refuses.
+- `RunAway(6)`: the runtime arm is SkillAbilityNull, so the fire is inert
+  beyond its event and instance bookkeeping. The build-time rule that matters
+  is elsewhere: a Nige that learned a type 6 effect races as Oonige
+  (`race_solver_builder.rs:858-865`), and the host prepass applies the same
+  upgrade before anything reads the strategy.
+- `SetStartDelay(14)`: writes the solver's `start_delay`, which the retail
+  physics never reads (the retail start delay resolved in initialization), so
+  the kernel fires it inert.
 
 The lists mirror `AdditiveReceiver`: registration-order folds, in-place token
 update on refire, order-preserving token removal at expiry.
+
+Cross-target delivery (targets 9, 10, 4): the fire resolves receivers from the
+rank columns of the previous field update, ahead taking the runners above self
+nearest-first, behind taking self and the runners below, and visible
+additionally demanding a slot in the lane cache as it stood before this tick's
+scan (the engine selects before `field_update`, so effects expiring this tick
+still count). Each receiver gets the caster's token in its order plus, for
+recovery, the HP amount computed from the receiver's max. A delivery never
+registers a receiver-side instance: `apply_external_effect` passes
+`follow_up = true` (`race_solver.rs:1325-1328`), and the follow-up path returns
+before the `random_active_details` insert (`race_solver.rs:2644-2653`), so the
+receiver's own cooldown map and instance timers stay untouched. The constructor
+pass resolves no receivers (the engine has no field to deliver into at time
+zero) while still counting the fire's runtime duration, event and cooldown.
 
 ## Modifier application points (exact engine sites)
 
@@ -217,8 +250,9 @@ update on refire, order-preserving token removal at expiry.
   live-horse roster (blocking sample and duel inputs).
 - `has_speed_skill` (`race_solver_retail.rs:912`, position keep):
   `pace_cancel > 0 || apply_additive(0., target_ord) > 0`.
-- Recovery(9) would feed `pending_hp` (`race_solver_retail.rs:994`), not yet
-  ported, see the matrix.
+- Recovery(9) feeds `pending_hp` (`race_solver_retail.rs:994`): the bank lands
+  at the step head before the start-delay gate, and a gain in the last two
+  phases defers the last-spurt plan, as the engine's flag does.
 
 ## RNG
 
@@ -362,17 +396,24 @@ Not yet ported (fallback-flagged, plan order in the README):
   `same_style_rate`, `distance_diff_*` beyond `distance_diff_top`
 - `base_*` (base stat reads), `motivation`, `grade`, `time`, `post_number`,
   `course_distance`, `furlong`
-- effects outside the accepted set 1, 9, 10, 21, 22, 27, 28 and 31
-  (`skills_compile.rs` refuses the rest by kind): `13` ExtendKakari, `35`, `11`,
-  `12` lane goals, `32` AllStatusUp, `36` and `37` random skill activation
+- effects outside the accepted set 1, 4, 5, 6, 8, 9, 10, 14, 21, 22, 27, 28,
+  29 and 31 (`skills_compile.rs` refuses the rest by kind): `13` ExtendKakari,
+  `35`, `11`, `12` lane goals, `32` AllStatusUp, `36` and `37` random skill
+  activation, `38` debuff immunity
+- effect targets outside 1, 4, 9 and 10, kinds 1, 4, 5 and 10 aimed at another
+  runner, and a cross debuff (negative modifier on a targeted queued kind) on
+  a roster with any team id set: the engine drops same-team receivers, which
+  only folds to identity on all-zero teams
+- a mid-race (non-constructor) fire of `GutsUp(4)` or `WisdomUp(5)`, and more
+  than 8 effects on one record (the per-record token cap the receiver orders
+  index)
 - structural: two live alternatives whose condition or precondition differs
   (refused as `skill {sid} has other than one alternative`, see below),
   `value_usage` 3 to 14 (stat, win and fan tiers, the activation rolls, the
   late-corner count and the green-tag count, the modifier rescaled from state
   the numeric table cannot carry),
   `duration_usage` 4 (the delayed running-instance path),
-  `target` not 1 (application to other runners), `additional_activate` not 0,
-  a repeated effect kind on one alternative (only one duration per kind),
+  `additional_activate` not 0,
   rarity outside 1..6 (3, 4 and 5 all fold to 3), priority outside {0,1}, debuff
   immunity, the legacy non-retail wisdom path, `isGeneralSkill` gates
 
@@ -398,9 +439,11 @@ sees a table it cannot run.
 
 ## Bounds (enforced host-side before launch)
 
-`nrec<=160`, `neff<=192`, `nprog<=3072`, `narm<=256` and two arms per record,
+`nrec<=160`, `neff<=192`, 8 effects per record, `nprog<=3072`, `narm<=256` and two arms per record,
 `ntag<=4096`, `nstr<=12`, `ncor<=12`, `nslope<=16`, at most 2048 regions per
 race and 16 per arm chain, terms at most 160 per race, one sampled term per
 record, 4 sampled windows per term, 12 receiver entries per runner across the
-three lists, 64 active effect entries per race. Overflow
+three lists, 64 active effect entries per race, and 40 receiver tokens per
+runner and kind (an overflow raises the `FB_SKILL_SEQ` fallback, not a wrong
+fold). Overflow
 is a host `flagged("skill table overflow ...")`, never a kernel fault.

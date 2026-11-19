@@ -16,20 +16,21 @@ use ocl::{Buffer, Queue, flags};
 pub const RACE_MAXR: usize = 24;
 pub const RACE_MAX_TICKS: usize = 6144;
 pub const RI_STRIDE: usize = 320;
-pub const RIL_STRIDE: usize = 576;
+pub const RIL_STRIDE: usize = 640;
 pub const ST_STRIDE: usize = 232;
 // Skill scratch mirrors of retail_core.cl and skills.cl.
 pub const SK_STRIDE: usize = crate::skills_compile::SK_STRIDE;
 const SK_RMAX: usize = 160;
 const SKR_STRIDE: usize = 8;
 const SK_SEQN: usize = 40;
-const SKD_STRIDE: usize = 140;
+const SKD_STRIDE: usize = 148;
 const SCR_SK: usize = SCR_BANKS + 24 * BANK_WORDS;
 const SK_TSEQ: usize = SCR_SK + SK_RMAX * SKR_STRIDE;
 const SK_ASEQ: usize = SK_TSEQ + SK_RMAX * SK_SEQN;
 const SK_CSEQ: usize = SK_ASEQ + SK_RMAX * SK_SEQN;
 const SK_LSEQ: usize = SK_CSEQ + SK_RMAX * SK_SEQN;
-const SK_SUB: usize = SK_LSEQ + SK_RMAX * SK_SEQN;
+const SK_VSEQ: usize = SK_LSEQ + SK_RMAX * SK_SEQN;
+const SK_SUB: usize = SK_VSEQ + SK_RMAX * SK_SEQN;
 const SK_STAGED: usize = SK_SUB + BANK_WORDS;
 pub const SCR_U_WORDS: usize = SK_STAGED + 2 * SK_RMAX;
 pub const SRL_SKD: usize = SRL_HP_OUT_L + 24 * 64;
@@ -76,12 +77,18 @@ pub const PD_DTYPE: usize = 410;
 pub const PD_FC_HALF0: usize = 411;
 pub const PD_FC_HALF1: usize = 412;
 pub const PD_RUN0: usize = 448;
-pub const PD_RUN_STRIDE: usize = 5;
+pub const PD_RUN_STRIDE: usize = 8;
 pub const PRD_POWF: usize = 0;
 pub const PRD_DUEL_T: usize = 1;
 pub const PRD_DUEL_A: usize = 2;
 pub const PRD_SPOT_M: usize = 3;
 pub const PRD_SPOT_D: usize = 4;
+// Construction-time stat bumps from the skill table, 0 when the runner has
+// none. The boosted field values replace the adjusted stats in the kernel's
+// stats-out block, and the rushing bonus carries the f32 bits as an integer.
+pub const PRD_BOOST_GUTS: usize = 5;
+pub const PRD_BOOST_WIS: usize = 6;
+pub const PRD_RUSH_BONUS: usize = 7;
 pub const PC_LAST_STRAIGHT_START: usize = 184;
 pub const PC_LAST_CORNER_START: usize = 186;
 pub const PC_FIRST_MOVE_POINT: usize = 187;
@@ -139,6 +146,7 @@ pub const FB_HOST: u32 = 4;
 pub const FB_INIT: u32 = 5;
 pub const FB_GEOMETRY: u32 = 6;
 pub const FB_EVENT: u32 = 7;
+pub const FB_SKILL_SEQ: u32 = 8;
 
 /// One race as the kernel ran it. `frames` holds the ticks plus the pre-loop
 /// frame 0, each row the six replay values per runner. `finish_*` stays None
@@ -480,6 +488,7 @@ pub struct Prepared {
     geometry: Option<retail_geometry::FlatCourse>,
     seed: i32,
     sk: Vec<u32>,
+    bumps: Vec<(usize, i32, f64)>,
     debug_scratch: bool,
 }
 
@@ -496,6 +505,7 @@ impl Prepared {
             geometry: None,
             seed: 0,
             sk: Vec::new(),
+            bumps: Vec::new(),
             debug_scratch: false,
         }
     }
@@ -534,6 +544,7 @@ fn prepare(
         ri: vec![0u32; RI_STRIDE],
         pd: vec![0f64; RIL_STRIDE],
         n: horses.len(),
+        bumps: Vec::new(),
         stats: Vec::new(),
         host_fallback: Some(reason.into()),
         geometry: None,
@@ -636,7 +647,13 @@ fn prepare(
     }
 
     for (r, horse) in horses.iter().enumerate() {
-        let strategy = strategy_id(horse.get_str("strategy")?)?;
+        let mut strategy = strategy_id(horse.get_str("strategy")?)?;
+        // HorseData.InitRunningStyleEx (race_solver_builder.rs:858-865): a
+        // Nige that learned a type 6 effect races as Oonige, decided before
+        // triggers and wisdom lotteries and invisible to the request.
+        if strategy == 1 && learned_runaway(horse, root.get("skillData")) {
+            strategy = 5;
+        }
         let rank = gate_order.iter().position(|&i| i == r).unwrap_or(0);
         let lane = retail_starting_lane(rank, track, horses.len(), grids);
         let b = RI_RUN0 + RI_RUN_STRIDE * r;
@@ -675,7 +692,34 @@ fn prepare(
             css: css.clone(),
         });
     }
-    Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, debug_scratch: false })
+    Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, debug_scratch: false })
+}
+
+/// Engine rule: an installed skill whose definition carries a type 6 effect
+/// upgrades a Nige to Oonige at build time.
+fn learned_runaway(horse: &Value, skill_data: Option<&Value>) -> bool {
+    let Some(Value::Array(list)) = horse.get("skills") else { return false };
+    let Some(table) = skill_data else { return false };
+    list.iter().any(|entry| {
+        let Some((id, _)) = crate::skills_compile::normalize_skill_entry(entry) else {
+            return false;
+        };
+        table
+            .get(&id)
+            .and_then(|def| def.get("alternatives"))
+            .and_then(Value::as_array)
+            .is_some_and(|alts| {
+                alts.iter().any(|alt| {
+                    alt.get("effects")
+                        .and_then(Value::as_array)
+                        .is_some_and(|effects| {
+                            effects
+                                .iter()
+                                .any(|ef| ef.get("type").and_then(Value::as_i64) == Some(6))
+                        })
+                })
+            })
+    })
 }
 
 /// Runs every request end to end on the gated device. Races whose domain the
@@ -932,18 +976,41 @@ impl RaceContext {
         ];
         let proficiency = [1.1f64, 1.0, 0.85, 0.75, 0.6, 0.4, 0.2, 0.1];
         for r in 0..count {
-            let raw_guts = match &prepass {
+            let adjusted = match &prepass {
                 Some(out) => match &out.outs[offset + r] {
-                    Out::Stats(s) => s.adjusted_f64()[3],
+                    Out::Stats(s) => s.adjusted_f64(),
                     _ => return Err("stats pre-pass decode".into()),
                 },
-                None => 0.,
+                None => [0.; 5],
             };
+            let raw_guts = adjusted[3];
+            // The engine's constructor pass chains the static GutsUp and
+            // WisdomUp bumps as an f32 accumulator and clamps the field on
+            // every read, and the kakari bonus runs in f64.
+            let mut acc_guts = raw_guts as f32;
+            let mut acc_wis = adjusted[4] as f32;
+            let mut bonus = 0.0f64;
+            let mut bump_guts = false;
+            let mut bump_wis = false;
+            for (_runner, kind, modifier) in prepared[i].bumps.iter().filter(|(b, _, _)| *b == r) {
+                match *kind {
+                    4 => {
+                        acc_guts += *modifier as f32;
+                        bump_guts = true;
+                    }
+                    5 => {
+                        acc_wis += *modifier as f32;
+                        bump_wis = true;
+                    }
+                    _ => bonus += *modifier / 100.0,
+                }
+            }
+            let guts_eff = if bump_guts { acc_guts.clamp(1.0, 2000.0) as f64 } else { raw_guts };
             let base = PD_RUN0 + PD_RUN_STRIDE * r;
-            let bounded = (raw_guts as f32).clamp(1., 2000.);
+            let bounded = (guts_eff as f32).clamp(1., 2000.);
             prepared[i].pd[base + PRD_POWF] =
                 f64::from((bounded * spurt_coef).powf(spurt_pow).to_bits());
-            let guts = raw_guts.max(1.0);
+            let guts = guts_eff.max(1.0);
             let duel = |c: [f32; 3]| {
                 let argument = (guts as f32) * c[0];
                 let power = (argument as f64).powf(c[1] as f64) as f32;
@@ -957,6 +1024,14 @@ impl RaceContext {
             let stapt = prepared[i].ri[RI_RUN0 + RI_RUN_STRIDE * r + RR_STAPT] as usize;
             prepared[i].pd[base + PRD_SPOT_D] =
                 (700.0 * guts).powf(0.5) * 0.012 * proficiency[stapt];
+            if bump_guts {
+                prepared[i].pd[base + PRD_BOOST_GUTS] = acc_guts.clamp(1.0, 2000.0) as f64;
+            }
+            if bump_wis {
+                prepared[i].pd[base + PRD_BOOST_WIS] = acc_wis.clamp(1.0, 2000.0) as f64;
+            }
+            prepared[i].pd[base + PRD_RUSH_BONUS] =
+                f64::from(((bonus * 100.0) as f32).to_bits());
         }
         offset += count;
     }
@@ -1325,6 +1400,7 @@ fn kernel_fallback(flag: u32, arg: u32) -> Option<String> {
         (FB_INIT, _) => "the initialization chain flagged".into(),
         (FB_GEOMETRY, _) => "geometry rejected a query".into(),
         (FB_EVENT, _) => "event log overflow".into(),
+        (FB_SKILL_SEQ, _) => "skill duration order overflow".into(),
         (other, a) => format!("kernel fallback {other} arg {a}"),
     })
 }
