@@ -207,8 +207,10 @@
 #define SKD_ANY_LAST 4    // observe_anyskill: last activation count seen
 #define SKD_ANY_TRUES 5   // observe_anyskill: activations already counted
 #define SKD_ANY_RESULT 6  // observe_anyskill: changed flag, read by FEAT_ANYACT
-#define SKD_INSTANCE 8    // (skill, detail) instance timer
+#define SKD_INSTANCE 8    // random_active_details (skill, detail) instance timer
 #define SKD_COOLDOWN 9    // retail cooldown timer
+#define SKD_RUN_T 0       // running_skills timer, extended on an overtake
+#define SKD_AEXT 3        // overtake extensions of that instance, three at most
 #define SKD_TRIG0 10      // trigger start, first merged window start
 #define SKD_TRIG1 11      // trigger end, last merged window end
 #define SKD_WINDOWS 12    // merged arm chains, up to 32 (start, end) pairs

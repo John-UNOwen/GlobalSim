@@ -45,7 +45,7 @@ Suites:
 | --- | --- |
 | `lib` (28 tests) | Vendored engine tests pass inside this crate |
 | `reference_trace` | The in-crate runner reproduces `restricted_trace.json` from the Jax oracle byte-for-byte (CRLF normalized) |
-| `layout` | The three `repr(C)` kernel structs are 104/36/244 bytes with the exact field offsets, `kernel_params()` equals the engine's `Parameters` public methods for every scalar the kernel reads, and the scratch stride mirrors are pinned (`SK_STRIDE` 54,912, `SCR_U_WORDS` 450,300, `SRL_WORDS` 232,400, the `RI`/`RIL`/`ST` strides and the init strides) |
+| `layout` | The three `repr(C)` kernel structs are 104/36/244 bytes with the exact field offsets, `kernel_params()` equals the engine's `Parameters` public methods for every scalar the kernel reads, and the scratch stride mirrors are pinned (`SK_STRIDE` 54,912, `SCR_U_WORDS` 479,796, `SRL_WORDS` 233,720, the `RI`/`RIL`/`ST` strides and the init strides) |
 | `comparator` | No device needed: one injected wrong value in a fake GPU outcome reports exactly the injected tick, runner, field and both raw bit patterns, equal frames with a flag are not parity |
 | `gpu_gate` | See below |
 | `rng_gate` (gpu only) | See "RNG port" below |
@@ -65,7 +65,7 @@ Suites:
 | `wave2b_gate` (gpu + initialization + geometry + race) | Ten real merged skills, one per ported effect family, plus a twelve-skill synthetic battery firing every cross-target and bump path, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-2b effect side") |
 | `wave3_folds` | Compile-time gates for the wave-3 leaves: the in-band cell forms, the activation-history folds including the provably-false self-gate, the roster reads in both fold directions, the opponent-count team gate and the still-refused names |
 | `wave3_gate` (gpu + initialization + geometry + race) | Fourteen real merged rows, one per ported construct with the seats the condition needs, plus a twenty-eight-skill synthetic battery firing every new leaf, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-3 condition tail") |
-| `wave4_folds` | Compile-time gates for the effect tail: cross debuffs compile on any roster, a cross-target start-delay fires inert, the still-refused effect families (all-stat 32, variantless 33/34) plus the refused `value_usage` 15 and the cross-target random kinds refuse by name with the reason; GutsUp cross compiles live since wave 8; lane goals, kakari, immunity, kinds 36/37 at self target and the shared-key alternative pair assert live records (see "Wave-6a lane, rush and cooldown tail") |
+| `wave4_folds` | Compile-time gates for the effect tail: cross debuffs compile on any roster, a cross-target start-delay fires inert, the still-refused effect families (all-stat 32, variantless 33/34) refuse by name with the reason; GutsUp cross compiles live since wave 8, every wire `value_usage` compiles since wave 9, and an `additionalActivate` on a kind whose delivery writes per-receiver state still refuses by name; lane goals, kakari, immunity, kinds 36/37 at self target and the shared-key alternative pair assert live records (see "Wave-6a lane, rush and cooldown tail") |
 | `wave4_gate` (gpu + initialization + geometry + race) | The real cross-debuff 910581 on a teamed roster plus a four-skill battery forcing the same-team drop, the different-team delivery and the inert cross start-delay both ways, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-4 effect tail") |
 | `wave6a_folds` | Compile-time gates for the wave-6a constructs: lane goal and immunity records compile live for self and cross targets, stray target combinations refuse, and the shared-key alternative pair lowers both live alternatives (see "Wave-6a lane, rush and cooldown tail") |
 | `wave6a_gate` (gpu + initialization + geometry + race) | The real shared-cooldown pair 910151, the real SetTargetLane 201261 and the real ExtendKakari 200801 on fitted seats, plus a ten-skill synthetic battery firing kinds 11, 12, 13 (self and group), 35 (self and delivered), 38 and the shared-key pair both ways, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-6a lane, rush and cooldown tail") |
@@ -76,6 +76,8 @@ Suites:
 | `wave8_powf_gate` (gpu) | Bit-exactness gate for the transcribed ucrtbase `pow` and `powf` (`powf_core.cl`): the engine's guts domains plus fuzz bands, `to_bits` equality against Rust `f64::powf` and `f32::powf` at 100%, default 38.7M pairs, env-widened to 419.4M with zero differences |
 | `wave8_folds` | Compile-time gates for live guts: every shipped GutsUp id compiles as a baked constructor bump (three keep their own condition refusals), and the mid-race and cross synthetic shapes set the plan's `live_guts` flag while static-only shapes never do |
 | `wave8_gate` (gpu + initialization + geometry + race) | The 669xxx GutsUp battery: self phase-gated refire and drop, static bump chained into a loop fire, all three cross fans, the immune and same-team debuff drops, the constructor-only static control, and the real static ids 200211, 202181 and 1200051, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-8 live guts") |
+ | `wave9_folds` | Compile-time gates for the tail: a `duration_usage` 4 record lowers with its running instance and the aux kinds 11, 12, 35 and 38 refuse under it, the `additionalActivate` fan compiles live on kinds 21, 22, 27, 28 and 31 at targets 1, 4, 9 and 10 and refuses outside that, `value_usage` at any wire value compiles as the engine's pass-through, and the real `duration_usage` 4 ids 100531 and 900531 plan live (see "Wave-9 running instance, fan and pass-through values") |
+ | `wave9_gate` (gpu + initialization + geometry + race) | The real 100531 and 900531 beside a 6691xxx `duration_usage` 4 battery (no delayed effect, an extended `additionalActivate` sibling, a kind-2 turn on a short cooldown, a cross-target fan), a 6692xxx battery for the `additionalActivate` fan outside self on kinds 21, 22, 27, 28 and 31, and 6693xxx for the `value_usage` pass-through, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events, plus one ignored scene that reproduces the fan-churn drift (see "Wave-9 running instance, fan and pass-through values") |
 | `grid_gate` (gpu + initialization + geometry + race) | Grid starts at 21, 24, 40 and 120 horses, two courses, seeds 1..2: zero fallback and frame-for-frame `to_bits` identity against the CPU engine, the 21-horse grid-vs-retail control pair differing at frame 0, and invalid grid shapes falling back with the engine's own message (see "Grid mode") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 
@@ -707,8 +709,10 @@ equal tick counts, zero fallback.
   races, the other three skills replay as never activated on these courses,
   and both outcomes are pinned bit-exact.
 - `unsupported_construct_flags_the_whole_race`: one skill's `durationUsage`
-  patched to 4 (the delayed running-instance path) flags the race before any
-  launch, and the reason names `duration_usage 4`.
+  patched to 4 beside a `PreferInsideLane` effect (kind 12, whose per-fire aux
+  entry is what the overtake extension walks) flags the race before any launch,
+  and the reason names `duration_usage 4`. The same alternative without that
+  effect compiles, which is the shape the real 100531 and 900531 have.
 - `unsupported_random_term_refuses_by_name`: one skill's condition rewritten to
   `random_lot==1` (a sampled term with no ported sampler) refuses the race, and
   the reason names `random_lot`, so an unported random term never runs on an
@@ -1373,6 +1377,91 @@ it, engine behavior the gates reproduce; the duel and spot `PRD` words stay
 exact while guts holds, which was the wave-7 state, since wave 8 the entry
 snapshots move to `SD` columns when a live guts fire is in the race.
 
+### Wave-9 running instance, fan and pass-through values
+
+Three more compiler refusals closed, and one shape moved from "refused" to
+"compiles, and the app no longer sends it to the CPU".
+
+- `duration_usage` 4 keeps a running instance. The fire writes `SKD_INSTANCE`
+  (the `random_active_details` countdown, `race_solver.rs:1100-1101`) and
+  `SKD_RUN_T` (the `RunningSkill.timer`, `race_solver.rs:2655`). Each of at most
+  three overtakes subtracts `course.distance / 1000` from `SKD_RUN_T`, from every
+  token timer the owner holds for that record across the five orders and the
+  `additionalActivate` pool, and from the copy a shared-key sibling parked
+  (`race_solver.rs:1784-1789, 1824-1839`). The retire sweep, the kind-1 event, the
+  kind-2 and kind-3 turns and the kind-2 queue gate read `SKD_RUN_T`, because the
+  engine reads `RunningSkill.timer` there (`race_solver.rs:1804-1822,
+  1841-1876`). `aa_flip` and `aa_select` keep reading `SKD_INSTANCE`, which the
+  extension never reaches, matching `is_expired`
+  (`race_solver.rs:2404-2444`). The engine's entry filter is
+  `effect.skill_id == runtime.skill_id && effect.perspective == runtime.perspective`,
+  so a copy delivered to another runner is never extended, and the count cap is
+  three per instance. `100531` (gold) and `900531` (its white twin) are the merged
+  table's only `duration_usage` 4 ids and now compile, so the app acceptance path
+  that forced those two to the CPU engine no longer needs to. Kinds 11, 12, 35
+  and 38 still refuse under `duration_usage` 4: the extension walks the aux entry
+  those kinds register per fire, and the kernel keeps one presence cell per
+  runner for them, so there is nothing to extend.
+- `additionalActivate` outside its caster. A follow-up re-runs the receiver pick
+  at its own moment, so `aa_apply` re-runs `sk_targets`, the immunity skip and the
+  same-team drop per application and files one pool entry per receiver
+  (`race_solver.rs:2479-2537`). Kinds 21, 22, 27, 28 and 31 now compile at targets
+  1, 4, 9 and 10. Those kinds at other targets, and every other kind, keep
+  refusing: a follow-up registers one token holding one value, and the rest write
+  per-receiver state. No merged id carries `additionalActivate` outside its own
+  runner, so the fan shapes are battery-only.
+- `value_usage` outside 1 to 14 is a pass-through, mirroring the engine rather
+  than inventing a rule. Neither the builder's tier fold (`race_solver_builder.rs:908-939`)
+  nor the runtime draw (`race_solver.rs:2485-2503`) has an arm or an error for
+  those values, so the raw modifier is what lands. The range gate is gone from
+  `skills_compile.rs`, and a wire value of 0, 15, 2.1 billion or negative now
+  compiles and applies `modifier * 1`.
+
+Scratch is unchanged: `SKD_STRIDE` 148 and `SKR_STRIDE` 20 are the wave-8 values,
+the running-instance timer and its extension count fit in the slack of the
+per-record doubles block, and `tests/layout.rs` still pins `SCR_U_WORDS` 479,796
+and `SRL_WORDS` 233,720.
+
+Gates: `wave9_folds` asserts the du4 lowering (effect word 3 is 4, the running
+instance and its extension slots), the four aux kinds that refuse under du4, the
+aa fan matrix live and refused by name, the pass-through at eleven wire
+`value_usage` values, and that 100531 and 900531 plan live. `wave9_gate` replays
+the v77 roster seeds 1..3 with zero fallback: 100531 and 900531 on four seats,
+669101 (du4, no delayed effect), 669102 (an extended `additionalActivate`
+sibling), 669103 (a kind-2 turn on an 8 s cooldown) and 669148 (a cross-target
+fan under du4), each beside a 669141 carrier that lifts the field; 669201 to
+669205 for the fan outside self on kinds 27, 31, 28, 22 and 21 across the ahead,
+behind and visible windows and the same-team drop; 669301 to 669305 for
+`value_usage` 15, 0, 16, -2 and 2147483647.
+
+`wave9_gate` also holds one ignored scene, `fan_churn_tracks_the_engine`: six
+hosts refanning one cross-target `additionalActivate` 1 effect every 9 s. It
+diverges from the CPU engine on two of the gate's three seeds, at tick 525
+runner 6 (seed 1) and tick 1086 runner 4 (seed 3), `pos` 3.7e-4 m and 2.4e-4 m
+apart, while every single-fire fan shape above stays bit-exact. A scratch sweep
+over seeds 1 to 5 of the same field showed four of five diverging. The cause is
+not pinned. Two candidate mechanisms were checked and are not it: the pool's f32
+rounding of the registered value (it matches `register(token, modifier as f32)`,
+`retail_physics.rs:549`) and the entry order of a receiver's list (both sides
+append and compact stably). What is left standing is one copy's expiry landing a
+tick apart from the engine's and the 128-entry pool arena reused across
+overlapping receivers. Treat a cross-target `additionalActivate` fan that several
+hosts refan at once as unverified until that scene goes green.
+
+Sharp edges: the demerit classification of a turn's fan reads the wire modifier
+(`race_solver.rs:2482`) while the direct-fire path classifies from the drawn
+value, and `aa_apply` follows that split; a cross-target fan allocates one pool
+entry per receiver against the fixed 128-entry arena, so a wide fan on a wide
+field is what `FB_SKILL_SEQ` protects; the kernel holds one instance slot per
+record, so an engine `running_skills` with two entries for one (id, detail) is
+not representable (no merged id reaches it, since one fire registers one entry);
+the extension of a shared-key sibling's parked instance copy (the sibling loop in
+`aa_extend`) has no gate: it needs a `duration_usage` 4 skill with two live
+alternatives, and none of the 751 merged ids has one;
+the batched extension relies on `extend_first` running the whole overtake batch
+before the retire sweep, which is what the engine does
+(`race_solver.rs:1776-1798`).
+
 ### Cost
 
 `cargo run --features gpu,initialization,geometry,race --release --bin skills_bench -- --runners 4096`
@@ -1558,13 +1647,15 @@ entry only through the finalizer, one the fire already covers.
 ## Not covered (step 6 blockers)
 
 Engine behavior the race loop port does not reach, each needing its own port
-and gate:
+and gate. This is the step-6 snapshot: skills and grid mode have moved on since,
+so the refusal lists in `SKILLS_DESIGN.md` and "Grid mode" below are what is
+true now.
 
 - Skills outside the ported subset: the names with no engine registry entry
   (`behind_time`, `near_time`, `infront_time`),
   `is_other_character_activate_advantage_skill` and
-  `remain_distance_viewer_id`, effect kinds 11 to 13 and 32 to 38, and the
-  other constructs named
+  `remain_distance_viewer_id`, the all-stat 32 and the variantless 33 and 34,
+  and the other constructs named
   in the `SKILLS_DESIGN.md` matrix. Each
   flags its race with the construct named
 - Grid mode (`experimentalGrid`): not ported, host-gated. The engine enables

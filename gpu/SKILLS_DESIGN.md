@@ -532,13 +532,19 @@ Not yet ported (fallback-flagged, plan order in the README):
   the constructor pass, ahead of the init draws the kernel bakes), and more
   than 8 effects on one record (the per-record token cap the receiver orders
   index)
-- structural: `value_usage` outside 1 to 14 (usages 3 to 7, 10, 12 and 13 fold
-  at compile from request-static data, `race_solver_builder.rs:908-939`;
-  usages 8 and 9 draw `RetailRandom` at each application and usages 11 and 14
-  read runtime counters, `race_solver.rs:2485-2503`),
-  `duration_usage` 4 (the delayed running-instance path),
-  `additional_activate` outside the self-target kinds 27, 28 and 31 (the shape
-  the turn machinery models), a `36` or `37` effect at another runner,
+- structural: `value_usage` with no arm in the engine's tier fold (0, 15 and up,
+  and negatives: the builder and the runtime both pass the raw modifier through,
+  so the kernel does the same. Usages 3 to 7, 10, 12 and 13 fold at compile from
+  request-static data, `race_solver_builder.rs:908-939`. Usages 8 and 9 draw
+  `RetailRandom` at each application and usages 11 and 14 read runtime counters,
+  `race_solver.rs:2485-2503`),
+  `duration_usage` 4 on kinds 11, 12, 35 or 38 (the overtake extension walks the
+  aux entry those kinds register per fire, and the kernel keeps one presence
+  cell per runner for them),
+  `additional_activate` on a kind outside 21, 22, 27, 28 and 31, or on those
+  kinds at a target outside 1, 4, 9 and 10 (a follow-up registers one token
+  holding one value, and the other kinds and targets write per-receiver state),
+  a `36` or `37` effect at another runner,
   rarity outside 1..6 (3, 4 and 5 all fold to 3), priority outside {0,1}, the
   legacy non-retail wisdom path
 
@@ -582,9 +588,26 @@ but not to the fire, the fire registers the record in the runner's running list
 scan, and once more per runner at the pass end, `aa_turns` delivers up to
 `min(count, cap - delivered)` applications, cap 3 for kind 2 slots and 2 for
 kind 3, and each application allocates a pool token (`SK_AAP`, 128 entries)
-whose value and timer ride the same per-kind orders. `aa_retire` reproduces the
+whose value and timer ride the same per-kind orders. Each application re-runs the
+target filter, the immunity skip and the same-team drop, so a fan at target 4, 9
+or 10 lands on the runners the engine picks at that moment. `aa_retire`
+reproduces the
 engine's deferral: an entry past its timer and past the id floor retires unless
 a later unretired entry owns a kind-2 or kind-3 slot.
+
+The running instance keeps its own timer. A `duration_usage` 4 fire extends
+`SKD_RUN_T` by `course.distance / 1000`, at most three times, once per overtake
+(`race_solver.rs:1824-1839`), and the retire sweep, the kind-1 event, the kind-2
+and kind-3 turns and the kind-2 queue gate read that extended value, matching
+the engine's `RunningSkill.timer`. `SKD_INSTANCE` stays the
+`random_active_details` countdown, which the extension never reaches, so the
+flip gate reads it. The entry walk runs in the orders of the runner whose
+overtake it is and skips an effect whose target is not self, since a copy
+delivered to another runner carries the Other perspective. A sibling the shared
+cooldown key parked copies the firing record's instance, and the walk keeps that
+copy in step with the extension: the flip for a parked sibling waits for the
+firing record's running entry, not only its `random_active_details` entry
+(`race_solver.rs:2404-2444`).
 
 Kinds 36 and 37 only file a request (`SD_RANY`/`SD_RGOLD`). `aa_select` at the
 end of each priority-0 pass rebuilds the ordered candidate list, draws one index
@@ -646,9 +669,15 @@ column there), while the plan capture stays on `SF_HPW` until a refresh.
 
 Rule: an unsupported construct is refused by the compiler before upload, the
 host flags the whole race for CPU fallback, and the flag reason names the
-construct (for example `'lane_type' is not ported`, or `skill 200333 effect
-duration_usage 4 (delayed running instance) is not ported`). The kernel never
-sees a table it cannot run.
+construct (for example `'lane_type' is not ported`, or `skill 200333
+duration_usage 4 extends type 12's per-fire aux entry, which the kernel keeps as
+one presence cell per runner`). The kernel never sees a table it cannot run.
+
+One limit is measured rather than refused: a cross-target `additionalActivate`
+fan that several hosts refan at once drifts off the engine, on two of the three
+seeds the scene runs and from tick 525 on, while the single-fire fan shapes stay
+bit-exact. See `fan_churn_tracks_the_engine` in `tests/wave9_gate.rs`, kept
+ignored as a standing reproduction until the drift is pinned.
 
 ## Bounds (enforced host-side before launch)
 

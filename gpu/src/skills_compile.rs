@@ -913,13 +913,11 @@ impl Compiler {
             // The engine keeps the raw scaled value in f64 and rounds to f32 only
             // where the duration is consumed, so the table stores the f64 product.
             let base_duration = alt.get("baseDuration").and_then(Value::as_f64).unwrap_or(0.) * 0.0001;
-            let duration_usage = alt.get("durationUsage").and_then(Value::as_i64).unwrap_or(1) as i32;
-            if duration_usage == 4 {
-                self.unsupported(format!(
-                    "skill {sid} effect duration_usage 4 (delayed running instance) is not ported"
-                ));
-                return;
-            }
+            // The engine's `as f64 as i32` cast, so a wire value past i32 reads
+            // the same tier on both sides (src/lib.rs:179-187). duration_usage
+            // 4 extends the running instance on an overtake (race_solver.rs:2655).
+            let duration_usage =
+                alt.get("durationUsage").and_then(Value::as_f64).unwrap_or(1.0) as i32;
             if effect_list.len() > SK_EMAXSLOT {
                 self.unsupported(format!(
                     "skill {sid} alternative has more than {} effects",
@@ -978,6 +976,16 @@ impl Compiler {
                     ));
                     return;
                 }
+                // The overtake extension of a duration_usage 4 fire walks the
+                // aux entries by skill id, and the kernel keeps one presence
+                // cell per runner for these kinds, with nothing to match.
+                if duration_usage == 4 && matches!(kind, 11 | 12 | 35 | 38) {
+                    self.unsupported(format!(
+                        "skill {sid} duration_usage 4 extends type {kind}'s per-fire aux entry, \
+                         which the kernel keeps as one presence cell per runner"
+                    ));
+                    return;
+                }
                 // The random-activation request is a self-side effect only;
                 // delivery to another runner has no reservation owner.
                 if matches!(kind, 36 | 37) && target != 1 {
@@ -993,24 +1001,39 @@ impl Compiler {
                 if target != 1 && kind == 4 && !dead {
                     self.live_guts = true;
                 }
-                // The extra activation is enqueued into running_skills and
-                // applied on the running skill's own turn (race_solver.rs:1841).
-                // Only the token-registering self kinds carry a follow-up
-                // application path in the kernel.
-                let aa = ef.get("additionalActivate").and_then(Value::as_i64).unwrap_or(0);
-                if aa != 0 && !(target == 1 && matches!(kind, 27 | 28 | 31)) {
+                // The extra activation is queued into running_skills and applied
+                // on that instance's own turn, where the effect re-draws its
+                // targets and delivers them at that moment (race_solver.rs:1841,
+                // 2479-2484, 2525, 2527-2537). A follow-up registers one token
+                // holding one value, so only the token-registering kinds have a
+                // path: the others write per-receiver state, the recovery share,
+                // the stat writes and their refresh, the aux presence cells, the
+                // kakari rewrite and the random-activation request.
+                let aa =
+                    ef.get("additionalActivate").and_then(Value::as_f64).unwrap_or(0.0) as i32;
+                if aa != 0 && !matches!(kind, 21 | 22 | 27 | 28 | 31) {
                     self.unsupported(format!(
-                        "skill {sid} additionalActivate {aa} on type {kind} target {target} is not ported"
+                        "skill {sid} additionalActivate {aa} on type {kind}: a follow-up \
+                         registers one token with one value, and type {kind} writes \
+                         per-receiver state"
                     ));
                     return;
                 }
-                let value_usage = ef.get("valueUsage").and_then(Value::as_i64).unwrap_or(1) as i32;
-                if !(1..=14).contains(&value_usage) {
+                if aa != 0 && !(target == 1 || matches!(target, 4 | 9 | 10)) {
                     self.unsupported(format!(
-                        "skill {sid} effect value_usage {value_usage} is not ported"
+                        "skill {sid} additionalActivate {aa} on type {kind} target {target}: \
+                         the turn's fan has no kernel target model"
                     ));
                     return;
                 }
+                // A usage with no engine arm passes the modifier through: the
+                // builder's fold matches 3..=7, 10, 12 and 13
+                // (race_solver_builder.rs:915-928), activation_modifier 8, 9 and
+                // 14 (race_solver.rs:296-312), the activation read 8, 9 and 11
+                // (race_solver.rs:2485-2503). value_fold and sk_vu_factor match
+                // the same tiers.
+                let value_usage =
+                    ef.get("valueUsage").and_then(Value::as_f64).unwrap_or(1.0) as i32;
                 let raw = ef.get("modifier").and_then(Value::as_f64).unwrap_or(0.);
                 let multiplier = match ef
                     .get("levelModifiers")

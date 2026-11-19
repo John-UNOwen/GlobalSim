@@ -488,7 +488,8 @@ static int race_tick(__global uint* scr, __global uint* si, __global float* sf,
     // expiry and cooldown start, then the priority passes with their
     // fire gate, then the live Horse rows the sample below reads.
     if (sk_on) {
-        skills_advance(skt, sks, skd, scr, si, sd, st, dt, n, dist_f, bank, paired);
+        skills_advance(skt, sks, skd, scr, si, rs, sd, st, dt, n, dist_f, course_distance,
+            bank, paired);
         skills_scan(skt, sks, skd, scr, si, sd, shl, rs, pd, sf,
             course_distance, 1, n, dist_f, 0, ev, st, bank, paired);
         skills_scan(skt, sks, skd, scr, si, sd, shl, rs, pd, sf,

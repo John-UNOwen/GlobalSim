@@ -3754,6 +3754,19 @@ static int aa_has23(__global const uint* sk, const int rec) {
     return 0;
 }
 
+// The fire's extend_on_overtake flag: any effect of the record reads
+// duration_usage 4 (race_solver.rs:2652).
+static int aa_has4(__global const uint* sk, const int rec) {
+    __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
+    const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * (int)rd[6];
+    for (int e = 0; e < (int)rd[5]; e++) {
+        if (ef[e * SK_ESTRIDE + 3] == 4u) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // Running-list append in application order, and in-place removal that keeps
 // the order the engine's Vec::remove keeps.
 static int aa_push(__global uint* scr, const int r, const int rec) {
@@ -3788,7 +3801,7 @@ static int aa_retire(__global const uint* sk, __global uint* sks,
     int retired = 0;
     for (int k = len; k >= 1; k--) {
         const int rec = (int)list[k];
-        if (skd[SKD_STRIDE * rec + SKD_INSTANCE] < 0.0) {
+        if (skd[SKD_STRIDE * rec + SKD_RUN_T] < 0.0) {
             continue;
         }
         __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
@@ -3843,45 +3856,77 @@ static int aa_pool_alloc(__global uint* scr) {
     return -1;
 }
 
+static int sk_targets(__global const uint* si, __global const uint* rs,
+    __global const uint* scr, const int r, const int target, const int limit,
+    const int n, int* outs);
+
 // Registering one delayed application. The effect re-runs its value_usage
 // dispatch (a fresh roll for the draw usages) and lands with the collected
 // duration as the override, so the coefficient never applies. The follow-up
 // path skips counters, the green insert and the instance and cooldown write
-// (race_solver.rs:2504-2539, 2642-2648).
+// (race_solver.rs:2504-2539, 2642-2648). A cross-target slot re-draws the fan
+// at its turn and takes the owner's value, which is exact for the kinds whose
+// delivery is one timer and one value in the receiver's order.
 static void aa_apply(__global const uint* sk, __global uint* scr, __global uint* si,
-    __global double* sd, __global uint* st, __global uint* bank, const int paired,
-    const int r, const int rec, const int slot, const double duration) {
+    __global const uint* rs, __global double* sd, __global uint* st, __global uint* bank,
+    const int paired, const int n, const int r, const int rec, const int slot,
+    const double duration) {
     __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
     const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * ((int)rd[6] + slot);
     const int kind = (int)ef[0];
-    const double modifier = as_double((ulong)ef[6] | ((ulong)ef[7] << 32))
-        * sk_vu_factor(bank, scr, si, r, kind, (int)ef[2], paired);
-    if (sk_is_debuff(kind, modifier) && sd[SD_IMMUNE + r] <= 0.0) {
+    const int target = (int)ef[1];
+    const double wire = as_double((ulong)ef[6] | ((ulong)ef[7] << 32));
+    const double modifier = wire * sk_vu_factor(bank, scr, si, r, kind, (int)ef[2], paired);
+    // skill_targets classifies the demerit from the effect's own modifier,
+    // before the activation's draw multiplies it (race_solver.rs:2482).
+    const int debuff = sk_is_debuff(kind, wire);
+    if (target == 1 && debuff && sd[SD_IMMUNE + r] <= 0.0) {
         return;
     }
-    const int pidx = aa_pool_alloc(scr);
-    if (pidx < 0) {
-        st[ST_FALLBACK] = 1u;
-        st[ST_ARG] = FB_SKILL_SEQ;
-        return;
+    int outs[RACE_MAXR];
+    int nrecv = 1;
+    outs[0] = r;
+    if (target != 1) {
+        nrecv = sk_targets(si, rs, scr, r, target, (int)ef[4], n, outs);
+        const uint owner_team = si[SI_TEAM + r];
+        int keep = 0;
+        for (int q = 0; q < nrecv; q++) {
+            const int j = outs[q];
+            if (debuff && sd[SD_IMMUNE + j] <= 0.0) {
+                continue;
+            }
+            if (debuff && owner_team != 0u && j != r && si[SI_TEAM + j] == owner_team) {
+                continue;
+            }
+            outs[keep++] = j;
+        }
+        nrecv = keep;
     }
-    __global uint* pool = scr + SK_AAP + SK_AAPW * pidx;
-    pool[0] = SK_TOK_EFF((uint)rec, (uint)slot);
-    pool[1] = (uint)kind;
     const ulong vbits = as_ulong(modifier);
     // new_skill_timer rounds the override to f32 first and maps a negative
     // duration to the permanent sentinel.
     const double d = (double)convert_float_rte(duration);
     const ulong tbits = as_ulong(d < 0.0 ? -INFINITY : -d);
-    pool[2] = (uint)vbits;
-    pool[3] = (uint)(vbits >> 32);
-    pool[4] = (uint)tbits;
-    pool[5] = (uint)(tbits >> 32);
-    __global uint* q = sk_seq(scr, kind) + r * SK_SEQN;
-    if (!sk_seq_push(q, (uint)(SK_TOK_AA + pidx))) {
-        pool[0] = 0u;
-        st[ST_FALLBACK] = 1u;
-        st[ST_ARG] = FB_SKILL_SEQ;
+    for (int q = 0; q < nrecv; q++) {
+        const int j = outs[q];
+        const int pidx = aa_pool_alloc(scr);
+        if (pidx < 0) {
+            st[ST_FALLBACK] = 1u;
+            st[ST_ARG] = FB_SKILL_SEQ;
+            return;
+        }
+        __global uint* pool = scr + SK_AAP + SK_AAPW * pidx;
+        pool[0] = SK_TOK_EFF((uint)rec, (uint)slot);
+        pool[1] = (uint)kind;
+        pool[2] = (uint)vbits;
+        pool[3] = (uint)(vbits >> 32);
+        pool[4] = (uint)tbits;
+        pool[5] = (uint)(tbits >> 32);
+        if (!sk_seq_push(sk_seq(scr, kind) + j * SK_SEQN, (uint)(SK_TOK_AA + pidx))) {
+            pool[0] = 0u;
+            st[ST_FALLBACK] = 1u;
+            st[ST_ARG] = FB_SKILL_SEQ;
+        }
     }
 }
 
@@ -3889,8 +3934,9 @@ static void aa_apply(__global const uint* sk, __global uint* scr, __global uint*
 // live instance delivers its kind-1 slots, three at most per slot, with the
 // durations read before any of them is applied (race_solver.rs:1857-1875).
 static void aa_event1(__global const uint* sk, __global uint* sks,
-    __global double* skd, __global uint* scr, __global uint* si, __global double* sd,
-    __global uint* st, __global uint* bank, const int paired, const int r) {
+    __global double* skd, __global uint* scr, __global uint* si, __global const uint* rs,
+    __global double* sd, __global uint* st, __global uint* bank, const int paired,
+    const int n, const int r) {
     __global uint* list = scr + SK_RUN + r * (1 + SK_RUNN);
     const int len = (int)list[0];
     int a_rec[16];
@@ -3899,7 +3945,7 @@ static void aa_event1(__global const uint* sk, __global uint* sks,
     int na = 0;
     for (int k = 1; k <= len; k++) {
         const int rec = (int)list[k];
-        const double timer = skd[SKD_STRIDE * rec + SKD_INSTANCE];
+        const double timer = skd[SKD_STRIDE * rec + SKD_RUN_T];
         if (timer >= 0.0) {
             continue;
         }
@@ -3927,7 +3973,7 @@ static void aa_event1(__global const uint* sk, __global uint* sks,
         }
     }
     for (int a = 0; a < na; a++) {
-        aa_apply(sk, scr, si, sd, st, bank, paired, r, a_rec[a], a_slot[a], a_dur[a]);
+        aa_apply(sk, scr, si, rs, sd, st, bank, paired, n, r, a_rec[a], a_slot[a], a_dur[a]);
     }
 }
 
@@ -3936,9 +3982,9 @@ static void aa_event1(__global const uint* sk, __global uint* sks,
 // delivers up to its cap, three for kind 2 and two for kind 3
 // (race_solver.rs:1901-1941).
 static void aa_turns(__global const uint* sk, __global uint* sks,
-    __global double* skd, __global uint* scr, __global uint* si, __global double* sd,
-    __global uint* st, __global uint* bank, const int paired, const float dist_f,
-    const int r, const double upto) {
+    __global double* skd, __global uint* scr, __global uint* si, __global const uint* rs,
+    __global double* sd, __global uint* st, __global uint* bank, const int paired,
+    const int n, const float dist_f, const int r, const double upto) {
     const double old_floor = sd[SD_AFLOOR + r];
     if (upto <= old_floor) {
         return;
@@ -3967,7 +4013,7 @@ static void aa_turns(__global const uint* sk, __global uint* sks,
         rs[SKR_AA_UNAPPLIED] = 0u;
         si[SI_AANU + r] -= 1u;
         const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * (int)rd[6];
-        const double dur = -skd[SKD_STRIDE * rec + SKD_INSTANCE] + (1.0 / 15.0);
+        const double dur = -skd[SKD_STRIDE * rec + SKD_RUN_T] + (1.0 / 15.0);
         for (int e = 0; e < (int)rd[5]; e++) {
             const int aa = (int)ef[e * SK_ESTRIDE + 5];
             if (aa != 2 && aa != 3) {
@@ -3993,7 +4039,7 @@ static void aa_turns(__global const uint* sk, __global uint* sks,
         }
     }
     for (int a = 0; a < na; a++) {
-        aa_apply(sk, scr, si, sd, st, bank, paired, r, a_rec[a], a_slot[a], a_dur[a]);
+        aa_apply(sk, scr, si, rs, sd, st, bank, paired, n, r, a_rec[a], a_slot[a], a_dur[a]);
     }
     if (aa_retire(sk, sks, skd, si, scr, sd, r)) {
         aa_flip(sk, sks, skd, r, dist_f);
@@ -4042,13 +4088,111 @@ static void sk_aux_step(__global double* cell, const float dt) {
     }
 }
 
+// extend_running_skills_on_overtake for one overtake of one runner: three
+// extensions per running instance, each course-distance/1000 of f64 timer off
+// the instance and off every live entry that runner owns under the same skill
+// id (race_solver.rs:1824-1839). The engine walks its five active lists, so a
+// copy delivered to another runner carries the Other perspective and stays, and
+// a sweep already ran this tick, so a live entry has a negative timer. The
+// engine runs this walk once per pending overtake, so a batch subtracts the
+// same extension once per overtake it still has room for, and nothing else
+// touches these timers between two overtakes of one batch.
+static void aa_extend(__global const uint* sk, __global uint* sks,
+    __global double* skd, __global uint* scr, const int nrec, const int r,
+    const int np, const double distance) {
+    __global uint* list = scr + SK_RUN + r * (1 + SK_RUNN);
+    const int len = (int)list[0];
+    if (len == 0 || np <= 0) {
+        return;
+    }
+    const double extension = distance / 1000.0;
+    for (int k = 1; k <= len; k++) {
+        const int rec = (int)list[k];
+        if (!aa_has4(sk, rec)) {
+            continue;
+        }
+        __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
+        __global double* wd = skd + SKD_STRIDE * rec;
+        const int room = 3 - (int)wd[SKD_AEXT];
+        const int take = np < room ? np : room;
+        if (take <= 0) {
+            continue;
+        }
+        wd[SKD_AEXT] += (double)take;
+        for (int q = 0; q < take; q++) {
+            wd[SKD_RUN_T] -= extension;
+        }
+        for (int q = 0; q < 5; q++) {
+            const uint base = q == 0 ? SK_TSEQ
+                : (q == 1 ? SK_ASEQ : (q == 2 ? SK_CSEQ : (q == 3 ? SK_LSEQ : SK_VSEQ)));
+            __global uint* ord = scr + base + r * SK_SEQN;
+            for (int i = 0; i < SK_SEQN; i++) {
+                const uint tok = ord[i];
+                if (tok == 0u) {
+                    continue;
+                }
+                const int pidx = tok >= SK_TOK_AA ? (int)(tok - SK_TOK_AA) : -1;
+                const uint meta = pidx >= 0 ? scr[SK_AAP + SK_AAPW * pidx] : tok;
+                if (meta == 0u) {
+                    continue;
+                }
+                const int er = (int)SK_TOK_REC(meta);
+                __global const uint* erd = sk + SK_RECORDS + SK_RSTRIDE * er;
+                if ((int)erd[1] != r || erd[0] != rd[0]) {
+                    continue;
+                }
+                const int slot = (int)SK_TOK_SLOT(meta);
+                const __global const uint* ef = sk + SK_EFFECTS
+                    + SK_ESTRIDE * ((int)erd[6] + slot);
+                if ((int)ef[1] != 1) {
+                    continue;
+                }
+                if (pidx >= 0) {
+                    __global uint* pool = scr + SK_AAP + SK_AAPW * pidx;
+                    double t = as_double((ulong)pool[4] | ((ulong)pool[5] << 32));
+                    if (t < 0.0) {
+                        for (int w = 0; w < take; w++) {
+                            t -= extension;
+                        }
+                        const ulong bits = as_ulong(t);
+                        pool[4] = (uint)bits;
+                        pool[5] = (uint)(bits >> 32);
+                    }
+                } else {
+                    __global double* ewd = skd + SKD_STRIDE * er;
+                    for (int w = 0; w < take && ewd[SKD_EFF_T + slot] < 0.0; w++) {
+                        ewd[SKD_EFF_T + slot] -= extension;
+                    }
+                }
+            }
+        }
+        // The cooldown key keeps one waiting entry, keyed by the firing
+        // record's (skill id, detail), so a sibling that fire parked flips on
+        // this instance's running timer, which an overtake extends
+        // (race_solver.rs:2341, 2387, 2421-2424).
+        for (int pr = 0; pr < nrec; pr++) {
+            if (pr == rec || (int)sks[SKR_STRIDE * pr + SKR_STATE] != (uint)SK_S_WAITING) {
+                continue;
+            }
+            __global const uint* srd = sk + SK_RECORDS + SK_RSTRIDE * pr;
+            if ((int)srd[1] != r || srd[0] != rd[0]) {
+                continue;
+            }
+            __global double* swd = skd + SKD_STRIDE * pr;
+            for (int w = 0; w < take && swd[SKD_INSTANCE] < 0.0; w++) {
+                swd[SKD_INSTANCE] -= extension;
+            }
+        }
+    }
+}
+
 // start_expired_skill_cooldowns for one whole field, after the per-runner
 // prepare loop. Dead records keep stepping because the engine's timer map is
 // keyed by the firing, not by the pending record's life.
 static void skills_advance(__global const uint* sk, __global uint* sks,
-    __global double* skd, __global uint* scr, __global uint* si, __global double* sd,
-    __global uint* st, const float dt, const int n, const float dist_f,
-    __global uint* bank, const int paired) {
+    __global double* skd, __global uint* scr, __global uint* si, __global const uint* rs,
+    __global double* sd, __global uint* st, const float dt, const int n,
+    const float dist_f, const double distance, __global uint* bank, const int paired) {
     const int nrec = (int)sk[SK_NREC];
     // The aux lifetimes the target filter and the lane search read, stepped
     // and swept like the engine's active_aux_skills retain, which keeps
@@ -4086,6 +4230,7 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
             wd[w] = (double)(convert_float_rte((float)wd[w]) + dt);
         }
         wd[SKD_INSTANCE] = (double)(convert_float_rte((float)wd[SKD_INSTANCE]) + dt);
+        wd[SKD_RUN_T] = (double)(convert_float_rte((float)wd[SKD_RUN_T]) + dt);
         wd[SKD_COOLDOWN] = (double)(convert_float_rte((float)wd[SKD_COOLDOWN]) + dt);
         // expire_skill_effects: an active token whose duration timer reached
         // zero leaves every receiver's order, the caster's own included. The
@@ -4114,11 +4259,16 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
     // activations, and start_expired_skill_cooldowns runs last per runner
     // (race_solver.rs:849-850, 1976-1997).
     for (int r = 0; r < n; r++) {
-        aa_retire(sk, sks, skd, si, scr, sd, r);
         const int np = (int)si[SI_PENDN + r];
+        // The retail history runs the extensions before the retire sweep, so an
+        // instance extended past its expiry this tick stays in the list
+        // (race_solver.rs:1779-1797). One pass carries the whole batch, since
+        // the engine repeats the same walk per pending overtake.
+        aa_extend(sk, sks, skd, scr, nrec, r, np, distance);
+        aa_retire(sk, sks, skd, si, scr, sd, r);
         si[SI_PENDN + r] = 0u;
         for (int q = 0; q < np; q++) {
-            aa_event1(sk, sks, skd, scr, si, sd, st, bank, paired, r);
+            aa_event1(sk, sks, skd, scr, si, rs, sd, st, bank, paired, n, r);
         }
     }
     for (int r = 0; r < n; r++) {
@@ -4261,7 +4411,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                 continue;
             }
             __global uint* ars = sks + SKR_STRIDE * rr;
-            if (skd[SKD_STRIDE * rr + SKD_INSTANCE] >= 0.0
+            if (skd[SKD_STRIDE * rr + SKD_RUN_T] >= 0.0
                 && (double)ard[0] <= floor) {
                 continue;
             }
@@ -4276,6 +4426,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
     const int n_eff = (int)rd[5];
     double runtime = 0.0;
     int aa_any = 0;
+    int ext4 = 0;
     for (int e = 0; e < n_eff; e++) {
         const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * (eff_base + e);
         const int kind = (int)ef[0];
@@ -4288,6 +4439,9 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
         const float m2 = m1 * convert_float_rte(coeff);
         const double scaled = (double)(m2 * 1.0f);
         runtime = fmax(runtime, scaled);
+        if (ef[3] == 4u) {
+            ext4 = 1;
+        }
         if (ef[5] != 0u) {
             // An additionalActivate effect waits for its turn in a running
             // skill instead of applying now, after its duration has already
@@ -4509,10 +4663,13 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
         }
     }
     wd[SKD_INSTANCE] = runtime > 0.0 ? -runtime : 0.0;
-    if (aa_any && runtime > 0.0) {
-        // The running instance exists once the fire left delayed effects and
-        // a positive duration behind; its timer is the instance timer
-        // (race_solver.rs:2650-2658, duration_usage 4 never extends it).
+    wd[SKD_RUN_T] = wd[SKD_INSTANCE];
+    wd[SKD_AEXT] = 0.0;
+    if ((aa_any || ext4) && runtime > 0.0) {
+        // The running instance exists once the fire left a positive duration
+        // behind with a delayed effect or a duration_usage 4 effect, and it
+        // carries its own timer, which an overtake extends
+        // (race_solver.rs:2650-2660).
         sks[SKR_STRIDE * rec + SKR_AA_RUN] = 1u;
         if (!aa_push(scr, r, rec)) {
             st[ST_FALLBACK] = 1u;
@@ -4771,7 +4928,7 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
                     }
                     continue;
                 }
-                aa_turns(sk, sks, skd, scr, si, sd, st, bank, paired, dist_f, r,
+                aa_turns(sk, sks, skd, scr, si, rs, sd, st, bank, paired, n, dist_f, r,
                     (double)rd[0]);
             }
             if (rd[2] & SK_FLAG_ANYACT) {
@@ -4848,7 +5005,7 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
             // The pass end gives every running skill still short of a turn
             // its turn, then the random-skill reservations are recomputed
             // (race_solver.rs:2105-2119, 2318-2320).
-            aa_turns(sk, sks, skd, scr, si, sd, st, bank, paired, dist_f, r, 1e300);
+            aa_turns(sk, sks, skd, scr, si, rs, sd, st, bank, paired, n, dist_f, r, 1e300);
             aa_select(sk, sks, skd, scr, si, sd, bank, paired, r);
         }
     }

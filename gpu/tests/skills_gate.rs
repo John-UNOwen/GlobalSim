@@ -207,9 +207,33 @@ fn unsupported_construct_flags_the_whole_race() {
     let base = v77_line();
     let geometry = std::fs::read_to_string(repo_file("data/course_geometry/10504.json")).expect("geometry file");
     globalsim::register_course_geometry(10504, geometry);
-    // duration_usage 4 keeps the delayed running-instance path the kernel has
-    // no model for, so the whole race flags and the reason names the use.
-    let request = race_exec::skills_request(&base, 10504, 1, 0, &SKILLS, Some((200333, 4)))
+    // A duration_usage 4 fire extends each of that skill's aux entries by
+    // skill id, and the kernel keeps one lane-preference cell per runner, so
+    // the race flags and the reason names the construct. The same alternative
+    // without the aux kind compiles: 100531 and 900531 are that shape.
+    let mut value = json::parse(&base).expect("base parses");
+    if let json::Value::Object(map) = &mut value {
+        if let Some(json::Value::Object(sd)) = map.get_mut("skillData") {
+            if let Some(json::Value::Object(entry)) = sd.get_mut("200333") {
+                if let Some(json::Value::Array(alts)) = entry.get_mut("alternatives") {
+                    if let Some(json::Value::Object(alt)) = alts.get_mut(0) {
+                        alt.insert("durationUsage".into(), json::Value::Number(4.));
+                        alt.insert(
+                            "effects".into(),
+                            json::arr(vec![json::obj(vec![
+                                ("type", json::Value::Number(12.)),
+                                ("target", json::Value::Number(1.)),
+                                ("modifier", json::Value::Number(1.)),
+                            ])]),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let mut patched = String::new();
+    json::to_string_into(&value, &mut patched);
+    let request = race_exec::skills_request(&patched, 10504, 1, 0, &SKILLS, None)
         .expect("patched request");
     let out = race_exec::run(&[(request.clone(), 1i64)]).expect("kernel run");
     let race = &out.races[0];

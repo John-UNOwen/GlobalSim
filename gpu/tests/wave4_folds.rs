@@ -109,8 +109,7 @@ fn stat_kinds_cross_with_exact_refresh() {
 #[test]
 fn lane_goal_kinds_compile_both_directions() {
     // 11 and 12 arm a lane-preference presence, 35 a last-set lane goal; all
-    // three lower now the passing search consumes them, and the unported
-    // duration_usage tiers still refuse.
+    // three lower now the passing search consumes them.
     for kind in [11i64, 12, 35] {
         let effect = format!("{{\"type\":{kind},\"target\":1,\"modifier\":1000}}");
         is_live(
@@ -160,8 +159,8 @@ fn random_kinds_compile_and_immune_arms() {
 
 #[test]
 fn additional_activate_names_the_deferred_turn() {
-    // Wave 6b ports the self kinds; the turn machinery runs them in the
-    // kernel, so only cross-target or unregistered kinds still refuse.
+    // Wave 6b ports the self kinds and wave 9 the cross-target fan, so only a
+    // kind whose delivery writes per-receiver state still refuses.
     let live = format!(
         "{{\"rarity\":1,\"wisdomCheck\":0,\"priority\":0,\"alternatives\":[{{\"precondition\":\"\",\"condition\":\"order>=2\",\"cooldown\":60000,\"effects\":[{{\"type\":27,\"target\":1,\"modifier\":1000,\"additionalActivate\":2}}]}}]}}"
     );
@@ -172,9 +171,9 @@ fn additional_activate_names_the_deferred_turn() {
     let cross = format!(
         "{{\"rarity\":1,\"wisdomCheck\":0,\"priority\":0,\"alternatives\":[{{\"precondition\":\"\",\"condition\":\"order>=2\",\"cooldown\":60000,\"effects\":[{{\"type\":27,\"target\":9,\"targetValue\":2,\"modifier\":1000,\"additionalActivate\":2}}]}}]}}"
     );
-    refused(
+    is_live(
         &plan_skill(&cross, r#"{"skills":["550001"],"teamId":2}"#),
-        "additionalActivate 2 on type 27 target 9",
+        "additionalActivate cross-target kind",
     );
     let roll = format!(
         "{{\"rarity\":1,\"wisdomCheck\":0,\"priority\":0,\"alternatives\":[{{\"precondition\":\"\",\"condition\":\"order>=2\",\"cooldown\":60000,\"effects\":[{{\"type\":9,\"target\":1,\"modifier\":1000,\"additionalActivate\":3}}]}}]}}"
@@ -186,20 +185,17 @@ fn additional_activate_names_the_deferred_turn() {
 }
 
 #[test]
-fn value_usage_tiers_stay_refused() {
-    // Wave 6b closes the runtime half: 8 and 9 draw at activation and 11 and
-    // 14 read live counters, so no value_usage 1..=14 refuses on its own.
-    for vu in [3i64, 7, 8, 9, 10, 11, 12, 13, 14] {
+fn value_usage_tiers_compile_at_every_wire_value() {
+    // The engine has no arm for a usage outside its tiers and no build-time
+    // error, so nothing refuses on the usage number: the in-range tiers keep
+    // their folds and the rest pass the modifier through.
+    for vu in [0i64, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 99, -3, 100000] {
         let effect = format!("{{\"type\":27,\"target\":1,\"modifier\":1000,\"valueUsage\":{vu}}}");
         is_live(
             &one_runner("order>=2", 500000, &[effect.as_str()]),
             &format!("value_usage {vu}"),
         );
     }
-    refused(
-        &one_runner("order>=2", 500000, &[r#"{"type":27,"target":1,"modifier":1000,"valueUsage":15}"#]),
-        "value_usage 15",
-    );
 }
 
 #[test]

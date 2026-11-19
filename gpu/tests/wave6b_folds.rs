@@ -2,8 +2,8 @@
 //! time (race_solver_builder.rs:908-939) lower into the level-resolved
 //! modifier, from the request's team totals, career wins, fans and the
 //! displayed-stat tier, each band checked on both sides. The 21 merged-table
-//! ids that carry a tier lower, and the runtime usages 8, 9, 11 and 14 refuse
-//! by name until the kernel carries their draw and counters.
+//! ids that carry a tier lower. The runtime usages 8, 9, 11 and 14 lower too,
+//! since the kernel carries the draw and the counters they read.
 
 use globalsim_gpu::{json, skills_compile};
 
