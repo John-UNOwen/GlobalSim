@@ -73,6 +73,7 @@ pub const SK_FLAG_RSELIG: u32 = 512;
 pub const SK_FLAG_RANGOLD: u32 = 1024;
 pub const SK_FLAG_RANWHITE: u32 = 2048;
 pub const SK_FLAG_GENERAL: u32 = 4096;
+pub const SK_FLAG_BUMPED: u32 = 8192;
 
 pub const SK_TERM_ALL_CORNER: u32 = 0;
 pub const SK_TERM_STRAIGHT: u32 = 1;
@@ -934,6 +935,17 @@ impl Compiler {
             // The random-activation candidate filter keeps a record only when
             // every effect has a non-negative duration and a type past
             // WisdomUp that is not AllStatusUp (race_solver.rs:2710-2711).
+            // A phase gate keeps an arm false at time zero in both engines,
+            // the guard a mid-race wisdom fire needs. Phase terms carry the
+            // threshold in the term, the leaf keeps the comparator.
+            let phase_gated = groups.iter().all(|(gs, ge)| {
+                leaves[*gs..*ge].iter().enumerate().any(|(k, l)| {
+                    matches!(l, Leaf::Dynamic { feat: FEAT_RPHASE, cmp, arg: None }
+                        if (*cmp == 5 && terms[*gs + k].arg >= 1)
+                            || (*cmp == 4 && terms[*gs + k].arg >= 0))
+                })
+            });
+            let mut bumped = false;
             let mut selig = true;
             for ef in effect_list {
                 let kind = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
@@ -967,13 +979,13 @@ impl Compiler {
                     ));
                     return;
                 }
-                // Kinds 1, 4 and 5 on another runner write the receiver's stats
-                // through a refresh the kernel does not model. MultiplyStartDelay
-                // there is inert in retail, so it fires without a state write.
-                if target != 1 && matches!(kind, 1 | 4 | 5) {
+                // Cross stats delivery re-runs refresh_stat_effects on the
+                // receiver. SpeedUp and WisdomUp refresh in exact f64; GutsUp
+                // needs live-guts powf terms that prepare bakes. Kind 4 stays.
+                if target != 1 && kind == 4 {
                     self.unsupported(format!(
-                        "skill {sid} effect type {kind} targeting another runner writes the \
-                         receiver stat bump the kernel has no consumer for"
+                        "skill {sid} effect type 4 targeting another runner needs a mid-race \
+                         guts powf the kernel bakes at prepare"
                     ));
                     return;
                 }
@@ -1005,17 +1017,30 @@ impl Compiler {
                     _ => level_multiplier(kind, level),
                 };
                 let modifier = self.value_fold(runner, horse, value_usage, retail_skill_value(raw, multiplier));
-                // The mid-race stat bump has no kernel consumer and moves live
-                // engine state the kernel caches, so only construction-time
-                // fires of these kinds are portable.
-                if matches!(kind, 4 | 5) && !(static_fire && target == 1) {
+                // The live guts readers take an f32 powf of runtime guts (the
+                // spurt maximum term, the duel and spot entry words), so a
+                // GutsUp bump only ports as a construction-time constant.
+                if kind == 4 && !(static_fire && target == 1) {
                     self.unsupported(format!(
-                        "skill {sid} effect type {kind} only ports as a construction-time bump"
+                        "skill {sid} effect type 4 only ports as a construction-time bump"
+                    ));
+                    return;
+                }
+                // A WisdomUp self fire moves the live field the pace and
+                // downhill draws read each tick. Every arm needs a
+                // false-at-zero phase gate: one ungated arm short-circuits
+                // the field leaves and fires in the constructor pass, where
+                // the engine moves the field ahead of the baked init draws.
+                if kind == 5 && target == 1 && !static_fire && !dead && !phase_gated {
+                    self.unsupported(format!(
+                        "skill {sid} effect type 5 without a phase gate could fire in the \
+                         constructor pass ahead of the baked init draws"
                     ));
                     return;
                 }
                 if static_fire && target == 1 && matches!(kind, 4 | 5 | 29) {
                     self.bumps.push((runner, kind, modifier));
+                    bumped = true;
                 }
                 let target_value =
                     ef.get("targetValue").and_then(Value::as_f64).unwrap_or(0.).max(0.0);
@@ -1071,7 +1096,8 @@ impl Compiler {
                 | (if selig { SK_FLAG_RSELIG } else { 0 })
                 | (if matches!(rarity, 2 | 6) { SK_FLAG_RANGOLD } else { 0 })
                 | (if rarity == 1 { SK_FLAG_RANWHITE } else { 0 })
-                | (if general { SK_FLAG_GENERAL } else { 0 });
+                | (if general { SK_FLAG_GENERAL } else { 0 })
+                | (if bumped { SK_FLAG_BUMPED } else { 0 });
             self.words[at + 3] = priority as u32;
             self.words[at + 4] = rarity;
             self.words[at + 5] = (self.neff - eff_base) as u32;

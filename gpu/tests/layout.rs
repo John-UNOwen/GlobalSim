@@ -24,7 +24,9 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     assert_eq!(re::SRL_WORDS, 233120);
     // Input and status strides track RACE_MAXR.
     assert_eq!(re::RI_STRIDE, 1592);
-    assert_eq!(re::RIL_STRIDE, 2072);
+    // Wave 7 grew the pd runner block from 8 to 9 words for the unclamped
+    // wisdom accumulator word (RIL_STRIDE 2072 to 2192).
+    assert_eq!(re::RIL_STRIDE, 2192);
     assert_eq!(re::ST_STRIDE, 1088);
     // The pd runner block, race scalars and per-runner precompute block stack
     // in that order, each behind the last per the kernel's formulas.

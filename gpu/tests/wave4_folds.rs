@@ -94,14 +94,15 @@ fn start_delay_cross_target_fires_inert() {
 
 #[test]
 fn stat_kinds_still_refuse_cross_targets() {
-    // SpeedUp, GutsUp and WisdomUp on another runner write the receiver stats
-    // through a refresh the kernel has no consumer for.
-    for kind in [1i64, 4, 5] {
+    // GutsUp on another runner needs a mid-race guts powf the kernel bakes at
+    // prepare. SpeedUp and WisdomUp refresh in exact f64, so they cross.
+    refused(
+        &one_runner("order>=2", 500000, &[r#"{"type":4,"target":9,"modifier":1000}"#]),
+        "targeting another runner",
+    );
+    for kind in [1i64, 5] {
         let effect = format!("{{\"type\":{kind},\"target\":9,\"modifier\":1000}}");
-        refused(
-            &one_runner("order>=2", 500000, &[effect.as_str()]),
-            "targeting another runner",
-        );
+        is_live(&one_runner("order>=2", 500000, &[effect.as_str()]), "stat cross");
     }
 }
 

@@ -65,12 +65,14 @@ Suites:
 | `wave2b_gate` (gpu + initialization + geometry + race) | Ten real merged skills, one per ported effect family, plus a twelve-skill synthetic battery firing every cross-target and bump path, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-2b effect side") |
 | `wave3_folds` | Compile-time gates for the wave-3 leaves: the in-band cell forms, the activation-history folds including the provably-false self-gate, the roster reads in both fold directions, the opponent-count team gate and the still-refused names |
 | `wave3_gate` (gpu + initialization + geometry + race) | Fourteen real merged rows, one per ported construct with the seats the condition needs, plus a twenty-eight-skill synthetic battery firing every new leaf, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-3 condition tail") |
-| `wave4_folds` | Compile-time gates for the effect tail: cross debuffs compile on any roster, a cross-target start-delay fires inert, and the still-refused effect families (all-stat 32, variantless 33/34, stat cross 1/4/5) plus the refused `value_usage` 15 and the cross-target random kinds refuse by name with the reason; lane goals, kakari, immunity, kinds 36/37 at self target and the shared-key alternative pair assert live records (see "Wave-6a lane, rush and cooldown tail") |
+| `wave4_folds` | Compile-time gates for the effect tail: cross debuffs compile on any roster, a cross-target start-delay fires inert, and the still-refused effect families (all-stat 32, variantless 33/34, GutsUp cross 4) plus the refused `value_usage` 15 and the cross-target random kinds refuse by name with the reason; lane goals, kakari, immunity, kinds 36/37 at self target and the shared-key alternative pair assert live records (see "Wave-6a lane, rush and cooldown tail") |
 | `wave4_gate` (gpu + initialization + geometry + race) | The real cross-debuff 910581 on a teamed roster plus a four-skill battery forcing the same-team drop, the different-team delivery and the inert cross start-delay both ways, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-4 effect tail") |
 | `wave6a_folds` | Compile-time gates for the wave-6a constructs: lane goal and immunity records compile live for self and cross targets, stray target combinations refuse, and the shared-key alternative pair lowers both live alternatives (see "Wave-6a lane, rush and cooldown tail") |
 | `wave6a_gate` (gpu + initialization + geometry + race) | The real shared-cooldown pair 910151, the real SetTargetLane 201261 and the real ExtendKakari 200801 on fitted seats, plus a ten-skill synthetic battery firing kinds 11, 12, 13 (self and group), 35 (self and delivered), 38 and the shared-key pair both ways, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-6a lane, rush and cooldown tail") |
 | `wave6b_folds` | Compile-time gates: the runtime `value_usage` readers (8, 9, 11, 14) and the self-target additionalActivate shapes compile live, and `value_usage` 15 refuses by name (see "Wave-6b activation-time values and turns") |
 | `wave6b_gate` (gpu + initialization + geometry + race) | The real merged ids for value_usage 8/11/14 (202031, 202032, 910341, 100981), additionalActivate (910211, 910351) and kind 37 (910071) on fitted seats, plus a 667xxx battery for kind 36, value_usage 9, the aa 1 cap and the never-fires white candidate, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-6b activation-time values and turns") |
+| `wave7_folds` | Compile-time gates for the mid-race stat fires: cross SpeedUp and WisdomUp compile live on targets 4, 9 and 10, the GutsUp cross and ungated self WisdomUp refuse by name, every phase-gated self WisdomUp shape lowers, and `SK_FLAG_BUMPED` marks exactly the static 4/5/29 bumps (see "Wave-7 mid-race stat fires") |
+| `wave7_gate` (gpu + initialization + geometry + race) | The real kind-1 loop fire 201641 beside a constructor-pass SpeedUp probe, plus a 668xxx battery for self WisdomUp refire, the static-bump-to-loop-fire accumulator chain, cross SpeedUp and WisdomUp on all three fans, the 10 s refire cycle and the immune and same-team debuff drops, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-7 mid-race stat fires") |
 | `grid_gate` (gpu + initialization + geometry + race) | Grid starts at 21, 24, 40 and 120 horses, two courses, seeds 1..2: zero fallback and frame-for-frame `to_bits` identity against the CPU engine, the 21-horse grid-vs-retail control pair differing at frame 0, and invalid grid shapes falling back with the engine's own message (see "Grid mode") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 
@@ -847,11 +849,11 @@ kernel cannot run.
 - Construction-time bumps: `GutsUp(4)`, `WisdomUp(5)` and
   `ModifyKakariChance(29)` on a static-fire self record apply host-side to
   the init inputs (the `add_stat_modifier` f32 chain and the kakari-chance
-  fold, `PRD` rows 5 to 7). Kinds 4 and 5 anywhere else refuse ("only ports
-  as a construction-time bump"), kinds 1, 4, 5 and 10 aimed at another runner
-  refuse, and a targeted negative modifier (debuff) refuses unless every
-  roster team id is zero, because the engine silently drops same-team
-  receivers.
+  fold, `PRD` rows 5 to 7, the WisdomUp accumulator in `PRD_WIS_ACC`). The
+  record carries `SK_FLAG_BUMPED` so its init-pass fire skips the write the
+  host folded. Kind 4 anywhere else refuses ("only ports as a
+  construction-time bump"), a self WisdomUp without an all-arms phase gate
+  refuses, and kind 4 aimed at another runner refuses.
 - `Recovery(9)` self fires heal the count, positive-only and self-side only,
   and bank HP that lands at the step head (a gain in the last two phases
   defers the last-spurt plan, as in the engine). `Vision(8)` folds per tick
@@ -1019,13 +1021,13 @@ authority:
   modifier. For every cross-deliverable queued kind (8, 9, 21, 22, 27, 28, 31)
   the drop condition is exactly "modifier negative", because `is_skill_demerit`
   (`race_field.rs:55-63`) agrees with the sign there and `value_usage` is pinned
-  to 1 on delivery. Debuff immunity, the filter's other arm, stays refused with
-  kind 38, so it reads false.
+  to 1 on delivery. Debuff immunity, the filter's other arm, refused with kind
+  38 in this wave and landed with wave 6a.
 - `MultiplyStartDelay(10)` at another runner: the retail receiver arm does nothing
   (initialization already applied the start gate), so the record now fires inert.
-  SpeedUp, GutsUp and WisdomUp (1, 4, 5) at another runner stay refused: they
-  write the receiver's stats through a full `refresh_stat_effects` the kernel does
-  not model.
+  SpeedUp, GutsUp and WisdomUp (1, 4, 5) at another runner stayed refused: they
+  write the receiver's stats through a full `refresh_stat_effects`. SpeedUp and
+  WisdomUp landed with wave 7, GutsUp stays refused.
 - Lane goals 11, 12 (a lane-preference presence flag) and 35 (a last-set
   `lane_target`), read by the passing-lane search (`race_solver.rs:1310-1358`): the
   kernel already threaded a `lane_preference` and `fixed_goal` argument through the
@@ -1243,6 +1245,67 @@ of the 8 running slots for the rest of the race, and more than 8 such records
 for one runner flag the race (same for the 128-entry pool and 16 candidates per
 pass); the other-advantage classifier stays unmodeled as before (no merged
 consumer of the aa-1 window is reachable with real ids).
+
+### Wave-7 mid-race stat fires
+
+The last skill-family refusals, cross SpeedUp and WisdomUp and the self
+WisdomUp mid-race fire. GutsUp stays refused, self and cross, and the block
+is written up below.
+
+- A self fire writes the accumulator and the clamped field only: the
+  engine's self path returns without a refresh (`race_solver.rs:2644-2674`).
+  A mid-race WisdomUp self fire needs every arm gated false at phase zero,
+  so the constructor pass cannot fire it and move the field ahead of the
+  kernel's baked init draws and section rolls. The kernel's new `SD_HPW`
+  column carries the live wisdom field, read by the pace and downhill draws
+  each tick (`race_solver_retail.rs:899` and `:1118`), and the spurt plan
+  keeps its `SF_HPW` capture until a refresh, as in the engine.
+- `PRD` row 8 (`PRD_WIS_ACC`) carries the unclamped wisdom accumulator when
+  a static WisdomUp bump folded into the init inputs, NaN when none did, so
+  a loop fire chains onto the construction bump instead of the clamped
+  field. `PD_RUN_STRIDE` grew 8 to 9 (`RIL_STRIDE` 2072 to 2192, repinned
+  in `tests/layout.rs`), the two new SD columns (`SD_HPW`, `SD_HPW_A`) fit
+  the existing SD slot budget, and `SCR_U_WORDS`/`SRL_WORDS` are unchanged.
+- The cross delivery writes each receiver's stat (SpeedUp also repatches the
+  cached spurt maximum from the bumped speed, the value the engine's plan
+  closure recomputes at the next spurt decision) and then runs the
+  delivery's refresh, `sk_stat_refresh`: the target base rewrites to the
+  legacy f64 formula (`race_solver.rs:43-60`) from the clamped speed field,
+  HP takes the init-plus-spend f32 re-round, and the spurt-plan wisdom
+  capture recaptures from the live field. The refresh's `min_speed`, legacy
+  `last_spurt_speed` and `base_accel` rewrites are skipped as retail-dead:
+  the step head recomputes the retail minimum and the phase-2 spurt before
+  any consumer reads them (`race_solver_retail.rs:961` and `:1007-1034`),
+  the sole pre-phase-2 spurt-speed reader is the unmodeled staminasyoubu
+  hook, and the accel chain recomputes from power.
+- GutsUp stays refused at any mid-race fire: the spurt maximum term, the
+  duel entry and the spot entry read `powf(bounded_stat(guts) * spurt[2],
+  spurt[3])` from the runtime guts at every plan recompute
+  (`retail_physics.rs:362`, `race_solver.rs:2928-2939` and `:3194-3207`),
+  and the kernel holds that term as the one prepare-baked `PRD_POWF` word
+  per runner, so a live guts change would re-roll lotteries the port cannot
+  replay.
+- Gates: `wave7_folds` compiles each shape alone. `wave7_gate` replays the
+  v77 roster seeds 1..3 with zero fallback: self wisdom on a 15 s refire
+  and a phase-2 drop (668001/668002), static bump then loop fire on one
+  runner (668030/668031), all three cross fans on both kinds (668010 to
+  668012 and 668020 to 668022, the self-inclusive behind fan refreshes the
+  owner), a 10 s refire cycle (668050), a negative cross wisdom dropped at
+  selection by the immune runner and the same-team runner while the rest of
+  the field takes write and refresh (668041/668042), and the real kind-1
+  loop fire 201641 beside the constructor-pass SpeedUp probe 668060, whose
+  fire the CPU event stream cannot see, so frame identity pins the
+  constructor ordering. No merged id fires kinds 1, 4 or 5 mid-race or
+  cross, so the battery carries those paths.
+
+Sharp edges: the first cross SpeedUp flips the receiver's target base from
+the retail form to the legacy form for the rest of the race, exactly as the
+engine's refresh does (`race_solver.rs:1332`); the refresh count must equal
+the delivery count because the HP re-round re-runs per (effect, receiver),
+an idempotent round trip the kernel mirrors one for one; a self WisdomUp
+leaves the spurt-plan capture stale until the next cross delivery refreshes
+it, engine behavior the gates reproduce; the duel and spot `PRD` words stay
+exact only while guts stays immutable, which the GutsUp refusal holds.
 
 ### Cost
 

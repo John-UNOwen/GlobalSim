@@ -182,7 +182,7 @@
 #define PD_FC_HALF0 (PD_CF_DIST + 11)          // final_corner_half start, NaN when the course has none
 #define PD_FC_HALF1 (PD_CF_DIST + 12)          // final_corner_half end
 #define PD_RUN0 (PL_FRONT_LANE + 32)           // per runner, stride PD_RUN_STRIDE
-#define PD_RUN_STRIDE 8
+#define PD_RUN_STRIDE 9
 #define PRD_POWF 0             // per-runner spurt powf bits as the integer value
 #define PRD_DUEL_T 1           // duel target-speed modifier, f64
 #define PRD_DUEL_A 2           // duel accel modifier, f64
@@ -191,6 +191,7 @@
 #define PRD_BOOST_GUTS 5       // bumped guts field f64, 0 when no bump
 #define PRD_BOOST_WIS 6        // bumped wisdom field f64, 0 when no bump
 #define PRD_RUSH_BONUS 7       // rushing bonus f32 bits as the integer value
+#define PRD_WIS_ACC 8          // bumped wisdom accumulator f64, NaN when no bump
 
 // ---------------------------------------------------------------------------
 // Per-race scratch bases, u32 words at scratch + SCR_* (the im_* blocks) and
@@ -502,6 +503,8 @@
 #define SD_AFLOOR (SD_GOALT + SK_GOALN * RACE_MAXR)
 #define SD_RGOLD (SD_AFLOOR + RACE_MAXR)
 #define SD_RANY (SD_RGOLD + RACE_MAXR)
+#define SD_HPW (SD_RANY + RACE_MAXR)        // horse.wisdom field, f64
+#define SD_HPW_A (SD_HPW + RACE_MAXR)       // retail_stat_values[4], f64 of an f32 accumulator
 #define SRL_RUNNER 0
 #define SRL_HP SD_STRIDE          // hp columns, SH_STRIDE per runner
 #define SH_STRIDE 8
@@ -4130,6 +4133,54 @@ static int sk_targets(__global const uint* si, __global const uint* rs,
     return cnt;
 }
 
+// The engine's legacy base_target_speed (race_solver.rs:43-60). One
+// refresh_stat_effects call replaces the field enable_retail_runtime had set
+// to the retail form (race_solver_retail.rs:647) with these f64 values.
+static double phys_legacy_base_target_speed(const double distance, const int strategy,
+    const int phase, const double speed, const int distapt) {
+    // Strategy rows are 1-indexed, row 0 the engine's unused zero row.
+    const double coeff[6][3] = {
+        { 0.0, 0.0, 0.0 },
+        { 1.0, 0.98, 0.962 },
+        { 0.978, 0.991, 0.975 },
+        { 0.938, 0.998, 0.994 },
+        { 0.931, 1.0, 1.0 },
+        { 1.063, 0.962, 0.95 }
+    };
+    const double prof[8] = { 1.05, 1.0, 0.9, 0.8, 0.6, 0.4, 0.2, 0.1 };
+    const double base_speed = 20.0 - (distance - 2000.0) / 1000.0;
+    const double sel = (phase == 2) ? 1.0 : 0.0;
+    return base_speed * coeff[strategy][phase]
+        + (((sel * sqrt(500.0 * speed)) * prof[distapt]) * 0.002);
+}
+
+// The live writes of refresh_stat_effects (race_solver.rs:1330-1340): the
+// target base flips to the legacy form from the clamped speed field, HP goes
+// through the init-plus-spend re-round and the hp context recaptures wisdom.
+// The min_speed and last_spurt_speed rewrites are dead in retail: the step
+// head recomputes both before any consumer (race_solver_retail.rs:961 and
+// 1007-1034), and the legacy last_spurt_speed carries an f64 guts powf whose
+// only pre-phase-2 reader is the unmodeled staminasyoubu gate.
+static void sk_stat_refresh(__global const uint* si, __global double* sd,
+    __global double* shl, __global float* sf, const double distance, const int r) {
+    const double speed = fmin(fmax((double)(float)sd[SD_HPS + r], 1.0), 2000.0);
+    const int strategy = (int)si[SI_STRATEGY + r];
+    const int distapt = (int)si[SI_DISTAPT + r];
+    for (int ph = 0; ph < 3; ph++) {
+        sd[SD_BTS + ph * RACE_MAXR + r] = phys_legacy_base_target_speed(
+            distance, strategy, ph, speed, distapt);
+    }
+    // initial_hp and hp_guts_factor rewrite max_hp and SF_HPG with
+    // bit-identical values: strategy, distance and their stat inputs are
+    // unchanged, and GutsUp never fires mid-race in this port.
+    const double max_hp = shl[r * SH_STRIDE + SH_MAX];
+    const double spent = max_hp - shl[r * SH_STRIDE + SH_HP];
+    shl[r * SH_STRIDE + SH_HP] = (double)fmin(
+        fmax((float)max_hp - (float)spent, 0.f), (float)max_hp);
+    // hp.init recaptures retail.wisdom from the live horse.wisdom field.
+    sf[SF_HPW + r] = convert_float_rte(sd[SD_HPW + r]);
+}
+
 // The fire bookkeeping of fire_pending_skill and apply_activation for one
 // record: the duration-timer kinds register a receiver token, recovery and
 // the raw stat bump write state directly, the largest scaled duration becomes
@@ -4138,7 +4189,7 @@ static int sk_targets(__global const uint* si, __global const uint* rs,
 // pending record removed).
 static void skills_fire(__global const uint* sk, __global uint* sks,
     __global double* skd, __global uint* scr, __global uint* si,
-    __global const double* shl, __global double* sd, __global const double* pd,
+    __global double* shl, __global double* sd, __global const double* pd,
     __global float* sf, __global const uint* rs, const int rec, const int r,
     const double hp, const double gap, const float dist_f, const int init_pass,
     const int n, const double distance, __global uint* ev, __global uint* st,
@@ -4243,6 +4294,33 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                         // (retail_states.rs:154-158, race_solver.rs:2584-2590).
                         sf[SF_RS_FORCED + j] = fmax(convert_float_rte(modifier), 0.f);
                     }
+                    if (kind == SK_EFF_SPEEDUP || kind == SK_EFF_WISDOMUP) {
+                        // apply_external_effect with the effect rewritten to
+                        // the self target (race_field.rs:467-477): the stat
+                        // write, then the follow-up path's refresh, per
+                        // receiver (race_solver.rs:2644-2648).
+                        if (kind == SK_EFF_SPEEDUP) {
+                            const float value =
+                                (float)sd[SD_HPS + j] + convert_float_rte(modifier);
+                            sd[SD_HPS + j] = (double)value;
+                            const float speed =
+                                convert_float_rte(fmin(fmax((double)value, 1.0), 2000.0));
+                            const int table[8] =
+                                {10500, 10000, 9000, 8000, 6000, 4000, 2000, 1000};
+                            const float aptitude =
+                                convert_float_rte((float)table[(int)si[SI_DISTAPT + j]]) * 0.0001f;
+                            sf[SF_SPURT_MAX + j] = convert_float_rte(
+                                phys_maximum_spurt_speed(pd, speed, (int)si[SI_STRATEGY + j],
+                                    aptitude, dist_f,
+                                    pd[PD_RUN0 + j * PD_RUN_STRIDE + PRD_POWF]));
+                        } else {
+                            const float value =
+                                (float)sd[SD_HPW_A + j] + convert_float_rte(modifier);
+                            sd[SD_HPW_A + j] = (double)value;
+                            sd[SD_HPW + j] = fmin(fmax((double)value, 1.0), 2000.0);
+                        }
+                        sk_stat_refresh(si, sd, shl, sf, distance, j);
+                    }
                     if (sk_queued_kind(kind)) {
                         __global uint* qq = sk_seq(scr, kind) + j * SK_SEQN;
                         if (sk_seq_find(qq, tok) < 0 && !sk_seq_push(qq, tok)) {
@@ -4294,6 +4372,18 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
             sf[SF_SPURT_MAX + r] = convert_float_rte(phys_maximum_spurt_speed(pd, speed,
                 (int)si[SI_STRATEGY + r], aptitude, dist_f,
                 pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_POWF]));
+            continue;
+        }
+        if (kind == SK_EFF_WISDOMUP) {
+            // A static fire is already inside the PRD-baked init inputs.
+            // A mid-race fire moves the accumulator and the live field that
+            // the pace and downhill draws read; the spurt plan keeps its
+            // captured wisdom, which only a receiver refresh recaptures.
+            if (init_pass == 0 && (rd[2] & SK_FLAG_BUMPED) == 0) {
+                const float value = (float)sd[SD_HPW_A + r] + convert_float_rte(modifier);
+                sd[SD_HPW_A + r] = (double)value;
+                sd[SD_HPW + r] = fmin(fmax((double)value, 1.0), 2000.0);
+            }
             continue;
         }
         if (kind == SK_EFF_GOAL_OUT || kind == SK_EFF_GOAL_IN || kind == SK_EFF_IMMUNE) {
@@ -4539,7 +4629,7 @@ static void aa_select(__global const uint* sk, __global uint* sks,
 // arms (race_solver.rs:2188-2320).
 static void skills_scan(__global const uint* sk, __global uint* sks,
     __global double* skd, __global uint* scr, __global uint* si,
-    __global double* sd, __global const double* shl, __global const uint* rs,
+    __global double* sd, __global double* shl, __global const uint* rs,
     __global const double* pd, __global float* sf, const double distance,
     const int p, const int n, const float dist_f, const int init_pass,
     __global uint* ev, __global uint* st, __global uint* bank, const int paired) {

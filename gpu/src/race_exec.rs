@@ -85,7 +85,7 @@ pub const PD_DTYPE: usize = PD_CF_DIST + 10;
 pub const PD_FC_HALF0: usize = PD_CF_DIST + 11;
 pub const PD_FC_HALF1: usize = PD_CF_DIST + 12;
 pub const PD_RUN0: usize = PL_FRONT_LANE + 32;
-pub const PD_RUN_STRIDE: usize = 8;
+pub const PD_RUN_STRIDE: usize = 9;
 pub const PRD_POWF: usize = 0;
 pub const PRD_DUEL_T: usize = 1;
 pub const PRD_DUEL_A: usize = 2;
@@ -97,6 +97,9 @@ pub const PRD_SPOT_D: usize = 4;
 pub const PRD_BOOST_GUTS: usize = 5;
 pub const PRD_BOOST_WIS: usize = 6;
 pub const PRD_RUSH_BONUS: usize = 7;
+// The unclamped wisdom accumulator, NaN when no WisdomUp bump chained. The
+// field word above is clamped, so this keeps a later mid-race fire exact.
+pub const PRD_WIS_ACC: usize = 8;
 pub const PC_LAST_STRAIGHT_START: usize = 184;
 pub const PC_LAST_CORNER_START: usize = 186;
 pub const PC_FIRST_MOVE_POINT: usize = 187;
@@ -1096,6 +1099,10 @@ impl RaceContext {
             if bump_wis {
                 prepared[i].pd[base + PRD_BOOST_WIS] = acc_wis.clamp(1.0, 2000.0) as f64;
             }
+            // The kernel seeds the wisdom accumulator from the unclamped f32
+            // chain; NaN marks the field seed for runners with no bump.
+            prepared[i].pd[base + PRD_WIS_ACC] =
+                if bump_wis { f64::from(acc_wis) } else { f64::NAN };
             prepared[i].pd[base + PRD_RUSH_BONUS] =
                 f64::from(((bonus * 100.0) as f32).to_bits());
         }

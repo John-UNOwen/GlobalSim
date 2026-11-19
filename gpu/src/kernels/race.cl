@@ -143,7 +143,8 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
                     sd[SD_POS + r] - sd[SD_POS + (int)rs[RS_ORDER + rank]], 0.0));
             }
             pace_update(si, sf, r, dt, pd, bank, dist_f,
-                convert_float_rte(sd[SD_POS + r]), sf[SF_HPW + r], strategy,
+                convert_float_rte(sd[SD_POS + r]), convert_float_rte(sd[SD_HPW + r]),
+                strategy,
                 kakari, (int)si[SI_RMODE + r], phase, rank,
                 (int)si[SI_RANKCOL + pm], (int)si[SI_STRATEGY + pm],
                 convert_float_rte(sd[SD_POS + pm] - sd[SD_POS + r]), pm == r,
@@ -248,9 +249,11 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
         }
     }
 
-    // Downhill mode from the slope region, drawing its lottery.
+    // Downhill mode from the slope region, drawing its lottery. The draw
+    // reads the live wisdom field, the spurt plan keeps the captured one.
     const double slope_per = (double)sf[SF_SL_VALUE + r];
-    downhill_update(si, sf, r, slope_per < 0., sf[SF_HPW + r], dt, pd, bank);
+    downhill_update(si, sf, r, slope_per < 0., convert_float_rte(sd[SD_HPW + r]),
+        dt, pd, bank);
     si[SI_DOWNHILL + r] = si[SI_DS_ACTIVE + r];
 
     // The expired spot receiver is removed before the target chain, after
@@ -1066,6 +1069,13 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         // The stat-modifier accumulator starts at the initialized speed,
         // matching the engine's unwrap_or(horse.speed as f32).
         sd[SD_HPS + r] = (double)speed;
+        // The wisdom field and accumulator mirror the speed pair. The NaN
+        // accumulator word means no construction bump: the seed is then the
+        // unwrap_or seed. A bump carries the unclamped chain instead.
+        sd[SD_HPW + r] = as_double(scol[11]);
+        const double wa = pd[PD_RUN0 + PD_RUN_STRIDE * r + PRD_WIS_ACC];
+        sd[SD_HPW_A + r] = wa != wa
+            ? (double)convert_float_rte(as_double(scol[11])) : wa;
         for (int s = 0; s < 24; s++) {
             sd[SD_SECMOD + s * RACE_MAXR + r] =
                 (double)as_float(scr[runb + OR_SECTIONS + s]);

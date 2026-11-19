@@ -199,10 +199,20 @@ tiers, 3 and 7 are the retail HP tiers). Modifier dispatch follows retail
 - `Vision(8)`: a receiver token in the vision order, whose fold
   `fmax(20 + sum, 0)` in f64 with one `convert_float_rte` feeds the lane
   logic's visible distance.
-- `GutsUp(4)`, `WisdomUp(5)` and `ModifyKakariChance(29)`: portable only as
+- `GutsUp(4)` and `ModifyKakariChance(29)`: portable only as
   construction-time bumps, the host applies them to the init inputs (stats
   through the `add_stat_modifier` f32 chain, kakari chance folded into the
-  init roll). A mid-race fire of 4 or 5 refuses.
+  init roll). A mid-race fire of 4 refuses: its live consumers re-read a
+  `powf` of the runtime guts the prepare bakes once (see Mid-race stat
+  fires below).
+- `WisdomUp(5)`: a construction fire is a bump like those two, and the
+  record carries `SK_FLAG_BUMPED` so the kernel's init-pass arms skip the
+  write the host already folded. A self mid-race fire needs a phase gate
+  false at time zero on every arm, then moves the accumulator and the live
+  field that the pace and downhill draws read each tick. The unclamped f32
+  accumulator rides the `PRD_WIS_ACC` word (NaN when no bump folded), so a
+  loop fire chains from a construction bump. The spurt plan keeps the
+  captured wisdom until a receiver refresh recaptures it, as in the engine.
 - `RunAway(6)`: the runtime arm is SkillAbilityNull, so the fire is inert
   beyond its event and instance bookkeeping. The build-time rule that matters
   is elsewhere: a Nige that learned a type 6 effect races as Oonige
@@ -510,18 +520,20 @@ Not yet ported (fallback-flagged, plan order in the README):
   no-ffi path degrades to Noop). `36` and `37` (random skill activation,
   `race_solver.rs:2677-2737`) are accepted at self target only.
 - effect targets outside 1, 4, 9, 10 and 21, and target `21` only with kind
-  `13` (the rushing strategy-group receiver set), and kinds `1`, `4` and `5`
-  aimed at another runner (they write the receiver's stats through a full
-  `refresh_stat_effects` the kernel does not model). `10`
+  `13` (the rushing strategy-group receiver set), and kind `4`
+  aimed at another runner (the receiver refresh would re-sample the guts
+  `powf` terms the prepare bakes once). `10`
   `MultiplyStartDelay` at another runner fires inert in retail (the receiver
   keeps its init-applied gate) and is accepted. The same-team debuff drop is a
   real delivery gate now, not a roster flag: each runner's fixed team id reaches
   the kernel (`RR_TEAM` into `SI_TEAM`) and `skills_fire` drops same-team
   receivers off the capped receiver list, matching `race_field.rs:458-461`.
   The immunity arm of that filter reads the `SD_IMMUNE` presence cell.
-- a mid-race (non-constructor) fire of `GutsUp(4)` or `WisdomUp(5)`, and more
-  than 8 effects on one record (the per-record token cap the receiver orders
-  index)
+- a mid-race (non-constructor) fire of `GutsUp(4)`, a self `WisdomUp(5)` whose
+  arms are not all gated false at time zero (an ungated arm short-circuits the
+  field leaves and can fire in the constructor pass, ahead of the init draws
+  the kernel bakes), and more than 8 effects on one record (the per-record
+  token cap the receiver orders index)
 - structural: `value_usage` outside 1 to 14 (usages 3 to 7, 10, 12 and 13 fold
   at compile from request-static data, `race_solver_builder.rs:908-939`;
   usages 8 and 9 draw `RetailRandom` at each application and usages 11 and 14
@@ -584,6 +596,45 @@ condition bypassed, and the run-skip fast path stays off while any reservation
 is live. A wisdom-failed retained primary is a candidate and can fire exactly
 this way (`race_solver_builder.rs:1002-1005`), and `SKR_WISFAIL` sends it back
 to DISABLED rather than READY when its cooldown expires.
+
+Mid-race stat fires. A self fire writes the accumulator and the clamped
+field and nothing else: the engine's self path registers its timers and
+returns without a refresh (`race_solver.rs:2644-2674`). A cross delivery is
+one `apply_external_effect` per (effect, receiver) with the effect rewritten
+to the self target (`race_field.rs:465-484`), and the follow-up path runs
+`refresh_stat_effects` once per delivery (`race_solver.rs:2644-2648`), so
+the kernel does both per receiver inside the delivery loop. Of the refresh's
+five writes (`race_solver.rs:1330-1340`) three are live in the retail loop:
+the target base [0..2] flips to the legacy f64 formula (`race_solver.rs:43-60`)
+reading the clamped speed field, which replaces the retail-form values the
+enable baked (`race_solver_retail.rs:647-655`) for the rest of the race, the
+HP goes through the init-plus-spend re-round (one f32 round trip of
+`max_hp - spent`, so each delivery re-rounds exactly as the engine does, and
+an already round value re-rounds to itself), and the hp context recaptures
+`retail.wisdom`, the spurt plan's capture, from the live field. The
+`min_speed` and legacy `last_spurt_speed` rewrites are dead: the step head
+recomputes the retail minimum and the phase-2 spurt before any consumer can
+read them (`race_solver_retail.rs:961,1007-1034`), and the only pre-phase-2
+reader of the spurt speed is the staminasyoubu hook's region-gated extra
+condition (`race_solver_builder.rs:819-843`), which is not in the ported
+set. `base_accel` is dead too: the retail acceleration chain recomputes from
+power, untouched by kinds 1 and 5. `sk_stat_refresh` (`retail_core.cl`)
+mirrors the three live writes. Cross SpeedUp additionally repatches the
+cached spurt maximum from the bumped speed, the value the engine's plan
+closure recomputes from the live field at the next spurt decision.
+GutsUp, self or cross, stays refused at a mid-race fire: the same plan
+closure, the duel entry and the spot entry each read
+`powf(bounded_stat(guts) * spurt[2], spurt[3])` of the runtime guts
+(`retail_physics.rs:362`, `race_solver.rs:2928-2939` and `3194-3207`) and
+the kernel carries that term as one prepare-baked word per runner
+(`PRD_POWF`), so a live guts change would re-roll lotteries the port cannot
+replay. The self WisdomUp phase gate (`skills_compile.rs`, `phase_gated`):
+phase zero is below every accepted gate, so the record cannot fire in the
+engine's constructor pass, where the field move would land ahead of the
+kernel's baked init draws and section rolls. The live field reads are the
+pace context and the downhill draw (`race_solver_retail.rs:899` and `1118`
+read `horse.wisdom as f32` per tick, and the kernel reads the `SD_HPW`
+column there), while the plan capture stays on `SF_HPW` until a refresh.
 
 Rule: an unsupported construct is refused by the compiler before upload, the
 host flags the whole race for CPU fallback, and the flag reason names the

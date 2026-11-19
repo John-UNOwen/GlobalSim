@@ -65,11 +65,12 @@ fn cross_runner_targets_compile() {
 
 #[test]
 fn self_only_kinds_refuse_cross_targets() {
-    // SpeedUp and GutsUp move the receiver's stats through a refresh the
-    // kernel has no consumer for, so they stay on the record owner.
-    refused(
+    // GutsUp aimed at another runner needs a mid-race guts powf the kernel
+    // bakes at prepare, so it stays on the record owner. SpeedUp crosses
+    // with an exact refresh, and kind 10 is inert in retail.
+    is_live(
         &one_runner("order>=2", 500000, &["{\"type\":1,\"target\":9,\"modifier\":1000}"]),
-        "targeting another runner",
+        "kind 1 cross is live",
     );
     refused(
         &one_runner("always>=0", 0, &["{\"type\":4,\"target\":9,\"modifier\":1000}"]),
@@ -94,21 +95,29 @@ fn new_kinds_compile_for_self() {
 }
 
 #[test]
-fn mid_race_stat_bumps_refuse() {
-    // Kinds 4 and 5 only land as constructor-pass constants into the init
-    // inputs the kernel prepass already writes.
+fn mid_race_stat_bump_gates() {
+    // GutsUp only lands as a constructor-pass constant into the init inputs
+    // the kernel prepass already writes.
     refused(
         &one_runner("order>=2", 500000, &["{\"type\":4,\"target\":1,\"modifier\":1000}"]),
         "construction-time bump",
     );
+    // A wisdom fire whose condition can hold at time zero would land in the
+    // engine's constructor pass ahead of the init draws the kernel bakes.
     refused(
         &one_runner("order>=2", 500000, &["{\"type\":5,\"target\":1,\"modifier\":1000}"]),
-        "construction-time bump",
+        "constructor pass",
     );
     // A cooldown keeps the record out of the constructor pass.
     refused(
         &one_runner("always>=0", 500000, &["{\"type\":5,\"target\":1,\"modifier\":1000}"]),
-        "construction-time bump",
+        "constructor pass",
+    );
+    // A phase gate keeps the fire out of the constructor pass in both
+    // engines, the shape the kernel ports.
+    is_live(
+        &one_runner("phase>=2", 500000, &["{\"type\":5,\"target\":1,\"modifier\":1000}"]),
+        "phase-gated kind 5",
     );
 }
 
