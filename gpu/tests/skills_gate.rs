@@ -226,8 +226,8 @@ fn unsupported_construct_flags_the_whole_race() {
 
 /// A condition naming a random trigger the kernel has no sampler for must
 /// refuse the whole race by that name, not run on a wrong or empty window. The
-/// merged skill set the app ships carries several such terms (random_lot,
-/// distance_rate_after_random, corner_random), so a refusal names the term.
+/// merged skill set the app ships carries several such terms (random_lot and
+/// corner_random), so a refusal names the term.
 #[test]
 fn unsupported_random_term_refuses_by_name() {
     let base = v77_line();

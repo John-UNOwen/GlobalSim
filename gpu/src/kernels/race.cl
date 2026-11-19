@@ -662,6 +662,9 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         sd[SD_BHNEAR1 + r] = 0.0;
         sd[SD_PENDING_HP + r] = 0.0;
         sd[SD_OFA + r] = 0.0;
+        sd[SD_OTIME + r] = 0.0;
+        sd[SD_BFRONT + r] = 0.0;
+        sd[SD_POSPREV + r] = 0.0;
         si[SI_ACT0 + r] = 0u;
         si[SI_ACT1 + r] = 0u;
         si[SI_BND50 + r] = 0u;
@@ -676,6 +679,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         sf[SF_DUEL_PRE + r] = 3.f;
         for (int j = 0; j < RACE_MAXR; j++) {
             sd[SD_DUEL + j * RACE_MAXR + r] = -1.0;
+            sd[SD_OVC + j * RACE_MAXR + r] = -1.0;
         }
 
         const uint runb = SCR_INIT_OUT + OS_RUN0 + IRS_STRIDE * r;
@@ -791,9 +795,9 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
     // first pass run every effect duration one tick long.
     if (sk_on) {
         skills_scan(skt, sks, skd, scr, si, sd, shl, rs, pd, sf,
-            course_distance, 1, n, dist_f, ev, st);
+            course_distance, 1, n, dist_f, 1, ev, st);
         skills_scan(skt, sks, skd, scr, si, sd, shl, rs, pd, sf,
-            course_distance, 0, n, dist_f, ev, st);
+            course_distance, 0, n, dist_f, 1, ev, st);
         sk_columns(skt, scr, sd, n);
     }
 
@@ -888,9 +892,9 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         if (sk_on) {
             skills_advance(skt, sks, skd, scr, sd, dt, n, dist_f);
             skills_scan(skt, sks, skd, scr, si, sd, shl, rs, pd, sf,
-                course_distance, 1, n, dist_f, ev, st);
+                course_distance, 1, n, dist_f, 0, ev, st);
             skills_scan(skt, sks, skd, scr, si, sd, shl, rs, pd, sf,
-                course_distance, 0, n, dist_f, ev, st);
+                course_distance, 0, n, dist_f, 0, ev, st);
             sk_columns(skt, scr, sd, n);
         }
         // blocking_sample over the post-skill rows, which skills left alone.
@@ -901,8 +905,9 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             lane_blocking_sample(sd, si, r, n, pd, &front, &front_gap, &side);
             si[SI_BLOCKER + r] = (uint)front;
             sf[SF_BLOCKER_GAP + r] = front_gap;
-            // update_retail_blocking, the side timer only: no movement or
-            // callback runs between the sample and the counter.
+            // update_retail_blocking, the front and side timers only: no
+            // movement or callback runs between the sample and the counters.
+            sd[SD_BFRONT + r] = front >= 0 ? sd[SD_BFRONT + r] + (double)dt : 0.0;
             sd[SD_BSIDE + r] = side ? sd[SD_BSIDE + r] + (double)dt : 0.0;
         }
         // Movement in roster order; the live columns are the roster. Paired
@@ -920,6 +925,30 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
                 cached, runner_bank, c_start, c_speed, c_time, pd, rds, r,
                 n, empty_move, dt, course_distance, skt, ev, st, frames_all,
                 dbg_base);
+            // overtake_target_time: while a runner behind in the published
+            // order keeps this one in its lane targets, f32-accumulate dt in
+            // f64, else reset. Runner rows moved so far in this loop are the
+            // post-step lists, the rest still hold the previous tick's.
+            {
+                int targeted = 0;
+                for (int j = 0; j < n; j++) {
+                    if (j == r || si[SI_RANKCOL + j] <= si[SI_RANKCOL + r]) {
+                        continue;
+                    }
+                    const __global uint* tl = lists + LIST_STRIDE * j;
+                    for (int k = 0; k < (int)si[SI_L_TGTN + j]; k++) {
+                        if ((int)tl[k] == r) {
+                            targeted = 1;
+                            break;
+                        }
+                    }
+                    if (targeted) {
+                        break;
+                    }
+                }
+                sd[SD_OTIME + r] = targeted
+                    ? (double)(convert_float_rte((float)sd[SD_OTIME + r]) + dt) : 0.0;
+            }
             // stadium_score::RushingScore.update(is_kakari, dt), after the
             // step and before the gated continue, as the engine loop does.
             if ((int)si[SI_KAKARI + r]) {

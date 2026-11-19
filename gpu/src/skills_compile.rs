@@ -60,6 +60,7 @@ pub const SK_FLAG_SAMPLED: u32 = 4;
 pub const SK_FLAG_DEAD: u32 = 8;
 pub const SK_FLAG_ANYACT: u32 = 16;
 pub const SK_FLAG_WISDOM_FOLLOW: u32 = 32;
+pub const SK_FLAG_INIT_DEFER: u32 = 64;
 
 pub const SK_TERM_ALL_CORNER: u32 = 0;
 pub const SK_TERM_STRAIGHT: u32 = 1;
@@ -69,6 +70,7 @@ pub const SK_TERM_PHASE_RANDOM: u32 = 4;
 pub const SK_TERM_PHASE_FIRSTHALF: u32 = 5;
 pub const SK_TERM_PHASE_LATERHALF: u32 = 6;
 pub const SK_TERM_FC_RANDOM: u32 = 7;
+pub const SK_TERM_DIST_RATE_AFTER: u32 = 8;
 
 pub const OP_TRUE: u32 = 0;
 pub const OP_AND: u32 = 1;
@@ -103,6 +105,15 @@ pub const FEAT_LASTSPURT: u32 = 25;
 pub const FEAT_BHNEAR1: u32 = 26;
 pub const FEAT_SLOPE: u32 = 27;
 pub const FEAT_ANYACT: u32 = 28;
+pub const FEAT_OTIME: u32 = 29;
+pub const FEAT_DDTOP: u32 = 30;
+pub const FEAT_HEAL: u32 = 31;
+pub const FEAT_CHGUP_END: u32 = 32;
+pub const FEAT_LANETYPE: u32 = 33;
+pub const FEAT_FIGHT: u32 = 34;
+pub const FEAT_BHIN: u32 = 35;
+pub const FEAT_MOVELANE: u32 = 36;
+pub const FEAT_BFRONT: u32 = 37;
 
 /// One race's compiled table. `reason` is Some when the race must run on the
 /// CPU, naming the first construct the kernel cannot evaluate.
@@ -483,6 +494,7 @@ impl Compiler {
             // like having no precondition at all, which is what the live-
             // alternative shadow comparison needs.
             let mut pre_trivial = true;
+            let mut pre_init_defer = false;
             if !pre_text.is_empty() {
                 let pre_terms = match parse_terms(pre_text) {
                     Ok(t) => t,
@@ -516,6 +528,11 @@ impl Compiler {
                     return;
                 }
                 pre_trivial = pre_leaves.iter().all(|l| matches!(l, Leaf::True));
+                pre_init_defer = pre_leaves.iter().any(|l| {
+                    matches!(leaf_feat(l), FEAT_ORDER_RATE | FEAT_OTIME | FEAT_DDTOP
+                        | FEAT_CHGUP_END | FEAT_LANETYPE | FEAT_BHIN | FEAT_MOVELANE
+                        | FEAT_BFRONT)
+                });
                 let mut pre_regions: Vec<(f64, f64)> = vec![(0.0, g.distance)];
                 for leaf in pre_leaves.iter() {
                     let next = match leaf {
@@ -688,6 +705,7 @@ impl Compiler {
                     "phase_firsthalf_random" => SK_TERM_PHASE_FIRSTHALF,
                     "phase_laterhalf_random" => SK_TERM_PHASE_LATERHALF,
                     "is_finalcorner_random" => SK_TERM_FC_RANDOM,
+                    "distance_rate_after_random" => SK_TERM_DIST_RATE_AFTER,
                     other => {
                         self.unsupported(format!("skill {sid} random term '{other}' is not ported"));
                         return;
@@ -695,6 +713,10 @@ impl Compiler {
                 };
                 let ok_arg = if t.op != 0 {
                     false
+                } else if kind == SK_TERM_DIST_RATE_AFTER {
+                    // The retail sampler scales the course distance by the
+                    // argument percent, so any non-negative integer is valid.
+                    t.arg >= 0
                 } else if matches!(
                     kind,
                     SK_TERM_PHASE_RANDOM | SK_TERM_PHASE_FIRSTHALF | SK_TERM_PHASE_LATERHALF
@@ -846,7 +868,10 @@ impl Compiler {
                     return;
                 }
                 let value_usage = ef.get("valueUsage").and_then(Value::as_i64).unwrap_or(1) as i32;
-                if matches!(value_usage, 8 | 9 | 11 | 14) {
+                // Usages 3 to 14 rescale the modifier from live or init-time
+                // state the table cannot carry: stat, win and fan tiers, the
+                // activation rolls, the late-corner count and the tag count.
+                if matches!(value_usage, 3..=14) {
                     self.unsupported(format!(
                         "skill {sid} effect value_usage {value_usage} is not ported"
                     ));
@@ -877,6 +902,14 @@ impl Compiler {
             }
             let cooldown = alt.get("cooldown").and_then(Value::as_f64).unwrap_or(0.) / 10000.0;
             let delay_mult = delay_factor(alt);
+            // The engine's constructor pass cannot see field or retail-loop
+            // state, so those closures report false at time zero and the record
+            // first fires one tick later (retail engine, seed 1..3 probes).
+            let init_defer = pre_init_defer || leaves.iter().any(|l| {
+                matches!(leaf_feat(l), FEAT_ORDER_RATE | FEAT_OTIME | FEAT_DDTOP
+                    | FEAT_CHGUP_END | FEAT_LANETYPE | FEAT_BHIN | FEAT_MOVELANE
+                    | FEAT_BFRONT)
+            });
 
             // retail_initialization rolls the wisdom lottery once per skill id;
             // the first record of the (runner, skill) group carries the roll and
@@ -891,7 +924,8 @@ impl Compiler {
                 | (if wisdom && !first_record { SK_FLAG_WISDOM_FOLLOW } else { 0 })
                 | (if sampled_count == 1 && !dead { SK_FLAG_SAMPLED } else { 0 })
                 | (if dead { SK_FLAG_DEAD } else { 0 })
-                | (if anyact { SK_FLAG_ANYACT } else { 0 });
+                | (if anyact { SK_FLAG_ANYACT } else { 0 })
+                | (if init_defer { SK_FLAG_INIT_DEFER } else { 0 });
             self.words[at + 3] = priority as u32;
             self.words[at + 4] = rarity;
             self.words[at + 5] = (self.neff - eff_base) as u32;
@@ -1089,6 +1123,15 @@ enum Leaf {
     Sampled,
 }
 
+/// The per-tick feature id a leaf compares against, if any.
+fn leaf_feat(l: &Leaf) -> u32 {
+    match l {
+        Leaf::Dynamic { feat, .. } => *feat,
+        Leaf::RegionDyn(_, feat) => *feat,
+        _ => u32::MAX,
+    }
+}
+
 /// Course and runner constants the engine resolves once at trigger build.
 struct Statics {
     distance_type: i64,
@@ -1101,11 +1144,32 @@ struct Statics {
     weather: Option<f64>,
     season: Option<f64>,
     is_dirtgrade: bool,
+    other_style: [f64; 4],
 }
 
 impl Statics {
     fn new(course: &Value, horse: &Value, root: &Value) -> Statics {
         let track_id = course.get("raceTrackId").and_then(Value::as_i64).unwrap_or(0);
+        // The retail builder counts base styles once for the roster
+        // (lib.rs:393-401) and hands each runner those counts minus itself
+        // (lib.rs:536-538), so every otherself fold is a per-runner constant.
+        let own = style_base_index(strategy_code(
+            horse.get("strategy").and_then(Value::as_str).unwrap_or(""),
+        ));
+        let mut counts = [0i64; 4];
+        if let Some(list) = root.get("horses").and_then(Value::as_array) {
+            for other in list {
+                if let Some(i) = style_base_index(strategy_code(
+                    other.get("strategy").and_then(Value::as_str).unwrap_or(""),
+                )) {
+                    counts[i] += 1;
+                }
+            }
+        }
+        let mut other_style = [0.0f64; 4];
+        for i in 0..4 {
+            other_style[i] = (counts[i] - i64::from(own == Some(i))) as f64;
+        }
         Statics {
             distance_type: course.get("distanceType").and_then(Value::as_i64).unwrap_or(0),
             turn: course.get("turn").and_then(Value::as_i64).unwrap_or(0),
@@ -1129,7 +1193,20 @@ impl Statics {
                 },
                 None => is_dirtgrade_track(track_id),
             },
+            other_style,
         }
+    }
+}
+
+/// Index into the roster's four base-style counts. The retail builder folds
+/// Oonige into Nige, and an unparsable strategy counts nowhere.
+fn style_base_index(code: i64) -> Option<usize> {
+    match code {
+        1 | 5 => Some(0),
+        2 => Some(1),
+        3 => Some(2),
+        4 => Some(3),
+        _ => None,
     }
 }
 
@@ -1248,13 +1325,20 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         "accumulatetime" => Ok(dyn_leaf(FEAT_CLOCK, t)),
         "activate_count_start" if t.op == 5 => Ok(dyn_leaf(FEAT_ACT0, t)),
         "activate_count_middle" if t.op == 5 => Ok(dyn_leaf(FEAT_ACT1, t)),
+        // The retail filter table only registers >= for the heal count and >
+        // for the duel count, so other comparators stay refusals.
+        "activate_count_heal" if t.op == 5 => Ok(dyn_leaf(FEAT_HEAL, t)),
         "bashin_diff_behind" => Ok(dyn_leaf(FEAT_BASH_BEHIND, t)),
         "bashin_diff_infront" => Ok(dyn_leaf(FEAT_BASH_INFRONT, t)),
         "behind_near_lane_time" => Ok(dyn_leaf(FEAT_BHNEAR, t)),
         "behind_near_lane_time_set1" => Ok(dyn_leaf(FEAT_BHNEAR1, t)),
+        "blocked_front_continuetime" => Ok(dyn_leaf(FEAT_BFRONT, t)),
         "blocked_side_continuetime" => Ok(dyn_leaf(FEAT_BSIDE, t)),
         "change_order_onetime" => Ok(dyn_leaf(FEAT_ORDER_DELTA, t)),
+        "change_order_up_end_after" => Ok(dyn_leaf(FEAT_CHGUP_END, t)),
+        "compete_fight_count" if t.op == 4 => Ok(dyn_leaf(FEAT_FIGHT, t)),
         "corner" => Ok(dyn_leaf(FEAT_CORNER, t)),
+        "distance_diff_top" => Ok(dyn_leaf(FEAT_DDTOP, t)),
         "distance_rate" => Ok(Leaf::Dynamic {
             feat: FEAT_DIST_RATE,
             cmp: t.op,
@@ -1272,6 +1356,7 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         "infront_near_lane_time" => Ok(dyn_leaf(FEAT_IFNEAR, t)),
         // v75 retail observe: per-visit changed flag, see sk_feat_value.
         "is_activate_any_skill" if t.op == 0 && t.arg == 1 => Ok(dyn_leaf(FEAT_ANYACT, t)),
+        "is_behind_in" => Ok(dyn_leaf(FEAT_BHIN, t)),
         "is_dirtgrade" if matches!(t.op, 0 | 1) => {
             Ok(fold(if s.is_dirtgrade { 1.0 } else { 0.0 }, t))
         }
@@ -1288,8 +1373,10 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         "is_lastspurt" if t.op == 0 && t.arg == 1 => {
             Ok(Leaf::RegionDyn(vec![(phase_start(d, 2), d)], FEAT_LASTSPURT))
         }
+        "is_move_lane" => Ok(dyn_leaf(FEAT_MOVELANE, t)),
         "is_overtake" => Ok(dyn_leaf(FEAT_IS_OVERTAKE, t)),
         "is_temptation" if t.op == 0 => Ok(dyn_leaf(FEAT_IS_TEMPTATION, t)),
+        "lane_type" => Ok(dyn_leaf(FEAT_LANETYPE, t)),
         "near_count" => Ok(dyn_leaf(FEAT_NEAR, t)),
         "order" => Ok(dyn_leaf(FEAT_ORDER, t)),
         "order_rate" => Ok(dyn_leaf(FEAT_ORDER_RATE, t)),
@@ -1307,6 +1394,7 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
                 _ => Err(format!("'{name}'{}{} is not ported", op_text(t.op), t.arg)),
             }
         }
+        "overtake_target_time" => Ok(dyn_leaf(FEAT_OTIME, t)),
         "phase" => Ok(dyn_leaf(FEAT_PHASE, t)),
         "popularity" => Ok(fold(s.popularity, t)),
         "remain_distance" => Ok(dyn_leaf(FEAT_REMAIN, t)),
@@ -1314,6 +1402,10 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         "running_style" if t.op == 0 => {
             Ok(if style_matches(s.strategy, t.arg) { Leaf::True } else { Leaf::False })
         }
+        "running_style_count_nige_otherself" => Ok(fold(s.other_style[0], t)),
+        "running_style_count_senko_otherself" => Ok(fold(s.other_style[1], t)),
+        "running_style_count_sashi_otherself" => Ok(fold(s.other_style[2], t)),
+        "running_style_count_oikomi_otherself" => Ok(fold(s.other_style[3], t)),
         "season" => match s.season {
             Some(v) => Ok(fold(v, t)),
             None => Err("'season' needs a parsable season in the request".into()),
@@ -1337,6 +1429,7 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
             Ok(Leaf::Sampled)
         }
         "is_finalcorner_random" if t.op == 0 && t.arg == 1 => Ok(Leaf::Sampled),
+        "distance_rate_after_random" if t.op == 0 && t.arg >= 0 => Ok(Leaf::Sampled),
         other => Err(format!(
             "'{other}'{}{} is not ported",
             op_text(t.op),

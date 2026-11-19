@@ -195,7 +195,7 @@
 #define SCR_HP_OUT (SCR_HP_IN + 24 * IIU)        // 24 * 180, ob 172 then olb
 #define SCR_STATE (SCR_HP_OUT + 24 * 180)
 // Integer state, one 24-wide column per slot (field base + runner index).
-#define SI_SLOTS 72
+#define SI_SLOTS 74
 #define SI_STRIDE (SI_SLOTS * 24)
 #define SI_SLOT(n) ((n) * 24)
 #define SI_STRATEGY SI_SLOT(0)
@@ -270,6 +270,8 @@
 #define SI_BND40 SI_SLOT(69)       // out-40 order band cell, same encoding
 #define SI_BND70 SI_SLOT(70)       // out-70 order band cell, same encoding
 #define SI_ACTALL SI_SLOT(71)      // cumulative activations, the v75 anyskill count
+#define SI_HEAL SI_SLOT(72)        // activate_count_heal, bumped per self recovery
+#define SI_POV2 SI_SLOT(73)        // phase_overtakes[2], the end-phase rank gains
 #define CP_UNSUPPORTED 1u
 #define CP_CUTOFF 2u
 #define CP_WASBLK 4u
@@ -389,7 +391,7 @@
 
 // Per-race scratch f64, one 24-wide column per slot (field base + runner
 // index). Array fields keep 24 slots per element: base + element * 24 + r.
-#define SD_SLOTS 78
+#define SD_SLOTS 105
 #define SD_STRIDE (SD_SLOTS * 24)
 #define SD_SLOT(n) ((n) * 24)
 #define SD_POS SD_SLOT(0)
@@ -421,6 +423,12 @@
 #define SD_BHNEAR1 SD_SLOT(75)    // behind_near_lane_time_set1, f64
 #define SD_HPS SD_SLOT(76)        // retail_stat_values[0] accumulator, f64 bits of f32
 #define SD_PENDING_HP SD_SLOT(77) // recovery HP banked for the next step head
+#define SD_OTIME SD_SLOT(78)      // overtake_target_time, targeted-by-behind timer
+#define SD_BFRONT SD_SLOT(79)     // blocked_front_continuetime, f64
+#define SD_POSPREV SD_SLOT(80)    // positions as published by the last field_update
+// Overtake cooldown, pair-keyed like the engine's map: slot SD_OVC + target
+// * 24 + i holds the earliest next rank-gain time for runner i passing target.
+#define SD_OVC SD_SLOT(81)        // 24 slots, -1.0 until the pair fires once
 #define SRL_RUNNER 0
 #define SRL_HP SD_STRIDE          // hp columns, SH_STRIDE per runner
 #define SH_STRIDE 8
@@ -2365,9 +2373,11 @@ static void field_pacemaker(__global uint* scr, __global const uint* si,
 
 // RaceField::update: prev rank copy, the (position descending, index
 // ascending) rank pass, style prefix maxima and the pacemaker pass. The
-// overtake cooldown block and order-band tracking only feed skill state.
+// overtake cooldown block and order-band tracking feed skill state. The
+// compiler refuses the only other rank-gain consumers: duration_usage 4,
+// additionalActivate and value_usage 11.
 static void field_update(__global uint* scr, __global uint* si,
-    __global const double* sd, const int n, const float dist_f, const float end_f,
+    __global double* sd, const int n, const float dist_f, const float end_f,
     const double course_distance, const float range, const int threshold) {
     __global uint* rs = scr + SCR_RACE;
     __global uint* order = rs + RS_ORDER;
@@ -2419,6 +2429,31 @@ static void field_update(__global uint* scr, __global uint* si,
         rs[RS_STYLE + i] = (uint)highest;
         const int st = field_style((int)si[SI_STRATEGY + i]);
         if (st > highest) highest = st;
+    }
+    // The rank-gain pass: improvement against the published previous rank,
+    // gated by a 6 s cooldown per (runner, just-passed) pair. Runners already
+    // past the line at the previous publish keep their counters frozen.
+    for (int i = 0; i < n; i++) {
+        if (sd[SD_POSPREV + i] < course_distance) {
+            const int rank = (int)si[SI_RANKCOL + i];
+            if ((int)rs[RS_PREVRANK + i] > rank) {
+                int event = 1;
+                if (rank < n) {
+                    const int target = (int)order[rank];
+                    const double now = sd[SD_CLOCK + i];
+                    __global double* cd = sd + SD_OVC + target * RACE_MAXR + i;
+                    if (now < *cd) {
+                        event = 0;
+                    } else {
+                        *cd = now + 6.0;
+                    }
+                }
+                if (event && (int)si[SI_PHASE + i] == 2) {
+                    si[SI_POV2 + i] += 1u;
+                }
+            }
+        }
+        sd[SD_POSPREV + i] = sd[SD_POS + i];
     }
     field_pacemaker(scr, si, sd, n, dist_f, end_f, course_distance, range, threshold);
 }
@@ -3014,6 +3049,43 @@ static double sk_feat_value(const uint code, const double arg,
     case FEAT_SLOPE:
         return sf[SF_SL_VALUE + r] > 0.f
             ? 1.0 : (sf[SF_SL_VALUE + r] < 0.f ? 2.0 : 0.0);
+    case FEAT_OTIME:
+        return floor(sd[SD_OTIME + r]);
+    case FEAT_DDTOP: {
+        // ranked_distance_bounds with the leader substitution: my own live
+        // position when I lead, and the f32 gap floored before widening.
+        const int lead = (int)rs[RS_ORDER];
+        const float gap = convert_float_rte(sd[SD_POS + lead])
+            - convert_float_rte(sd[SD_POS + r]);
+        return (double)floor(gap);
+    }
+    case FEAT_HEAL:
+        return (double)(int)si[SI_HEAL + r];
+    case FEAT_CHGUP_END:
+        return (double)(int)si[SI_POV2 + r];
+    case FEAT_LANETYPE: {
+        // HorseRaceInfo.get_Lane: independent f32 bands on the live lane.
+        const float lane = convert_float_rte(sd[SD_LANE + r]);
+        return (double)((lane > 0.2f ? 1 : 0) + (lane > 0.4f ? 1 : 0)
+            + (lane > 0.6f ? 1 : 0));
+    }
+    case FEAT_FIGHT:
+        return (double)(int)si[SI_DUEL_FIGHT + r];
+    case FEAT_BHIN: {
+        // lane_gap_to_behind: last place reports None, rejecting every
+        // comparison, and the sign of the lane gap becomes the 0/1 value.
+        const int rank = (int)si[SI_RANKCOL + r];
+        if (rank >= n) {
+            return SK_NAN;
+        }
+        const int j = (int)rs[RS_ORDER + rank];
+        return sd[SD_LANE + r] - sd[SD_LANE + j] > 0.0 ? 1.0 : 0.0;
+    }
+    case FEAT_MOVELANE:
+        return sf[SF_MV_TIME + r] >= 1.f
+            ? (double)(1 + ((int)si[SI_MV_DIR + r] != 0 ? 1 : 0)) : 0.0;
+    case FEAT_BFRONT:
+        return trunc(sd[SD_BFRONT + r]);
     default:
         return 0.0;
     }
@@ -3259,7 +3331,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
     __global double* skd, __global uint* scr, __global uint* si,
     __global const double* shl, __global double* sd, __global const double* pd,
     __global float* sf, const int rec, const int r,
-    const double hp, const double gap, const float dist_f,
+    const double hp, const double gap, const float dist_f, const int init_pass,
     __global uint* ev, __global uint* st) {
     __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
     // The engine's activation hook emits one skillEvents entry per Own-side
@@ -3281,6 +3353,11 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
         const double scaled = (double)(m2 * 1.0f);
         runtime = fmax(runtime, scaled);
         if (kind == SK_EFF_RECOVERY) {
+            if (modifier > 0.0) {
+                // The engine bumps activate_count_heal for every applied self
+                // recovery, and the compiler only lowers self-target effects.
+                si[SI_HEAL + r] += 1u;
+            }
             sd[SD_PENDING_HP + r] += (double)(convert_float_rte(shl[r * SH_STRIDE + SH_MAX])
                 * convert_float_rte(modifier));
             continue;
@@ -3322,8 +3399,16 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
         si[SI_ACT1 + r] += 1u;
     }
     const double cd = as_double((ulong)rd[13] | ((ulong)rd[14] << 32));
-    sks[SKR_STRIDE * rec + SKR_STATE] =
-        (uint)(cd <= 0.0 ? SK_S_DEAD : SK_S_WAITING);
+    if (cd <= 0.0) {
+        sks[SKR_STRIDE * rec + SKR_STATE] = (uint)SK_S_DEAD;
+    } else if (init_pass != 0) {
+        // The engine has no retail timer map in the constructor pass, so that
+        // fire's cooldown starts at once as an absolute ready time.
+        wd[SKD_COOLDOWN] = -(double)(convert_float_rte(cd) * (dist_f / 1000.0f));
+        sks[SKR_STRIDE * rec + SKR_STATE] = (uint)SK_S_COOLDOWN;
+    } else {
+        sks[SKR_STRIDE * rec + SKR_STATE] = (uint)SK_S_WAITING;
+    }
     // v75 anyskill count: every own activation counts, and the engine's
     // excluded skill ids are the non-numeric legacy ones, never a record.
     si[SI_ACTALL + r] += 1u;
@@ -3337,7 +3422,7 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
     __global double* skd, __global uint* scr, __global uint* si,
     __global double* sd, __global const double* shl, __global const uint* rs,
     __global const double* pd, __global float* sf, const double distance,
-    const int p, const int n, const float dist_f,
+    const int p, const int n, const float dist_f, const int init_pass,
     __global uint* ev, __global uint* st) {
     const int nrec = (int)sk[SK_NREC];
     // The prerequisite watch pass runs before the gate, over the records of
@@ -3415,9 +3500,12 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
                 distance)) {
                 continue;
             }
+            if (init_pass != 0 && (rd[2] & SK_FLAG_INIT_DEFER) != 0u) {
+                continue;
+            }
             const double gap = sd[SD_POS + (int)rs[RS_ORDER + 0]] - pos;
             skills_fire(sk, sks, skd, scr, si, shl, sd, pd, sf, rec, r,
-                shl[r * SH_STRIDE + SH_HP], fmax(gap, 0.0), dist_f, ev, st);
+                shl[r * SH_STRIDE + SH_HP], fmax(gap, 0.0), dist_f, init_pass, ev, st);
         }
     }
 }

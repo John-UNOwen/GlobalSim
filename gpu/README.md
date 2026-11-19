@@ -58,6 +58,8 @@ Suites:
 | `app_preset_gate` (gpu + initialization + geometry + race) | Real app mob-preset jobs: zero-fallback compile gate and frame identity both green (see "App mob-preset payloads") |
 | `wave1_folds` | Compile-time gates for the request-static condition folds and the multi-alternative rules, both fold directions plus the still-refused names (see "Wave-1 fallback-histogram constructs") |
 | `wave1_gate` (gpu + initialization + geometry + race) | The six Phase A chart variant jobs, course 10504 seeds 1..3: zero fallback and frame identity, plus a v77-roster race firing the any-skill, shadowed-alternative, wisdom-carrier and out-band constructs bit-exact (see "Wave-1 fallback-histogram constructs") |
+| `wave2_folds` | Compile-time gates for the wave-2 dynamic leaves and the roster style-count folds: each live leaf stays live, the sampled and folded shapes, and the still-refused value_usage refusals |
+| `wave2_gate` (gpu + initialization + geometry + race) | One real merged skill per ported construct plus a v77-roster race firing each through synthetic defs, seeds 1..3: zero fallback and frame identity, including the constructor-pass defer and the absolute init cooldown (see "Wave-2 condition fields") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 
 ### What the gate proves
@@ -710,6 +712,56 @@ named (`lane_type`, `order_rate_out60/continue>=2`, `order_rate_in50`,
 `is_dirtgrade>=`, `is_activate_any_skill==2`, precondition anyskill), and the
 multi-alternative collapse counts.
 
+### Wave-2 condition fields
+
+The fallback histogram's next tier named the dynamic condition fields real
+player-swapped chart traffic still refused (Phase C, course 10504):
+`overtake_target_time` (88 seeds), `distance_diff_top` (64), the
+`distance_rate_after_random` sampled term (48), `activate_count_heal` (32),
+`change_order_up_end_after` (32), then `lane_type`, `compete_fight_count`,
+`is_behind_in`, `is_move_lane`, `blocked_front_continuetime` and the
+`running_style_count_<style>_otherself` folds (24 each). All are ported.
+
+- Live leaves: `lane_type` (`get_Lane` bands on the live lane), `is_move_lane`,
+  `is_behind_in` (the lane-gap sign, last place reports `None` and rejects every
+  comparison), `distance_diff_top` (the f32 gap to the leader, own position when
+  leading), `overtake_target_time`, `change_order_up_end_after`,
+  `compete_fight_count` (`>` only), `activate_count_heal` (`>=` only),
+  `blocked_front_continuetime`. `distance_rate_after_random` is a ninth sampled
+  term through the init windows. The `running_style_count_*_otherself` names fold
+  at compile time from the roster style counts (`Statics.other_style`).
+- Scratch: the live clocks and counters ride the runner scratch, which grew to 74
+  `SI_` u32 slots and 105 `SD_` f64 slots (the new `SD_OTIME`, `SD_BFRONT`,
+  `SD_POSPREV` and the 24-slot `SD_OVC` overtake pair table). `tests/layout.rs`
+  pins the word totals the bump lands on: the u32 side holds at `SCR_U_WORDS`
+  51932 (the alignment mask absorbs the added slots) and the f64 side moves to
+  `SRL_WORDS` 29096.
+- Two constructor-pass behaviors surfaced once multi-fire skills could be gated,
+  both pre-existing gaps the earlier single-effect gates never reached. A record
+  whose condition reads a field or retail-loop leaf cannot be judged at time zero
+  (the engine's closure reports false with no field), so the compiler marks it
+  `SK_FLAG_INIT_DEFER` and the pre-loop scan drops its fire, first firing on the
+  loop's first tick. A record that does fire in the constructor pass has no retail
+  timer map yet, so its cooldown starts at once as an absolute ready time instead
+  of the Waiting-to-instance path a loop fire takes. Both are in `SKILLS_DESIGN.md`
+  and reproduced by `wave2_gate`.
+- `value_usage` 3 to 14 now refuses by name: those usages rescale the modifier
+  from stat, win and fan tiers, the activation rolls, the late-corner count and
+  the green-tag count, state the numeric table cannot carry. This is the reason a
+  couple of the histogram's carriers (for example the fans-tier skill 210072) stay
+  refused even though their condition is ported.
+
+The compile-only scratch sweep over the 108 merged skills that carry these
+constructs (plus the wave-1 static recheck) now compiles 62 without a fallback;
+the rest refuse on an unported effect kind (37), a target-another-runner effect,
+or a rescaled `value_usage`, each named in its reason. Gates: `wave2_gate` puts
+one real merged skill per construct on horse 0 of the v77 roster (seeds 1..3) with
+zero fallback and frame identity, and a v77 race where synthetic defs built from
+200361's alternative fire every construct (the `otherself` fold has no compiling
+real skill, all its users carry an unported target-another effect, so the firing
+gate covers the fold there). `wave2_folds` compiles each construct alone and reads
+the record flags and roster counts back.
+
 ### Cost
 
 `cargo run --features gpu,initialization,geometry,race --release --bin skills_bench -- --runners 4096`
@@ -886,13 +938,13 @@ entry only through the finalizer, one the fire already covers.
 Engine behavior the race loop port does not reach, each needing its own port
 and gate:
 
-- Skills outside the ported subset: live lane state (`lane_type`,
-  `is_move_lane`), the remaining stateful time machines and activation
-  history (`is_used_skill_id`, `is_activate_*` beyond any-skill,
-  `near_infront_count`, `compete_fight_count`, `overtake_target*`,
-  `visiblehorse`), the in-band order cells, roster reads beyond rank, rank
-  rate and the bashin gaps, effects outside 1, 9, 10, 21, 22, 27, 28 and 31,
-  and the other constructs named in the `SKILLS_DESIGN.md` matrix. Each
+- Skills outside the ported subset: the remaining stateful time machines and
+  activation history (`is_used_skill_id`, `is_activate_*` beyond any-skill,
+  `behind_time`, `near_time`, `infront_time`, `near_infront_count`,
+  `visiblehorse`), the in-band order cells, roster reads beyond rank, rank rate,
+  the bashin gaps and `distance_diff_top` (`same_style_rate` and the other
+  `distance_diff_*`), effects outside 1, 9, 10, 21, 22, 27, 28 and 31, and the
+  other constructs named in the `SKILLS_DESIGN.md` matrix. Each
   flags its race with the construct named
 - The experimental startup pass (flagged, gated)
 - Grid mode (`experimentalGrid`): not ported, host-gated. The engine enables

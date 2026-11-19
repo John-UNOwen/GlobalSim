@@ -35,6 +35,23 @@ loop's first scan. The kernel's pre-loop pass reproduces that ordering, which is
 what puts a 2.4 s immediate effect's expiry on the engine's tick instead of one
 tick later.
 
+Two constructor-pass facts carry an `init_pass` flag from the pre-loop scan into
+the fire path:
+
+- A record whose condition or precondition reads a field or retail-loop leaf
+  cannot be judged at time zero: the engine's closure reports false with no
+  field, so the record first fires on the loop's first tick, not the constructor
+  pass. The compiler marks such records `SK_FLAG_INIT_DEFER` (bit 6), set when a
+  leaf is `order_rate`, `overtake_target_time`, `distance_diff_top`,
+  `change_order_up_end_after`, `lane_type`, `is_behind_in`, `is_move_lane` or
+  `blocked_front_continuetime`. The pre-loop scan evaluates such a record's
+  gate and state normally but drops the fire; the loop scans fire normally.
+- A record that does fire in the constructor pass has no retail timer map yet,
+  so its cooldown starts at once as an absolute ready time
+  `-(f32(cooldown) * f32(distance/1000))` in the Cooldown state, skipping the
+  Waiting-to-instance-expiry step a loop fire takes. A cooldown of 0 still marks
+  the record dead.
+
 Initialization mirrors `retail_initialization.rs::initialize()`: the trigger
 samplers, the wisdom lottery and the start-delay multiplier run inside
 `im_init` (initialization.cl) before the existing rushing and section draws, in
@@ -78,7 +95,8 @@ retained and drops it otherwise, and the skill's other records inherit the
 verdict), bit2 carries a sampled term, bit3 always-false (the condition
 folded false: the record stays in the table, spends its sampled draw and the
 kernel skips the gate), bit4 any-skill observe (see the matrix), bit5 wisdom
-follower. `delay_bits` is the f32 start-delay multiplier, the folded product
+follower, bit6 init-defer (a field or loop leaf defers the fire past the
+constructor pass, see the initialization note). `delay_bits` is the f32 start-delay multiplier, the folded product
 over the skill's enabled always-conditioned delay effects. The compiler
 resolves the level before the kernel runs: the effect stores the
 level-resolved modifier `retail_skill_value(raw, multiplier)` and
@@ -127,6 +145,7 @@ if pos in [trigger.start, trigger.end):
     if not program():                          skip
     fire:
       state := dead if cooldown <= 0 else waiting
+               (a constructor-pass fire goes straight to Cooldown, below)
       per effect: append the modifier to its receiver list,
                   start the effect timer at -f32(scaled_duration)
       start the (skill,detail) instance timer at -runtime_duration
@@ -142,7 +161,11 @@ cooldown timer starts at `-(f32(cooldown) * f32(distance/1000))`. The record's
 the effect `baseDuration`), so the `distance/1000` factor here is the engine's
 distance scaling of a cooldown measured in course-length units. This is the
 engine's `waiting_skill_cooldowns` state machine (`fire_pending_skill`,
-`start_expired_skill_cooldowns`, `pending_cooldown_ready`).
+`start_expired_skill_cooldowns`, `pending_cooldown_ready`). A constructor-pass
+fire skips the Waiting step: it enters Cooldown directly with that same absolute
+timer, since the engine has no retail timer map to hold the instance yet. The
+pre-loop scan additionally drops the fire for `SK_FLAG_INIT_DEFER` records, whose
+field or loop leaf cannot be judged before the first tick.
 
 Timers step `(double)(convert_float_rte((float)timer) + dt)` and expire at 0 or
 above, matching `new_skill_timer` and `SkillTimer::step`.
@@ -231,10 +254,13 @@ the program carries only the dynamic leaves: `phase`, `distance_rate`,
 `change_order_onetime`, `hp_per`, `is_overtake`, `is_temptation`,
 `temptation_count`, `near_count`, `infront_near_lane_time`,
 `behind_near_lane_time`, `behind_near_lane_time_set1`,
-`blocked_side_continuetime`, `bashin_diff_behind`, `bashin_diff_infront`,
-`activate_count_start`, `activate_count_middle`, `is_lastspurt`,
-`is_last_straight_onetime` (entry latch), the out-band cells
-(`order_rate_out*_continue`) and `is_activate_any_skill`. A condition whose
+`blocked_side_continuetime`, `blocked_front_continuetime`, `bashin_diff_behind`,
+`bashin_diff_infront`, `activate_count_start`, `activate_count_middle`,
+`activate_count_heal`, `is_lastspurt`, `is_last_straight_onetime` (entry latch),
+the out-band cells (`order_rate_out*_continue`) and `is_activate_any_skill`, and
+the wave-2 live fields `lane_type`, `is_move_lane`, `is_behind_in`,
+`distance_diff_top`, `overtake_target_time`, `change_order_up_end_after`,
+`compete_fight_count`. A condition whose
 comparison is not registered for its name falls to the `classify` catch-all
 and flags the race.
 
@@ -283,6 +309,17 @@ comparators (`activation_conditions.rs:229-243`).
 | all_corner_random, straight_random, down_slope_random, up_slope_random | sampled term (`==1`), init-time windows through the scan gate |
 | phase_random, phase_firsthalf_random, phase_laterhalf_random | sampled term (`==0..4` phase index), window from the six-way phase split |
 | is_finalcorner_random | sampled term, window over the qualifying final corner (an id >= 4 starting within the last 1000 m), else no draw and the record stays inert |
+| distance_rate_after_random | sampled term (`==`, argument >= 0), init windows like the other samplers |
+| lane_type | dynamic FEAT_LANETYPE, `HorseRaceInfo.get_Lane` bands: 0..3 from the live lane crossing 0.2, 0.4, 0.6, six |
+| is_move_lane | dynamic FEAT_MOVELANE, 0 idle, 1 while a lane move runs and 2 when it is directional, six |
+| blocked_front_continuetime | dynamic FEAT_BFRONT, `trunc` of the continuous blocked-front clock, six |
+| overtake_target_time | dynamic FEAT_OTIME, `floor` of the live overtake-target clock, six |
+| change_order_up_end_after | dynamic FEAT_CHGUP_END, the live up-order-after-end counter, six |
+| compete_fight_count | dynamic FEAT_FIGHT, the duel fight counter, `>` only (the retail filter table) |
+| activate_count_heal | dynamic FEAT_HEAL, the heal-type activation count, `>=` only |
+| is_behind_in | dynamic FEAT_BHIN, the sign of the lane gap to the behind runner; last place reports `None` (SK_NAN) so every comparison fails |
+| distance_diff_top | dynamic FEAT_DDTOP, `floor` of the f32 gap to the leader, using my own position while I lead, six |
+| running_style_count_nige/senko/sashi/oikomi_otherself | roster fold: the count of other runners in that style group (compiler `Statics.other_style`), six |
 
 The out-band cells live in race scratch (`SI_BND20/40/50/70` per runner),
 updated every tick in `field_update` from the previous-tick rank once the
@@ -309,13 +346,11 @@ eight samplers above refuses by name.
 
 Not yet ported (fallback-flagged, plan order in the README):
 
-- live lane state: `lane_type` (reads `s.lane`, not a request constant),
-  `is_move_lane`
 - stateful machines beyond the set above: `behind_time`, `near_time`,
-  `infront_time`, `blocked_*` beyond `blocked_side_continuetime`,
-  `near_infront_count`,
-  `compete_fight_count`, `overtake_target*`, `visiblehorse`,
-  `change_order_*` beyond `change_order_onetime`
+  `infront_time`, `blocked_*` beyond `blocked_side_continuetime` and
+  `blocked_front_continuetime`,
+  `near_infront_count`, `visiblehorse`,
+  `change_order_*` beyond `change_order_onetime` and `change_order_up_end_after`
 - `is_used_skill_id`, `is_activate_*` beyond `is_activate_any_skill`
   (each registers its own skill-id argument)
 - precondition `is_activate_any_skill`: the engine drops precondition nodes
@@ -323,9 +358,8 @@ Not yet ported (fallback-flagged, plan order in the README):
   becomes readable and the compiler refuses it by name
 - in-band cells: `order_rate_in*_continue` (never inserted into the retail
   `order_band` map, so the engine's filter always errors)
-- `distance_rate_after_random` (random-term state)
 - roster reads beyond rank, rank rate and the two bashin gaps:
-  `same_style_rate`, `distance_diff*`
+  `same_style_rate`, `distance_diff_*` beyond `distance_diff_top`
 - `base_*` (base stat reads), `motivation`, `grade`, `time`, `post_number`,
   `course_distance`, `furlong`
 - effects outside the accepted set 1, 9, 10, 21, 22, 27, 28 and 31
@@ -333,7 +367,9 @@ Not yet ported (fallback-flagged, plan order in the README):
   `12` lane goals, `32` AllStatusUp, `36` and `37` random skill activation
 - structural: two live alternatives whose condition or precondition differs
   (refused as `skill {sid} has other than one alternative`, see below),
-  `value_usage` in {0,8,9,11,14} (rng draws and green-tag counts),
+  `value_usage` 3 to 14 (stat, win and fan tiers, the activation rolls, the
+  late-corner count and the green-tag count, the modifier rescaled from state
+  the numeric table cannot carry),
   `duration_usage` 4 (the delayed running-instance path),
   `target` not 1 (application to other runners), `additional_activate` not 0,
   a repeated effect kind on one alternative (only one duration per kind),

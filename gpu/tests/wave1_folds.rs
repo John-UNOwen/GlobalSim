@@ -100,8 +100,9 @@ fn order_band_and_anyskill_stay_dynamic() {
 
 #[test]
 fn unregistered_or_misshaped_forms_stay_refused() {
-    // lane_type reads live lane state, so it never folds.
-    refused(&plan_for("lane_type==1", "", ""), "lane_type");
+    // blocked_all_continuetime stays unported: the min of two timers has no
+    // cell of its own in the scratch map.
+    refused(&plan_for("blocked_all_continuetime>=1", "", ""), "blocked_all_continuetime");
     // The engine registers only the 20/40/50/70 out rates and ==1 only.
     refused(&plan_for("order_rate_out60_continue==1", "", ""), "order_rate_out60_continue");
     refused(&plan_for("order_rate_out50_continue==2", "", ""), "order_rate_out50_continue");

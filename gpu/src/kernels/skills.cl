@@ -52,6 +52,7 @@
 #define SK_FLAG_DEAD 8
 #define SK_FLAG_ANYACT 16
 #define SK_FLAG_WISDOM_FOLLOW 32
+#define SK_FLAG_INIT_DEFER 64
 
 #define SK_TERM_ALL_CORNER 0
 #define SK_TERM_STRAIGHT 1
@@ -61,6 +62,7 @@
 #define SK_TERM_PHASE_FIRSTHALF 5
 #define SK_TERM_PHASE_LATERHALF 6
 #define SK_TERM_FC_RANDOM 7
+#define SK_TERM_DIST_RATE_AFTER 8
 
 // Arm entry flags. Bit 1 marks an arm whose static chain collapsed: its
 // random term still draws, and the arm never passes the membership gate.
@@ -104,6 +106,15 @@
 #define FEAT_SLOPE 27
 // The per-visit changed flag of the engine's observe_anyskill.
 #define FEAT_ANYACT 28
+#define FEAT_OTIME 29
+#define FEAT_DDTOP 30
+#define FEAT_HEAL 31
+#define FEAT_CHGUP_END 32
+#define FEAT_LANETYPE 33
+#define FEAT_FIGHT 34
+#define FEAT_BHIN 35
+#define FEAT_MOVELANE 36
+#define FEAT_BFRONT 37
 
 // The (skill, effect) dispatch kinds the port covers.
 #define SK_EFF_SPEEDUP 1
@@ -257,6 +268,12 @@ static int sk_sample_trigger(const uint kind, const int arg, __global uint* bank
             return 1;
         }
         return 0;
+    }
+    if (kind == SK_TERM_DIST_RATE_AFTER) {
+        // distance_rate_after_random: one distance_window opened at the rate
+        // point of the race distance, matching the retail trigger arm.
+        sk_distance_window(bank, distance * (float)arg / 100.0f, distance, wlo, whi);
+        return 1;
     }
     // up_slope_random / down_slope_random: one pick among the sign-matching
     // slopes in course order, windowed over the slope run.
