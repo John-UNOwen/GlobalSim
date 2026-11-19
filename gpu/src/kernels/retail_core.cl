@@ -30,7 +30,7 @@
 // ---------------------------------------------------------------------------
 // Race input, u32 words per race, stride RI_STRIDE.
 
-#define RI_STRIDE 320
+#define RI_STRIDE 352
 #define RI_SEED 0            // i32 request seed (RetailRandom seed)
 #define RI_N 1               // runners
 #define RI_COURSE 2          // geometry table index
@@ -52,10 +52,10 @@
 // loop writes pace, clock, rush, lane, and lane-list state for each runner
 // into the fourteen reserved tail frame slots. Zero in production keeps
 // those slots zero.
-#define RI_DEBUG_TICK 304
+#define RI_DEBUG_TICK 336
 // Per-runner block, slot RI_RUN0 + RI_RUN_STRIDE * r.
 #define RI_RUN0 16
-#define RI_RUN_STRIDE 12
+#define RI_RUN_STRIDE 13
 #define RR_STYLE 0           // base_running_style (1..5)
 #define RR_STRATEGY 1        // resolved strategy (1..5)
 #define RR_DISTAPT 2         // distance aptitude 0..7
@@ -68,6 +68,7 @@
 #define RR_CSSN 9
 #define RR_STAPT 10          // strategy aptitude 0..7
 #define RR_SUAPT 11          // surface aptitude 0..7
+#define RR_TEAM 12           // fixed team id, 0 no team (race_field.rs:461 drop)
 
 // ---------------------------------------------------------------------------
 // Race input, f64 words (raw bits) per race, stride RIL_STRIDE. Float
@@ -198,7 +199,7 @@
 #define SCR_HP_OUT (SCR_HP_IN + 24 * IIU)        // 24 * 180, ob 172 then olb
 #define SCR_STATE (SCR_HP_OUT + 24 * 180)
 // Integer state, one 24-wide column per slot (field base + runner index).
-#define SI_SLOTS 82
+#define SI_SLOTS 83
 #define SI_STRIDE (SI_SLOTS * 24)
 #define SI_SLOT(n) ((n) * 24)
 #define SI_STRATEGY SI_SLOT(0)
@@ -283,6 +284,7 @@
 #define SI_BNDIN40 SI_SLOT(79)     // in-40 order band cell
 #define SI_BNDIN50 SI_SLOT(80)     // in-50 order band cell
 #define SI_BNDIN80 SI_SLOT(81)     // in-80 order band cell
+#define SI_TEAM SI_SLOT(82)        // fixed team id (race_field.rs:461 same-team debuff drop)
 #define CP_UNSUPPORTED 1u
 #define CP_CUTOFF 2u
 #define CP_WASBLK 4u
@@ -3537,10 +3539,12 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
     skills_expire_current(sk, scr, skd, sd, n);
 }
 
-// skill_targets for the three rank-window codes. The ahead and behind codes
-// slice the published order outward from self, the visible code (4) also
-// demands a spot in this tick's lane cache. Same-team drops are compiler
-// gated (all-zero teams), and debuff immunity needs the refused kind 38.
+// skill_targets for the three rank-window codes: the first `limit` candidates
+// in the engine's order. The ahead code (9) slices the published order outward
+// ahead of self, the behind code (10) includes self then walks behind, and the
+// visible code (4) filters the order by this tick's visible column. The debuff
+// same-team drop is applied by the caller on this capped list, matching
+// race_field.rs:458-461.
 static int sk_targets(__global const uint* si, __global const uint* rs,
     __global const uint* scr, const int r, const int target, const int limit,
     const int n, int* outs) {
@@ -3624,8 +3628,16 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                 int outs[RACE_MAXR];
                 const int cnt = sk_targets(si, rs, scr, r, target, (int)ef[4], n, outs);
                 const uint tok = SK_TOK_EFF((uint)rec, (uint)e);
+                const uint owner_team = si[SI_TEAM + r];
+                const int debuff = modifier < 0.0;
                 for (int q = 0; q < cnt; q++) {
                     const int j = outs[q];
+                    // The skill_targets debuff filter (race_field.rs:458-461):
+                    // after the cap a negative-modifier receiver on the owner's
+                    // non-zero team drops out, no backfill. Immunity is kind 38.
+                    if (debuff && owner_team != 0u && j != r && si[SI_TEAM + j] == owner_team) {
+                        continue;
+                    }
                     if (kind == SK_EFF_RECOVERY) {
                         // Delivered perspective is never Self: HP lands from
                         // the receiver's max, the heal count stays with the

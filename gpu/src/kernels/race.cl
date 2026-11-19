@@ -609,6 +609,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         si[SI_STRATEGY + r] = (uint)strategy;
         si[SI_DISTAPT + r] = rb[RR_DISTAPT];
         si[SI_SUAPT + r] = rb[RR_SUAPT];
+        si[SI_TEAM + r] = rb[RR_TEAM];
         si[SI_RANK + r] = rb[RR_RANK];
         si[SI_PHASE + r] = 0u;
         si[SI_RPHASE + r] = 0u;

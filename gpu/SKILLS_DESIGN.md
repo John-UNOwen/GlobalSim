@@ -211,6 +211,11 @@ tiers, 3 and 7 are the retail HP tiers). Modifier dispatch follows retail
 - `SetStartDelay(14)`: writes the solver's `start_delay`, which the retail
   physics never reads (the retail start delay resolved in initialization), so
   the kernel fires it inert.
+- `MultiplyStartDelay(10)`: for the self target it folds into the init-time
+  start-delay factor. Aimed at another runner the retail receiver arm does
+  nothing (initialization already applied the gate), so the record fires inert:
+  event, counters and cooldown, no state write. Kinds `1`, `4` and `5` aimed at
+  another runner stay refused (the receiver stat bump and its refresh).
 
 The lists mirror `AdditiveReceiver`: registration-order folds, in-place token
 update on refire, order-preserving token removal at expiry.
@@ -227,7 +232,13 @@ registers a receiver-side instance: `apply_external_effect` passes
 before the `random_active_details` insert (`race_solver.rs:2644-2653`), so the
 receiver's own cooldown map and instance timers stay untouched. The constructor
 pass resolves no receivers (the engine has no field to deliver into at time
-zero) while still counting the fire's runtime duration, event and cooldown.
+zero) while still counting the fire's runtime duration, event and cooldown. The
+engine's `skill_targets` filter drops a debuff receiver who shares the owner's
+non-zero team (`race_field.rs:458-461`), applied after the `target_value` cap so
+no later candidate backfills the slot. The kernel mirrors it: the owner's team
+and each receiver's team reach `skills_fire` through `SI_TEAM`, and a negative
+modifier skips the same-team receivers off the capped list. Debuff immunity, the
+filter's other arm, stays refused with kind 38, so it reads false here.
 
 ## Modifier application points (exact engine sites)
 
@@ -465,23 +476,39 @@ Not yet ported (fallback-flagged, plan order in the README):
 - `base_*` (base stat reads), `motivation`, `grade`, `time`, `post_number`,
   `course_distance`, `furlong`
 - effects outside the accepted set 1, 4, 5, 6, 8, 9, 10, 14, 21, 22, 27, 28,
-  29 and 31 (`skills_compile.rs` refuses the rest by kind): `13` ExtendKakari,
-  `35`, `11`, `12` lane goals, `32` AllStatusUp, `36` and `37` random skill
-  activation, `38` debuff immunity
-- effect targets outside 1, 4, 9 and 10, kinds 1, 4, 5 and 10 aimed at another
-  runner, and a cross debuff (negative modifier on a targeted queued kind) on
-  a roster with any team id set: the engine drops same-team receivers, which
-  only folds to identity on all-zero teams
+  29 and 31 (`skills_compile.rs` refuses the rest by kind): `13` ExtendKakari
+  (a replace into the rush forced-end and kakari timer, no-op unless already
+  rushing), `35`, `11` and `12` lane goals (a presence flag and the last-set
+  `lane_target`, read by the passing-lane search the kernel does not drive),
+  `32` AllStatusUp (a mid-race all-stat bump with no kernel consumer), `33` and
+  `34` (no `SkillType` variant: the retail builder errors, the no-ffi path
+  degrades to Noop), `36` and `37` random skill activation (a re-activation of
+  another eligible skill through an activation-time draw), `38` debuff immunity
+  (a per-runner flag gating the target filter)
+- effect targets outside 1, 4, 9 and 10, and kinds `1`, `4` and `5` aimed at
+  another runner (they write the receiver's stats through a full
+  `refresh_stat_effects` the kernel does not model). `10`
+  `MultiplyStartDelay` at another runner fires inert in retail (the receiver
+  keeps its init-applied gate) and is accepted. The same-team debuff drop is a
+  real delivery gate now, not a roster flag: each runner's fixed team id reaches
+  the kernel (`RR_TEAM` into `SI_TEAM`) and `skills_fire` drops same-team
+  receivers off the capped receiver list, matching `race_field.rs:458-461`.
+  Debuff immunity, the other half of that filter, stays refused with kind 38.
 - a mid-race (non-constructor) fire of `GutsUp(4)` or `WisdomUp(5)`, and more
   than 8 effects on one record (the per-record token cap the receiver orders
   index)
 - structural: two live alternatives whose condition or precondition differs
-  (refused as `skill {sid} has other than one alternative`, see below),
-  `value_usage` 3 to 14 (stat, win and fan tiers, the activation rolls, the
-  late-corner count and the green-tag count, the modifier rescaled from state
-  the numeric table cannot carry),
+  (refused as `skill {sid} has other than one alternative`, see below: both
+  ride the shared skill cooldown key, and the kernel cools per record, so it
+  would let a second alternative fire where the engine parks the key),
+  `value_usage` 3 to 14 (usages 3 to 7, 10 and 12 13 rescale the modifier from
+  roster team stats, wins, fans and the displayed-stat tier and fold once the
+  roster read reaches the table; usages 8 and 9 draw `RetailRandom` at
+  activation and usages 11 and 14 read runtime counters),
   `duration_usage` 4 (the delayed running-instance path),
-  `additional_activate` not 0,
+  `additional_activate` not 0 (the extra activation is enqueued into
+  `running_skills` and applied on the running skill's own turn, not within the
+  firing scan pass),
   rarity outside 1..6 (3, 4 and 5 all fold to 3), priority outside {0,1}, debuff
   immunity, the legacy non-retail wisdom path, `isGeneralSkill` gates
 
@@ -494,7 +521,10 @@ skill carries the roll (`SK_FLAG_WISDOM`) and the rest inherit it
 text, a matching precondition signature and no sampled term is shadowed by
 the first live one (shared cooldown key, scanned first, identical gate), gets
 no record, and only its start-delay factor folds into the first record's
-multiplier. Any other second live alternative is refused by name.
+multiplier. Any other second live alternative is refused by name: every
+alternative shares the skill cooldown key (`race_solver_builder.rs:589`), so the
+first one to fire parks the key and blocks the rest, a shared state the kernel
+has no model for while it cools per record.
 `accumulatetime`-style precondition terms lower to a precondition program and
 region list the gate checks before the condition, mirroring the engine's
 `pre_condition` pass.

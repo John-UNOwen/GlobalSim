@@ -65,19 +65,21 @@ fn cross_runner_targets_compile() {
 
 #[test]
 fn self_only_kinds_refuse_cross_targets() {
-    // SpeedUp moves the receiver's live accumulator and the delayed
-    // multiplier folds for Self only, so both stay on the record owner.
+    // SpeedUp and GutsUp move the receiver's stats through a refresh the
+    // kernel has no consumer for, so they stay on the record owner.
     refused(
         &one_runner("order>=2", 500000, &["{\"type\":1,\"target\":9,\"modifier\":1000}"]),
         "targeting another runner",
     );
     refused(
-        &one_runner("order>=2", 500000, &["{\"type\":10,\"target\":4,\"modifier\":0}"]),
-        "targeting another runner",
-    );
-    refused(
         &one_runner("always>=0", 0, &["{\"type\":4,\"target\":9,\"modifier\":1000}"]),
         "targeting another runner",
+    );
+    // MultiplyStartDelay on another runner is inert in retail, so the record
+    // fires and cools down without a state write.
+    is_live(
+        &one_runner("order>=2", 500000, &["{\"type\":10,\"target\":4,\"modifier\":0}"]),
+        "kind 10 cross is inert",
     );
 }
 
@@ -157,16 +159,17 @@ fn effect_repeats_within_slot_cap_compile() {
 }
 
 #[test]
-fn cross_debuffs_need_team_free_rosters() {
-    // The engine drops same-team receivers; with every team zero the drop is
-    // the identity and the kernel needs no team model.
+fn cross_debuffs_compile_on_any_roster() {
+    // The kernel drops same-team receivers at delivery, so a debuff cross
+    // target compiles on a teamed roster as well as a team-free one. The
+    // drop is a runtime gate on the delivered list, not a build-time flag.
     is_live(
         &plan_effects("order>=2", 500000, &["{\"type\":27,\"target\":9,\"modifier\":-1000,\"targetValue\":2}"], r#"{"skills":["550001"]}"#),
         "cross debuff, team-free roster",
     );
-    refused(
+    is_live(
         &plan_effects("order>=2", 500000, &["{\"type\":27,\"target\":9,\"modifier\":-1000,\"targetValue\":2}"], r#"{"skills":["550001"],"teamId":2}"#),
-        "team-filtered debuff",
+        "cross debuff, teamed roster",
     );
     is_live(
         &plan_effects("order>=2", 500000, &["{\"type\":27,\"target\":9,\"modifier\":1000,\"targetValue\":2}"], r#"{"skills":["550001"],"teamId":2}"#),
@@ -199,14 +202,14 @@ fn unported_effect_kinds_refuse_by_name() {
     }
     refused(
         &one_runner("order>=2", 500000, &["{\"type\":37,\"target\":1,\"modifier\":1000}"]),
-        "effect type 37",
+        "random skill activation",
     );
     refused(
         &one_runner("order>=2", 500000, &["{\"type\":38,\"target\":1,\"modifier\":1000}"]),
-        "effect type 38",
+        "debuff immunity",
     );
     refused(
         &one_runner("order>=2", 500000, &["{\"type\":36,\"target\":1,\"modifier\":1000}"]),
-        "effect type 36",
+        "random skill activation",
     );
 }

@@ -15,7 +15,7 @@ use ocl::{Buffer, Queue, flags};
 
 pub const RACE_MAXR: usize = 24;
 pub const RACE_MAX_TICKS: usize = 6144;
-pub const RI_STRIDE: usize = 320;
+pub const RI_STRIDE: usize = 352;
 pub const RIL_STRIDE: usize = 640;
 pub const ST_STRIDE: usize = 232;
 // Skill scratch mirrors of retail_core.cl and skills.cl.
@@ -53,9 +53,9 @@ pub const RI_NCOR: usize = 12;
 pub const RI_LOT_MIN: usize = 13;
 pub const RI_LOT_MAX: usize = 14;
 pub const RI_EMPTY_MOVE: usize = 15;
-pub const RI_DEBUG_TICK: usize = 304;
+pub const RI_DEBUG_TICK: usize = 336;
 pub const RI_RUN0: usize = 16;
-pub const RI_RUN_STRIDE: usize = 12;
+pub const RI_RUN_STRIDE: usize = 13;
 pub const RR_STYLE: usize = 0;
 pub const RR_STRATEGY: usize = 1;
 pub const RR_DISTAPT: usize = 2;
@@ -65,6 +65,7 @@ pub const RR_CSS0: usize = 5;
 pub const RR_CSSN: usize = 9;
 pub const RR_STAPT: usize = 10;
 pub const RR_SUAPT: usize = 11;
+pub const RR_TEAM: usize = 12;
 pub const PT_SPURT: usize = 51;
 pub const PI_DISTANCE: usize = 106;
 pub const PD_CF_DIST: usize = 400;
@@ -124,7 +125,7 @@ const SCR_INIT_OUT: usize = SCR_INIT_IN + IIU;
 const SCR_HP_IN: usize = SCR_INIT_OUT + 992;
 const SCR_HP_OUT: usize = SCR_HP_IN + 24 * IIU;
 const SCR_STATE: usize = SCR_HP_OUT + 24 * 180;
-const SCR_SF: usize = SCR_STATE + 82 * 24;
+const SCR_SF: usize = SCR_STATE + 83 * 24;
 const SCR_LISTS: usize = SCR_SF + SF_STRIDE * 24;
 const SCR_CAND: usize = SCR_LISTS + LIST_STRIDE * 24;
 const SCR_CACHED: usize = (SCR_CAND + 3 * CAND_MAX + 63) & !63;
@@ -666,6 +667,9 @@ fn prepare(
         ri[b + RR_RANK] = horse.get("teamRank").and_then(Value::as_i64).unwrap_or(0) as u32;
         ri[b + RR_STAPT] = aptitude_id(horse.get_str("strategyAptitude")?)? as u32;
         ri[b + RR_SUAPT] = aptitude_id(horse.get_str("surfaceAptitude")?)? as u32;
+        // The fixed team id, the same value the engine reads for the debuff
+        // same-team drop (lib.rs:335).
+        ri[b + RR_TEAM] = horse.get("teamId").and_then(Value::as_f64).unwrap_or(0.0) as i64 as u32;
         ri[b + RR_CSSN] = css.len().min(4) as u32;
         for (k, value) in css.iter().take(4).enumerate() {
             ri[b + RR_CSS0 + k] = *value as u32;

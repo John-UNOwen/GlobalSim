@@ -156,7 +156,6 @@ pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
         tags: Vec::new(),
         reason: None,
         bumps: Vec::new(),
-        cross_debuff: false,
         nrec: 0,
         nprog: 0,
         nreg: 0,
@@ -177,12 +176,6 @@ pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
         return c.finish();
     }
     let entries: Vec<&Value> = horses.as_array().map(|a| a.iter().collect()).unwrap_or_default();
-    // The engine's debuff target filter drops same-team receivers. Porting it
-    // as the identity map needs every roster team at zero, as the parser's
-    // default keeps them.
-    let any_team = entries
-        .iter()
-        .any(|h| h.get("teamId").and_then(Value::as_f64).unwrap_or(0.0) as i64 != 0);
     for (r, horse) in entries.iter().enumerate() {
         let skills = match horse.get("skills") {
             Some(v) => v,
@@ -215,10 +208,8 @@ pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
             }
         }
     }
-    if c.cross_debuff && any_team {
-        c.unsupported("team-filtered debuff targeting is not ported".to_string());
-        return c.finish();
-    }
+    // A cross debuff is delivered by the kernel, which drops the same-team
+    // receivers exactly like race_field.rs:458-461, so no roster gate remains.
     c.finish()
 }
 
@@ -255,7 +246,6 @@ struct Compiler {
     tags: Vec<u8>,
     reason: Option<String>,
     bumps: Vec<(usize, i32, f64)>,
-    cross_debuff: bool,
     nrec: usize,
     nprog: usize,
     nreg: usize,
@@ -911,7 +901,26 @@ impl Compiler {
             for ef in effect_list {
                 let kind = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
                 if !matches!(kind, 1 | 4 | 5 | 6 | 8 | 9 | 10 | 14 | 21 | 22 | 27 | 28 | 29 | 31) {
-                    self.unsupported(format!("skill {sid} effect type {kind} is not ported"));
+                    let reason = match kind {
+                        11 | 12 | 35 => "lane goal (presence flag or last-set lane_target) \
+                                        needs a lane-preference consumer"
+                            .to_string(),
+                        13 => "kakari duration is a replace into the rush state, not an accumulator"
+                            .to_string(),
+                        32 => "all-stat bump is a mid-race stat write with no kernel consumer"
+                            .to_string(),
+                        33 | 34 => {
+                            "has no SkillType variant (retail builder errors, no-ffi degrades to Noop)"
+                        }
+                            .to_string(),
+                        36 | 37 => "random skill activation re-activates another skill via an \
+                                   activation-time draw"
+                            .to_string(),
+                        38 => "debuff immunity gates the target filter and needs the same-team drop"
+                            .to_string(),
+                        other => format!("type {other} is not ported"),
+                    };
+                    self.unsupported(format!("skill {sid} effect {reason}"));
                     return;
                 }
                 let target = ef.get("target").and_then(Value::as_i64).unwrap_or(1) as i32;
@@ -921,23 +930,29 @@ impl Compiler {
                     ));
                     return;
                 }
-                // SpeedUp bumps the receiver's live speed accumulator and the
-                // delayed multiplier only folds for the self target, so both
-                // stay on the runner that owns the record.
-                if target != 1 && matches!(kind, 1 | 4 | 5 | 10) {
+                // Kinds 1, 4 and 5 on another runner write the receiver's stats
+                // through a refresh the kernel does not model. MultiplyStartDelay
+                // there is inert in retail, so it fires without a state write.
+                if target != 1 && matches!(kind, 1 | 4 | 5) {
                     self.unsupported(format!(
-                        "skill {sid} effect type {kind} targeting another runner is not ported"
+                        "skill {sid} effect type {kind} targeting another runner writes the \
+                         receiver stat bump the kernel has no consumer for"
                     ));
                     return;
                 }
+                // The extra activation is enqueued into running_skills and
+                // applied on the running skill's own turn (race_solver.rs:1841).
                 if ef.get("additionalActivate").and_then(Value::as_i64).unwrap_or(0) != 0 {
-                    self.unsupported(format!("skill {sid} additionalActivate is not ported"));
+                    self.unsupported(format!(
+                        "skill {sid} additionalActivate defers the extra activation to the \
+                         running skill's own turn, not the firing scan pass"
+                    ));
                     return;
                 }
                 let value_usage = ef.get("valueUsage").and_then(Value::as_i64).unwrap_or(1) as i32;
-                // Usages 3 to 14 rescale the modifier from live or init-time
-                // state the table cannot carry: stat, win and fan tiers, the
-                // activation rolls, the late-corner count and the tag count.
+                // Usages 3 to 7, 10 and 12 13 fold from roster stats, wins, fans
+                // and the displayed-stat tier once the roster read reaches the
+                // table. 8, 9, 11 and 14 need a draw or runtime counter instead.
                 if matches!(value_usage, 3..=14) {
                     self.unsupported(format!(
                         "skill {sid} effect value_usage {value_usage} is not ported"
@@ -965,14 +980,6 @@ impl Compiler {
                 }
                 if static_fire && target == 1 && matches!(kind, 4 | 5 | 29) {
                     self.bumps.push((runner, kind, modifier));
-                }
-                // The engine drops same-team debuff receivers, an identity
-                // map only while every team is zero (checked for the roster).
-                if target != 1
-                    && matches!(kind, 8 | 9 | 21 | 22 | 27 | 28 | 31)
-                    && modifier < 0.0
-                {
-                    self.cross_debuff = true;
                 }
                 let target_value =
                     ef.get("targetValue").and_then(Value::as_f64).unwrap_or(0.).max(0.0);
