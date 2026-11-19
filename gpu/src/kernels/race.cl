@@ -687,6 +687,16 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         si[SI_BND40 + r] = 0u;
         si[SI_BND70 + r] = 0u;
         si[SI_ACTALL + r] = 0u;
+        si[SI_ACT2 + r] = 0u;
+        si[SI_ACTLH + r] = 0u;
+        si[SI_POV1 + r] = 0u;
+        si[SI_POVFC + r] = 0u;
+        si[SI_BNDIN20 + r] = 0u;
+        si[SI_BNDIN40 + r] = 0u;
+        si[SI_BNDIN50 + r] = 0u;
+        si[SI_BNDIN80 + r] = 0u;
+        sd[SD_NOUP + r] = 0.0;
+        sd[SD_NODOWN + r] = 0.0;
         sf[SF_AS_VALUE + r] = 0.f;
         sf[SF_CP_GELAP + r] = 0.f;
         sf[SF_CP_GTHRESH + r] = 0.f;
@@ -963,6 +973,12 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
                 }
                 sd[SD_OTIME + r] = targeted
                     ? (double)(convert_float_rte((float)sd[SD_OTIME + r]) + dt) : 0.0;
+                // The no-order pair accumulates on the runner's own target list,
+                // the same f32-into-f64 step, zeroed whenever the list is empty.
+                sd[SD_NOUP + r] = si[SI_L_TGTN + r] != 0u
+                    ? (double)(convert_float_rte((float)sd[SD_NOUP + r]) + dt) : 0.0;
+                sd[SD_NODOWN + r] = si[SI_L_TGTN + r] != 0u
+                    ? (double)(convert_float_rte((float)sd[SD_NODOWN + r]) + dt) : 0.0;
             }
             // stadium_score::RushingScore.update(is_kakari, dt), after the
             // step and before the gated continue, as the engine loop does.

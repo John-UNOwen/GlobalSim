@@ -62,6 +62,8 @@ Suites:
 | `wave2_gate` (gpu + initialization + geometry + race) | One real merged skill per ported construct plus a v77-roster race firing each through synthetic defs, seeds 1..3: zero fallback and frame identity, including the constructor-pass defer and the absolute init cooldown (see "Wave-2 condition fields") |
 | `wave2b_folds` | Compile-time gates for the effect side: cross-target records stay live, self-only kinds refuse cross targets, kinds 4 and 5 refuse mid-race fires and record construction-time bumps, the 8-effect cap, the debuff team gate, the `value_usage` refusals and the by-name refusals for kinds 36 to 38 |
 | `wave2b_gate` (gpu + initialization + geometry + race) | Ten real merged skills, one per ported effect family, plus a twelve-skill synthetic battery firing every cross-target and bump path, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-2b effect side") |
+| `wave3_folds` | Compile-time gates for the wave-3 leaves: the in-band cell forms, the activation-history folds including the provably-false self-gate, the roster reads in both fold directions, the opponent-count team gate and the still-refused names |
+| `wave3_gate` (gpu + initialization + geometry + race) | Fourteen real merged rows, one per ported construct with the seats the condition needs, plus a twenty-eight-skill synthetic battery firing every new leaf, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-3 condition tail") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 
 ### What the gate proves
@@ -687,8 +689,9 @@ six are ported, so both phases' counted fallbacks now compile:
   race scratch, updated each tick from the previous-tick rank once the clock
   passes 5 with the engine's permanent false latch. The rate in the name
   picks the cell and rides in the comparison argument. Only `==1` passes.
-  The in-band cells (`order_rate_in*_continue`) stay refused, the engine
-  never inserts them.
+  The in-band cells were first refused on the belief that the engine never
+  inserts them; `track_order_bands` says otherwise and wave 3 ports them, see
+  "Wave-3 condition tail".
 - `is_activate_any_skill`: the v75 retail observe model, a per-runner
   cumulative activation counter read through a per-record changed flag
   evaluated at every scan visit (see `SKILLS_DESIGN.md`).
@@ -833,6 +836,111 @@ order and cooldown-free conditions) covers what the real skills cannot
 A compile-only sweep of the 32 ids the wave-2a histogram refused on effect
 constructs now compiles 29 (solo horse, best over the seven strategy seats);
 the three remain refuse `value_usage` 7 or 11.
+
+### Wave-3 condition tail
+
+The last condition tier: stateful time machines, the activation history, the
+live in-band order cells, the two `distance_diff_*` siblings and the roster
+reads. The kernel stayed vocabulary-generic: eight new `SI_` slots, two new
+`SD_` slots, one new per-record bit, nineteen new feature codes (38 to 56), no
+per-skill branch anywhere.
+
+- Activation history: the phase counters (`SI_ACT0/1/2`, bumped by the fire's
+  phase), `SI_ACTLH` (fires at or past half the course), `SI_ACTALL` (already
+  there for the observe flag) and a per-record used bit that makes
+  `is_used_skill_id` true once the runner has activated that id. `used_skills`
+  takes only self-fired ids, because `apply_external_effect` passes
+  `follow_up = true` and that path returns before the insert
+  (`race_solver.rs:2644-2669`). Two shapes fold instead of running: an id no
+  roster horse carries can never enter the set, and
+  `is_activate_other_skill_detail==1` reads the record's own id, so the record's
+  first fire is the only writer of the bit the same gate blocks: it is false
+  forever and the battery asserts the CPU never fires it either. The
+  `activate_count_*` comparators are registered narrowly in the engine (lte and
+  gte for `activate_count_all`, gte only for the other two) and the compiler
+  refuses what the registry does not register.
+- `is_activate_heal_skill` lowers to the engine's boolean filter: argument 1
+  becomes `activate_count_heal >= 1`, any other argument its false branch
+  `== 0` (`activation_conditions.rs:638-641`).
+- In-band order cells: the wave-1 note that these never enter the retail band
+  map was wrong, and the code says so. `RaceField::update` feeds
+  `track_order_bands` in both directions (`race_field.rs:239-246`), so
+  `order_rate_in20/40/50/80_continue` are live and ported as four cells beside
+  the out-band ones, mirroring the same set/timer/NaN machine on the
+  pre-publish rank, the first five clock seconds skipped, and only the `==1`
+  comparison reaching the kernel.
+- No-order pair: `overtake_target_no_order_up_time` and `..._down_time`
+  accumulate beside `SD_OTIME` in the movement loop on the same
+  f32-into-f64-into-f64 step, armed by the runner's own lane target count, and
+  the rank pass zeroes them on the up event and on any rank drop
+  (`race_field.rs:258-276`, `race_field_retail.rs:282-298`). Their condition
+  values are the floor of the f64 accumulator, so the timers can be one tick
+  ahead of the same-tick pass that would reset them; the engine reads them the
+  same way.
+- `change_order_up_middle` and `change_order_up_finalcorner_after` count the
+  same rank-gain pass into the tick-start phase and the tick-start
+  final-corner flag, matching `record_overtakes` reading `retail.final_corner`
+  before the movement (`race_solver.rs:1755-1774`).
+- `blocked_all_continuetime` truncates `min` of the two existing block clocks,
+  and `blocked_front` is the one leaf that must not read the stored sample: the
+  engine's getter rebuilds `front_blocker` from live solver rows at evaluation
+  time (`activation_conditions.rs:1290-1292`), one tick fresher than the field
+  pass's sample. The stored-sample version first fired at all once its carrier
+  reached a mid-pack seat, and it diverged on one of the three seeds there; the
+  live scan closes it.
+- `is_surrounded`, `near_infront_count` and `visiblehorse` are field reads: the
+  three-direction membership test on f32-rounded gaps, the near corridor's
+  forward half on f64 gaps, and the lane cache's visible count.
+- Temptations: `temptation_count_behind/infront` count kakari rows behind and
+  ahead in the published order. The opponent variants are identity there only
+  while every roster team is zero, which is the engine's `is_opponent`
+  (`race_field.rs:913-947`); a team id in the roster refuses them by name, as it
+  does the debuff deliveries from wave-2b. The four style temptations lower to
+  one leaf with the base group in the argument, counting that group's kakari
+  rows including self, exactly the engine's loop.
+- `distance_diff_rate` reproduces the ranked endpoints with self substitution,
+  the f32 spread percentage floored, and an approximately-zero spread (under the
+  subnormal `8 * f32::from_bits(1)`) returning exactly 0;
+  `distance_diff_top_float` is the leader gap through `floor(x*10)/10` in f32.
+- Roster reads now cover `running_style_count_same`,
+  `running_style_count_same_rate` (the 0x35c7d30 `+0.5` f32 truncation of the
+  runner-count threshold, and false on an empty field),
+  `running_style_equal_popularity_one` (the unique `popularity == 1` horse, its
+  strategy group matching the runner's) and `same_skill_horse_count`. A roster
+  lookup that finds nothing folds false for every comparator, `!=` included, as
+  the engine's `roster_condition` does (`activation_conditions.rs:247-256`).
+  The fold reads the same two skill-entry shapes as the wire pass
+  (`normalize_skill_entry`), which matters: an entry shape mismatch made the
+  count wrong and 201641 replayed with a real divergence on the first try.
+- Still refused, and the reason: `behind_time`, `near_time` and `infront_time`
+  have no engine registry entry at all (the nearest names are the ported
+  `*_near_lane_time` timers), `is_other_character_activate_advantage_skill`
+  caches another runner's previous-tick activation, and
+  `remain_distance_viewer_id` reads a viewer's remaining distance, which has no
+  concept in the field.
+- Scratch grew to `SCR_U_WORDS` 58524 and `SRL_WORDS` 30424 (eight `SI_` slots
+  times 24, two `SD_` slots times 24), repinned in `tests/layout.rs`.
+
+`wave3_folds` compiles each shape alone: the four in-band rates live with `==1`,
+30 and every other comparator refused, the narrow counters refuse their
+unregistered comparators, the used-id fold stays live for a roster id and folds
+dead for an absent one, the self-gate folds dead, the roster reads fold both
+ways with the 83/84 percent threshold edge and the no-favorite case, the
+opponent pair refuses under a team id, and the refused names refuse by name.
+`wave3_gate` replays fourteen merged rows on the v77 roster, seeds 1..3, zero
+fallback and frame identity: 900561 (blocked_front, carried by all nine horses
+because its rank window never holds for one seat), 200622, 910231, 900641,
+210131 and 201621 (the two counters, riding a self-firing helper to reach their
+thresholds), 910371 (final-corner passes, spread for the same reason), 201641
+with two shape probes, 200271, 200291 (horse 0 at popularity 1), 910031 (identity
+only, its precondition window is narrow) and 200401 (is_surrounded). The battery
+(synthetic 664001 to 664028, one per path) fires every new leaf, holds the used
+and heal pair in wire order so the reader follows its provider, proves the
+self-gate dead on the CPU, and puts the blocker and surrounded cells on a
+mid-pack seat where they can actually hold. Four merged ids still refuse on the
+effect side (910151 two alternatives, 200281 effect type 3, 200771 and 200781
+effect target 20 and 19, 200801 effect type 13), so their conditions ride the
+battery and fold gates.
 
 ### Cost
 
@@ -1010,12 +1118,10 @@ entry only through the finalizer, one the fire already covers.
 Engine behavior the race loop port does not reach, each needing its own port
 and gate:
 
-- Skills outside the ported subset: the remaining stateful time machines and
-  activation history (`is_used_skill_id`, `is_activate_*` beyond any-skill,
-  `behind_time`, `near_time`, `infront_time`, `near_infront_count`,
-  `visiblehorse`), the in-band order cells, roster reads beyond rank, rank rate,
-  the bashin gaps and `distance_diff_top` (`same_style_rate` and the other
-  `distance_diff_*`), effect kinds 11 to 13 and 32 to 38, and the
+- Skills outside the ported subset: the names with no engine registry entry
+  (`behind_time`, `near_time`, `infront_time`),
+  `is_other_character_activate_advantage_skill` and
+  `remain_distance_viewer_id`, effect kinds 11 to 13 and 32 to 38, and the
   other constructs named
   in the `SKILLS_DESIGN.md` matrix. Each
   flags its race with the construct named

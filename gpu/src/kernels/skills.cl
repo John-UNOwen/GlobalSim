@@ -115,6 +115,29 @@
 #define FEAT_BHIN 35
 #define FEAT_MOVELANE 36
 #define FEAT_BFRONT 37
+// Wave-3 leaves: the in-band order cells read the band rate from the argument
+// word (20/40/50/80), FEAT_USED the queried skill id, FEAT_RTEMP the base
+// strategy group (1..4). The band and used leaves only compare ==1, like the
+// engine's filters.
+#define FEAT_INBAND 38
+#define FEAT_NEARIF 39
+#define FEAT_VISN 40
+#define FEAT_USED 41
+#define FEAT_ACT2 42
+#define FEAT_ACTLH 43
+#define FEAT_ACTALL 44
+#define FEAT_NOTOP 45
+#define FEAT_NOTOD 46
+#define FEAT_CHGUP_MID 47
+#define FEAT_CHGUP_FC 48
+#define FEAT_BALL 49
+#define FEAT_BFRONTB 50
+#define FEAT_SURR 51
+#define FEAT_TEMPT_B 52
+#define FEAT_TEMPT_F 53
+#define FEAT_RTEMP 54
+#define FEAT_DDRATE 55
+#define FEAT_DDTOPF 56
 
 // The (skill, effect) dispatch kinds the port covers.
 #define SK_EFF_SPEEDUP 1
@@ -147,6 +170,7 @@
 #define SKR_LATCH 3
 #define SKR_AWIN0 4
 #define SKR_AWIN1 5
+#define SKR_USED 6         // the record owner has activated this skill id
 
 // Double layout of one record's dynamic block (SKD_STRIDE doubles). The
 // effect timers are indexed by effect slot; an effect fires at most once per
@@ -400,6 +424,7 @@ static void sk_init_triggers(__global const uint* sk, __global uint* sks,
             for (int w = 0; w < SKD_STRIDE; w++) wd[w] = 0.0;
             sks[SKR_STRIDE * rec + SKR_STATE] = (uint)SK_S_READY;
             sks[SKR_STRIDE * rec + SKR_LATCH] = 0u;
+            sks[SKR_STRIDE * rec + SKR_USED] = 0u;
             sks[SKR_STRIDE * rec + SKR_AWIN0] = 0u;
             sks[SKR_STRIDE * rec + SKR_AWIN1] = 0u;
             const uint dead = (rd[2] & SK_FLAG_DEAD) ? 1u : 0u;

@@ -42,10 +42,21 @@ the fire path:
   cannot be judged at time zero: the engine's closure reports false with no
   field, so the record first fires on the loop's first tick, not the constructor
   pass. The compiler marks such records `SK_FLAG_INIT_DEFER` (bit 6), set when a
-  leaf is `order_rate`, `overtake_target_time`, `distance_diff_top`,
-  `change_order_up_end_after`, `lane_type`, `is_behind_in`, `is_move_lane` or
-  `blocked_front_continuetime`. The pre-loop scan evaluates such a record's
-  gate and state normally but drops the fire; the loop scans fire normally.
+  leaf is `order`, `order_rate`, `near_count`, `overtake_target_time`,
+  `distance_diff_top`, `distance_diff_top_float`, `distance_diff_rate`,
+  `change_order_up_end_after`, `change_order_up_middle`,
+  `change_order_up_finalcorner_after`, `lane_type`, `is_behind_in`,
+  `is_move_lane`, `blocked_front_continuetime`, `blocked_all_continuetime`,
+  `blocked_front`, `near_infront_count`, `visiblehorse`, `is_surrounded`,
+  `temptation_count_behind`, `temptation_count_infront`,
+  `temptation_opponent_count_behind`, `temptation_opponent_count_infront`,
+  `running_style_temptation_count_*`, `running_style_temptation_opponent_count_*`,
+  `order_rate_in*_continue`, `overtake_target_no_order_up_time` or
+  `overtake_target_no_order_down_time`. The pre-loop scan evaluates such a
+  record's gate and state normally but drops the fire; the loop scans fire
+  normally. The activation-history leaves are the exception: the counters, the
+  heal flag and the used-skill set are the solver's own state, present in the
+  constructor, so they are never deferred.
 - A record that does fire in the constructor pass has no retail timer map yet,
   so its cooldown starts at once as an absolute ready time
   `-(f32(cooldown) * f32(distance/1000))` in the Cooldown state, skipping the
@@ -291,10 +302,21 @@ the program carries only the dynamic leaves: `phase`, `distance_rate`,
 `blocked_side_continuetime`, `blocked_front_continuetime`, `bashin_diff_behind`,
 `bashin_diff_infront`, `activate_count_start`, `activate_count_middle`,
 `activate_count_heal`, `is_lastspurt`, `is_last_straight_onetime` (entry latch),
-the out-band cells (`order_rate_out*_continue`) and `is_activate_any_skill`, and
-the wave-2 live fields `lane_type`, `is_move_lane`, `is_behind_in`,
+the out-band cells (`order_rate_out*_continue`) and `is_activate_any_skill`, the
+wave-2 live fields `lane_type`, `is_move_lane`, `is_behind_in`,
 `distance_diff_top`, `overtake_target_time`, `change_order_up_end_after`,
-`compete_fight_count`. A condition whose
+`compete_fight_count`, and the wave-3 leaves `order_rate_in*_continue` (in-band
+cells), `near_infront_count`, `visiblehorse`, `is_used_skill_id`,
+`is_activate_heal_skill`, `activate_count_all`, `activate_count_end_after`,
+`activate_count_later_half`, `overtake_target_no_order_up_time`,
+`overtake_target_no_order_down_time`, `change_order_up_middle`,
+`change_order_up_finalcorner_after`, `blocked_all_continuetime`,
+`blocked_front`, `is_surrounded`, `temptation_count_behind`,
+`temptation_count_infront`, `temptation_opponent_count_behind`,
+`temptation_opponent_count_infront`, `running_style_temptation_count_*`,
+`running_style_temptation_opponent_count_*`, `distance_diff_rate`,
+`distance_diff_top_float`, and the activation-history fold
+`is_activate_other_skill_detail`. A condition whose
 comparison is not registered for its name falls to the `classify` catch-all
 and flags the race.
 
@@ -354,6 +376,32 @@ comparators (`activation_conditions.rs:229-243`).
 | is_behind_in | dynamic FEAT_BHIN, the sign of the lane gap to the behind runner; last place reports `None` (SK_NAN) so every comparison fails |
 | distance_diff_top | dynamic FEAT_DDTOP, `floor` of the f32 gap to the leader, using my own position while I lead, six |
 | running_style_count_nige/senko/sashi/oikomi_otherself | roster fold: the count of other runners in that style group (compiler `Statics.other_style`), six |
+| order_rate_in20/40/50/80_continue | dynamic FEAT_INBAND, `==1` only, the rate in the name picks the in-band cell and rides in the comparison argument |
+| near_infront_count | dynamic FEAT_NEARIF, live scan: `0 < gap <= 3.0` and `|lane gap| <= f64(0.16666f)` in f64 gaps |
+| visiblehorse | dynamic FEAT_VISN, the lane cache's visible count (`SI_L_VISN`) |
+| is_used_skill_id | dynamic FEAT_USED, `==` only: true once the runner has activated that id; an id no roster horse carries folds FALSE at compile time |
+| is_activate_heal_skill | `==` only: arg 1 lowers to `FEAT_HEAL >= 1` and any other arg to `FEAT_HEAL == 0`, the engine's boolean filter |
+| is_activate_other_skill_detail | FALSE fold: the engine's check reads its own id from `used_skills` and `used_skills` takes only self-fired ids, so the record's first fire is the only writer and the same gate blocks it (dead in the table, battery-proven never fired on the CPU) |
+| activate_count_all | dynamic FEAT_ACTALL, the sum of the three phase counters, `<=,>=` only |
+| activate_count_end_after | dynamic FEAT_ACT2, the phase-2 counter, `>=` only |
+| activate_count_later_half | dynamic FEAT_ACTLH, fires past `distance/2`, `>=` only |
+| overtake_target_no_order_up_time | dynamic FEAT_NOTOP, `floor` of the f32-into-f64 clock armed while the runner has lane targets, six |
+| overtake_target_no_order_down_time | dynamic FEAT_NOTOD, same clock on the down side, six |
+| change_order_up_middle | dynamic FEAT_CHGUP_MID, passes taken in phase 1, six |
+| change_order_up_finalcorner_after | dynamic FEAT_CHGUP_FC, passes taken while the tick-start final-corner flag ran, six |
+| blocked_all_continuetime | dynamic FEAT_BALL, `trunc(min(front, side))` of the two block clocks, six |
+| blocked_front | dynamic FEAT_BFRONTB: the live front-blocker scan at evaluation time (`lane_blocking_sample`), not the field-update stored sample: the engine's getter rebuilds from live solver rows |
+| is_surrounded | dynamic FEAT_SURR: out, front and behind membership in one scan (f32-rounded gaps, 0.16666/0.08333 lane tolerances), six |
+| temptation_count_behind, temptation_count_infront | dynamic FEAT_TEMPT_B/F, published-order slices behind and ahead, counting kakari rows, six |
+| temptation_opponent_count_behind, temptation_opponent_count_infront | same leaves, gated to all-zero-team rosters: `is_opponent` is identity there, a team in the roster refuses by name |
+| running_style_temptation_count_nige/senko/sashi/oikomi | dynamic FEAT_RTEMP with the base group in the argument: kakari rows of that group including self, six |
+| running_style_temptation_opponent_count_nige/senko/sashi/oikomi | same leaf, all-zero-team gate as the pair above |
+| distance_diff_rate | dynamic FEAT_DDRATE, the ranked endpoints with self substitution, the f32 `((first-own)/spread)*100` floored, an approximately-zero spread returning exactly 0 |
+| distance_diff_top_float | dynamic FEAT_DDTOPF, `floor(gap*10)/10` in f32 from the leader, six |
+| running_style_count_same | roster fold: the runner's own base-style count including self, six (`roster_condition`, refuses without a parsable strategy) |
+| running_style_count_same_rate | roster fold: the same count against the f32 `+0.5`-truncation threshold `arg% * n`, six; an empty field (`n<=0`) folds false |
+| running_style_equal_popularity_one | roster fold: true when exactly one horse holds `popularity == 1` and its strategy group matches the runner's; no unique favorite folds false for every comparator |
+| same_skill_horse_count | roster fold: horses whose skill list holds the record's id, six |
 
 The out-band cells live in race scratch (`SI_BND20/40/50/70` per runner),
 updated every tick in `field_update` from the previous-tick rank once the
@@ -362,6 +410,30 @@ or over `round(rate*n)`, and a tick below the threshold latches the cell
 false forever (the engine's NaN latch, `race_field.rs:417-448`). The kernel
 check mirrors the retail one: cell set means true, and only `==1` passes
 (`order_out_filter`, `activation_conditions.rs:1562`).
+
+The in-band cells (`order_rate_in*_continue`) live beside them in race scratch
+(`SI_BNDIN20/40/50/80`). `track_order_bands` updates both directions on every
+rank pass (`race_field.rs:239-246`), so the in-cells are live, not inert: the
+cell tracks the pre-publish rank, unset becomes the armed timer value while the
+rank stays at or under `round(rate*n/100)` (thresholds index 0, 1, 2, 4 for
+20/40/50/80), a pass over the threshold latches NaN, the first five clock
+seconds are skipped, and only the armed state reaches the kernel as true
+(`order_in_filter`, `activation_conditions.rs:1604-1607`).
+
+The activation history rides per-runner scratch counters bumped in
+`skills_fire` at the engine's `apply_activation` sites (`race_solver.rs:2662-2669`):
+`SI_ACT0/1/2` per phase, `SI_ACTLH` for a fire at or past `distance/2`, and a
+per-record used bit (`SKR_USED`) set on the record's first fire, mirroring the
+unconditional `used_skills` insert. The engine's follow-up deliveries return
+before that insert, so the used set holds exactly the self-fired ids.
+
+The no-order pair (`SD_NOUP/SD_NODOWN`) accumulates in the movement loop beside
+`SD_OTIME` on the same f32-into-f64 step, armed by the runner's own lane target
+count, and `field_update` zeroes the up timer on a rank-gain event and the down
+timer on any rank drop, before the frozen-past-line guard skips further
+resets (`race_field.rs:258-276`). `FEAT_CHGUP_MID` and `FEAT_CHGUP_FC` count
+the same event pass into the tick-start phase and the tick-start final-corner
+flag (`race_solver.rs:1755-1774`).
 
 `is_activate_any_skill` models the engine's filter
 (`activation_conditions.rs:663-703`) and its `observe_anyskill`
@@ -380,20 +452,16 @@ eight samplers above refuses by name.
 
 Not yet ported (fallback-flagged, plan order in the README):
 
-- stateful machines beyond the set above: `behind_time`, `near_time`,
-  `infront_time`, `blocked_*` beyond `blocked_side_continuetime` and
-  `blocked_front_continuetime`,
-  `near_infront_count`, `visiblehorse`,
-  `change_order_*` beyond `change_order_onetime` and `change_order_up_end_after`
-- `is_used_skill_id`, `is_activate_*` beyond `is_activate_any_skill`
-  (each registers its own skill-id argument)
+- no engine name behind them, so the registry itself cannot answer:
+  `behind_time`, `near_time` and `infront_time` (the nearest entries are the
+  ported `*_near_lane_time` timers),
+  `is_other_character_activate_advantage_skill` (a cross-runner cache of the
+  previous tick's activations, `field.other_advantage_active`),
+  `remain_distance_viewer_id` (a viewer's remaining distance, no concept in
+  the field)
 - precondition `is_activate_any_skill`: the engine drops precondition nodes
   before the observe map is built (`race_solver.rs:551`), so the flag never
   becomes readable and the compiler refuses it by name
-- in-band cells: `order_rate_in*_continue` (never inserted into the retail
-  `order_band` map, so the engine's filter always errors)
-- roster reads beyond rank, rank rate and the two bashin gaps:
-  `same_style_rate`, `distance_diff_*` beyond `distance_diff_top`
 - `base_*` (base stat reads), `motivation`, `grade`, `time`, `post_number`,
   `course_distance`, `furlong`
 - effects outside the accepted set 1, 4, 5, 6, 8, 9, 10, 14, 21, 22, 27, 28,

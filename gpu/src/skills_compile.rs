@@ -117,6 +117,28 @@ pub const FEAT_FIGHT: u32 = 34;
 pub const FEAT_BHIN: u32 = 35;
 pub const FEAT_MOVELANE: u32 = 36;
 pub const FEAT_BFRONT: u32 = 37;
+// Wave-3 leaves. FEAT_INBAND packs the band rate (20/40/50/80) in the
+// argument word, FEAT_USED the queried skill id and FEAT_RTEMP the base
+// strategy group (1..4).
+pub const FEAT_INBAND: u32 = 38;
+pub const FEAT_NEARIF: u32 = 39;
+pub const FEAT_VISN: u32 = 40;
+pub const FEAT_USED: u32 = 41;
+pub const FEAT_ACT2: u32 = 42;
+pub const FEAT_ACTLH: u32 = 43;
+pub const FEAT_ACTALL: u32 = 44;
+pub const FEAT_NOTOP: u32 = 45;
+pub const FEAT_NOTOD: u32 = 46;
+pub const FEAT_CHGUP_MID: u32 = 47;
+pub const FEAT_CHGUP_FC: u32 = 48;
+pub const FEAT_BALL: u32 = 49;
+pub const FEAT_BFRONTB: u32 = 50;
+pub const FEAT_SURR: u32 = 51;
+pub const FEAT_TEMPT_B: u32 = 52;
+pub const FEAT_TEMPT_F: u32 = 53;
+pub const FEAT_RTEMP: u32 = 54;
+pub const FEAT_DDRATE: u32 = 55;
+pub const FEAT_DDTOPF: u32 = 56;
 
 /// One race's compiled table. `reason` is Some when the race must run on the
 /// CPU, naming the first construct the kernel cannot evaluate. `bumps` are
@@ -492,7 +514,7 @@ impl Compiler {
                 }
             };
             let g = Geometry::new(course);
-            let statics = Statics::new(course, horse, root);
+            let statics = Statics::new(course, horse, root, sid);
             let leaves: Vec<Leaf> = match terms.iter().map(|t| classify(t, &g, &statics)).collect() {
                 Ok(l) => l,
                 Err(why) => {
@@ -552,7 +574,10 @@ impl Compiler {
                 pre_init_defer = pre_leaves.iter().any(|l| {
                     matches!(leaf_feat(l), FEAT_ORDER_RATE | FEAT_OTIME | FEAT_DDTOP
                         | FEAT_CHGUP_END | FEAT_LANETYPE | FEAT_BHIN | FEAT_MOVELANE
-                        | FEAT_BFRONT)
+                        | FEAT_BFRONT | FEAT_NEARIF | FEAT_VISN | FEAT_INBAND
+                        | FEAT_BALL | FEAT_BFRONTB | FEAT_CHGUP_MID | FEAT_CHGUP_FC
+                        | FEAT_NOTOP | FEAT_NOTOD | FEAT_SURR | FEAT_TEMPT_B
+                        | FEAT_TEMPT_F | FEAT_RTEMP | FEAT_DDRATE | FEAT_DDTOPF)
                 });
                 let mut pre_regions: Vec<(f64, f64)> = vec![(0.0, g.distance)];
                 for leaf in pre_leaves.iter() {
@@ -973,7 +998,10 @@ impl Compiler {
             let init_defer = pre_init_defer || leaves.iter().any(|l| {
                 matches!(leaf_feat(l), FEAT_ORDER | FEAT_ORDER_RATE | FEAT_NEAR | FEAT_OTIME
                     | FEAT_DDTOP | FEAT_CHGUP_END | FEAT_LANETYPE | FEAT_BHIN | FEAT_MOVELANE
-                    | FEAT_BFRONT)
+                    | FEAT_BFRONT | FEAT_NEARIF | FEAT_VISN | FEAT_INBAND
+                    | FEAT_BALL | FEAT_BFRONTB | FEAT_CHGUP_MID | FEAT_CHGUP_FC
+                    | FEAT_NOTOP | FEAT_NOTOD | FEAT_SURR | FEAT_TEMPT_B
+                    | FEAT_TEMPT_F | FEAT_RTEMP | FEAT_DDRATE | FEAT_DDTOPF)
             });
 
             // retail_initialization rolls the wisdom lottery once per skill id;
@@ -1210,10 +1238,21 @@ struct Statics {
     season: Option<f64>,
     is_dirtgrade: bool,
     other_style: [f64; 4],
+    // Wave-3 roster folds. same_style counts the base-style group including
+    // self, skill_count counts horses holding the record's own skill id.
+    same_style: Option<f64>,
+    n_runners: i64,
+    favorite_matches: Option<bool>,
+    skill_count: f64,
+    skill_ids: Vec<String>,
+    // The record's own skill id, the target of is_activate_other_skill_detail.
+    sid: f64,
+    // Nonzero teams make the opponent counts differ from their plain ones.
+    any_team: bool,
 }
 
 impl Statics {
-    fn new(course: &Value, horse: &Value, root: &Value) -> Statics {
+    fn new(course: &Value, horse: &Value, root: &Value, sid: &str) -> Statics {
         let track_id = course.get("raceTrackId").and_then(Value::as_i64).unwrap_or(0);
         // The retail builder counts base styles once for the roster
         // (lib.rs:393-401) and hands each runner those counts minus itself
@@ -1222,15 +1261,54 @@ impl Statics {
             horse.get("strategy").and_then(Value::as_str).unwrap_or(""),
         ));
         let mut counts = [0i64; 4];
+        // PreparedRoster::new folds the rest: one entry per horse, the
+        // popularity==1 favorite (lib.rs:387-391) and one count per skill id
+        // over the per-horse deduplicated skill lists (lib.rs:402-403).
+        let mut n_runners = 0i64;
+        let mut favorite_style: Option<i64> = None;
+        let mut favorite_ambiguous = false;
+        let mut skill_ids: Vec<String> = Vec::new();
+        let mut skill_count = 0i64;
+        let mut any_team = false;
         if let Some(list) = root.get("horses").and_then(Value::as_array) {
             for other in list {
-                if let Some(i) = style_base_index(strategy_code(
-                    other.get("strategy").and_then(Value::as_str).unwrap_or(""),
-                )) {
+                n_runners += 1;
+                let code = strategy_code(other.get("strategy").and_then(Value::as_str).unwrap_or(""));
+                if let Some(i) = style_base_index(code) {
                     counts[i] += 1;
+                }
+                if other.get("popularity").and_then(Value::as_i64).unwrap_or(0) == 1 {
+                    if favorite_style.is_some() {
+                        favorite_ambiguous = true;
+                    }
+                    favorite_style = Some(code);
+                }
+                if other.get("teamId").and_then(Value::as_f64).unwrap_or(0.0) as i64 != 0 {
+                    any_team = true;
+                }
+                let mut holds = false;
+                if let Some(sk) = other.get("skills").and_then(Value::as_array) {
+                    for entry in sk {
+                        // Same two entry shapes the wire pass accepts.
+                        let Some((s, _)) = normalize_skill_entry(entry) else { continue };
+                        if s == sid && !holds {
+                            holds = true;
+                            skill_count += 1;
+                        }
+                        if !skill_ids.iter().any(|x| *x == s) {
+                            skill_ids.push(s);
+                        }
+                    }
                 }
             }
         }
+        let favorite_matches = match favorite_style {
+            Some(f) if !favorite_ambiguous => Some(style_matches(
+                strategy_code(horse.get("strategy").and_then(Value::as_str).unwrap_or("")),
+                f,
+            )),
+            _ => None,
+        };
         let mut other_style = [0.0f64; 4];
         for i in 0..4 {
             other_style[i] = (counts[i] - i64::from(own == Some(i))) as f64;
@@ -1259,6 +1337,13 @@ impl Statics {
                 None => is_dirtgrade_track(track_id),
             },
             other_style,
+            same_style: own.map(|i| counts[i] as f64),
+            n_runners,
+            favorite_matches,
+            skill_count: skill_count as f64,
+            skill_ids,
+            sid: sid.parse::<u32>().unwrap_or(0) as f64,
+            any_team,
         }
     }
 }
@@ -1335,14 +1420,19 @@ fn dyn_leaf(feat: u32, t: &Term) -> Leaf {
 }
 
 fn fold(value: f64, t: &Term) -> Leaf {
-    let a = t.arg as f64;
-    let ok = match t.op {
-        0 => value == a,
-        1 => value != a,
-        2 => value < a,
-        3 => value <= a,
-        4 => value > a,
-        _ => value >= a,
+    fold2(value, t.arg as f64, t.op)
+}
+
+/// Compare a folded value against a folded threshold with the term's
+/// comparator, the engine's roster and rate filters resolved at build time.
+fn fold2(value: f64, threshold: f64, op: i64) -> Leaf {
+    let ok = match op {
+        0 => value == threshold,
+        1 => value != threshold,
+        2 => value < threshold,
+        3 => value <= threshold,
+        4 => value > threshold,
+        _ => value >= threshold,
     };
     if ok {
         Leaf::True
@@ -1359,6 +1449,12 @@ fn style_matches(a: i64, b: i64) -> bool {
 /// f32 percent of the course distance rounded through a +0.5 truncation.
 fn dist_rate_threshold(arg: i64, distance: f64) -> f64 {
     (((arg as f32 / 100.0) * distance as f32 + 0.5f32) as i32) as f64
+}
+
+/// The running_style_count_same_rate threshold: the client 0x35c7d30 rounds
+/// the percentage of the runner count to a whole through a +0.5 truncation.
+fn rate_count_threshold(arg: f64, n: i64) -> f64 {
+    (((arg as f32 / 100.0f32) * n as f32 + 0.5f32).trunc()) as f64
 }
 
 /// The corner row is_finalcorner_random draws: reverse scan, ids default to
@@ -1393,17 +1489,26 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         // The retail filter table only registers >= for the heal count and >
         // for the duel count, so other comparators stay refusals.
         "activate_count_heal" if t.op == 5 => Ok(dyn_leaf(FEAT_HEAL, t)),
+        "activate_count_all" if matches!(t.op, 3 | 5) => Ok(dyn_leaf(FEAT_ACTALL, t)),
+        "activate_count_end_after" if t.op == 5 => Ok(dyn_leaf(FEAT_ACT2, t)),
+        "activate_count_later_half" if t.op == 5 => Ok(dyn_leaf(FEAT_ACTLH, t)),
         "bashin_diff_behind" => Ok(dyn_leaf(FEAT_BASH_BEHIND, t)),
         "bashin_diff_infront" => Ok(dyn_leaf(FEAT_BASH_INFRONT, t)),
         "behind_near_lane_time" => Ok(dyn_leaf(FEAT_BHNEAR, t)),
         "behind_near_lane_time_set1" => Ok(dyn_leaf(FEAT_BHNEAR1, t)),
+        "blocked_all_continuetime" => Ok(dyn_leaf(FEAT_BALL, t)),
+        "blocked_front" => Ok(dyn_leaf(FEAT_BFRONTB, t)),
         "blocked_front_continuetime" => Ok(dyn_leaf(FEAT_BFRONT, t)),
         "blocked_side_continuetime" => Ok(dyn_leaf(FEAT_BSIDE, t)),
         "change_order_onetime" => Ok(dyn_leaf(FEAT_ORDER_DELTA, t)),
         "change_order_up_end_after" => Ok(dyn_leaf(FEAT_CHGUP_END, t)),
+        "change_order_up_finalcorner_after" => Ok(dyn_leaf(FEAT_CHGUP_FC, t)),
+        "change_order_up_middle" => Ok(dyn_leaf(FEAT_CHGUP_MID, t)),
         "compete_fight_count" if t.op == 4 => Ok(dyn_leaf(FEAT_FIGHT, t)),
         "corner" => Ok(dyn_leaf(FEAT_CORNER, t)),
+        "distance_diff_rate" => Ok(dyn_leaf(FEAT_DDRATE, t)),
         "distance_diff_top" => Ok(dyn_leaf(FEAT_DDTOP, t)),
+        "distance_diff_top_float" => Ok(dyn_leaf(FEAT_DDTOPF, t)),
         "distance_rate" => Ok(Leaf::Dynamic {
             feat: FEAT_DIST_RATE,
             cmp: t.op,
@@ -1421,6 +1526,29 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         "infront_near_lane_time" => Ok(dyn_leaf(FEAT_IFNEAR, t)),
         // v75 retail observe: per-visit changed flag, see sk_feat_value.
         "is_activate_any_skill" if t.op == 0 && t.arg == 1 => Ok(dyn_leaf(FEAT_ANYACT, t)),
+        // The engine compares its heal counter boolean against the argument:
+        // 1 means at least one heal, any other argument means no heal.
+        "is_activate_heal_skill" if t.op == 0 => Ok(if t.arg == 1 {
+            Leaf::Dynamic { feat: FEAT_HEAL, cmp: 5, arg: Some(1.0) }
+        } else {
+            Leaf::Dynamic { feat: FEAT_HEAL, cmp: 0, arg: Some(0.0) }
+        }),
+        // The engine checks its own skill id in used_skills, and used_skills
+        // takes only self-fired ids. The record's first fire is the only way
+        // to set the bit, and the same gate blocks that fire, so the check
+        // is false forever and the record folds dead.
+        "is_activate_other_skill_detail" if t.op == 0 && t.arg == 1 => Ok(Leaf::False),
+        "is_surrounded" => Ok(dyn_leaf(FEAT_SURR, t)),
+        // used_skills receives exactly the ids the runner self-fired from the
+        // table. An id the roster never carries can never be in the set.
+        "is_used_skill_id" if t.op == 0 => {
+            let want = format!("{}", t.arg);
+            if s.skill_ids.iter().any(|x| *x == want) {
+                Ok(Leaf::Dynamic { feat: FEAT_USED, cmp: 0, arg: Some(t.arg as f64) })
+            } else {
+                Ok(Leaf::False)
+            }
+        }
         "is_behind_in" => Ok(dyn_leaf(FEAT_BHIN, t)),
         "is_dirtgrade" if matches!(t.op, 0 | 1) => {
             Ok(fold(if s.is_dirtgrade { 1.0 } else { 0.0 }, t))
@@ -1443,8 +1571,23 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         "is_temptation" if t.op == 0 => Ok(dyn_leaf(FEAT_IS_TEMPTATION, t)),
         "lane_type" => Ok(dyn_leaf(FEAT_LANETYPE, t)),
         "near_count" => Ok(dyn_leaf(FEAT_NEAR, t)),
+        "near_infront_count" => Ok(dyn_leaf(FEAT_NEARIF, t)),
         "order" => Ok(dyn_leaf(FEAT_ORDER, t)),
         "order_rate" => Ok(dyn_leaf(FEAT_ORDER_RATE, t)),
+        name if name.starts_with("order_rate_in") && name.ends_with("_continue") => {
+            // order_in_filter (activation_conditions.rs:1604-1607): the retail
+            // check reads the in-band cell track_order_bands updates on every
+            // rank pass, and accepts only ==1 of its set state.
+            let rate = &name["order_rate_in".len()..name.len() - "_continue".len()];
+            match (rate.parse::<i64>(), t.op, t.arg) {
+                (Ok(r @ (20 | 40 | 50 | 80)), 0, 1) => Ok(Leaf::Dynamic {
+                    feat: FEAT_INBAND,
+                    cmp: 0,
+                    arg: Some(r as f64),
+                }),
+                _ => Err(format!("'{name}'{}{} is not ported", op_text(t.op), t.arg)),
+            }
+        }
         name if name.starts_with("order_rate_out") && name.ends_with("_continue") => {
             // order_out_filter (activation_conditions.rs:1608-1611): the rate
             // in the name picks the band cell the retail check reads, and the
@@ -1471,13 +1614,70 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         "running_style_count_senko_otherself" => Ok(fold(s.other_style[1], t)),
         "running_style_count_sashi_otherself" => Ok(fold(s.other_style[2], t)),
         "running_style_count_oikomi_otherself" => Ok(fold(s.other_style[3], t)),
+        "running_style_count_same" => match s.same_style {
+            Some(v) => Ok(fold(v, t)),
+            None => Err("'running_style_count_same' needs a parsable strategy".into()),
+        },
+        "running_style_count_same_rate" => match s.same_style {
+            Some(v) if s.n_runners > 0 => Ok(fold2(v, rate_count_threshold(t.arg as f64, s.n_runners), t.op)),
+            Some(_) => Ok(Leaf::False),
+            None => Err("'running_style_count_same_rate' needs a parsable strategy".into()),
+        },
+        "running_style_equal_popularity_one" => match s.favorite_matches {
+            Some(v) => Ok(fold(if v { 1.0 } else { 0.0 }, t)),
+            None => Ok(Leaf::False),
+        },
+        name if name.starts_with("running_style_temptation_count_")
+            || name.starts_with("running_style_temptation_opponent_count_") =>
+        {
+            // The opponent variants drop same-team runners, an identity map
+            // only while every roster team is zero.
+            let opponents = name.contains("_opponent_");
+            let group = match name.rsplit('_').next() {
+                Some("nige") => Some(1.),
+                Some("senko") => Some(2.),
+                Some("sashi") => Some(3.),
+                Some("oikomi") => Some(4.),
+                _ => None,
+            };
+            match group {
+                Some(g) if !opponents || !s.any_team => Ok(Leaf::Dynamic {
+                    feat: FEAT_RTEMP,
+                    cmp: t.op,
+                    arg: Some(g),
+                }),
+                _ => Err(format!("'{name}'{}{} is not ported", op_text(t.op), t.arg)),
+            }
+        }
+        "same_skill_horse_count" => Ok(fold(s.skill_count, t)),
         "season" => match s.season {
             Some(v) => Ok(fold(v, t)),
             None => Err("'season' needs a parsable season in the request".into()),
         },
         "slope" => Ok(dyn_leaf(FEAT_SLOPE, t)),
         "temptation_count" if t.op == 0 => Ok(dyn_leaf(FEAT_TEMPT, t)),
+        name if name == "temptation_count_behind" || name == "temptation_count_infront"
+            || name == "temptation_opponent_count_behind"
+            || name == "temptation_opponent_count_infront" =>
+        {
+            // is_opponent keeps every runner an opponent only while every
+            // roster team is zero, so the opponent pair needs that gate.
+            let opponents = name.contains("opponent");
+            if opponents && s.any_team {
+                Err(format!(
+                    "'{name}'{}{} needs a roster with every team at zero",
+                    op_text(t.op),
+                    t.arg
+                ))
+            } else {
+                let feat = if name.ends_with("behind") { FEAT_TEMPT_B } else { FEAT_TEMPT_F };
+                Ok(dyn_leaf(feat, t))
+            }
+        }
+        "overtake_target_no_order_up_time" => Ok(dyn_leaf(FEAT_NOTOP, t)),
+        "overtake_target_no_order_down_time" => Ok(dyn_leaf(FEAT_NOTOD, t)),
         "track_id" => Ok(fold(s.track_id as f64, t)),
+        "visiblehorse" => Ok(dyn_leaf(FEAT_VISN, t)),
         "weather" => match s.weather {
             Some(v) => Ok(fold(v, t)),
             None => Err("'weather' needs a parsable weather in the request".into()),

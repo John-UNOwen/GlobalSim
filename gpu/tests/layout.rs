@@ -13,8 +13,8 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     assert_eq!(re::SK_STRIDE, 34112);
     // The full scratch mirrors: stat rows, race state, banks, then the skill
     // state block, five token orders, the substream bank and the staging.
-    assert_eq!(re::SCR_U_WORDS, 58332);
-    assert_eq!(re::SRL_WORDS, 30376);
+    assert_eq!(re::SCR_U_WORDS, 58524);
+    assert_eq!(re::SRL_WORDS, 30424);
     // Table areas stay inside the stride, header first, then course lists,
     // records, effects, programs, arms, regions, terms and tags.
     assert!(16 <= globalsim_gpu::skills_compile::SK_STRAIGHTS);

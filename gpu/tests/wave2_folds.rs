@@ -94,12 +94,10 @@ fn restricted_comparators_stay_refused() {
 
 #[test]
 fn unported_neighbours_refuse_by_name() {
-    refused(&one_runner("change_order_up_finalcorner_after>=1"), "change_order_up_finalcorner_after");
-    refused(&one_runner("change_order_up_middle>=1"), "change_order_up_middle");
-    refused(&one_runner("blocked_all_continuetime>=1"), "blocked_all_continuetime");
+    // The wave-3 port took change_order_up_*, blocked_all_continuetime,
+    // distance_diff_top_float and overtake_target_no_order_* off this list.
+    // blocked_side_continuetime_x is not an engine name at all.
     refused(&one_runner("blocked_side_continuetime_x>=1"), "blocked_side_continuetime_x");
-    refused(&one_runner("distance_diff_top_float>=1"), "distance_diff_top_float");
-    refused(&one_runner("overtake_target_no_order_up_time>=1"), "overtake_target_no_order_up_time");
 }
 
 #[test]

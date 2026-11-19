@@ -198,7 +198,7 @@
 #define SCR_HP_OUT (SCR_HP_IN + 24 * IIU)        // 24 * 180, ob 172 then olb
 #define SCR_STATE (SCR_HP_OUT + 24 * 180)
 // Integer state, one 24-wide column per slot (field base + runner index).
-#define SI_SLOTS 74
+#define SI_SLOTS 82
 #define SI_STRIDE (SI_SLOTS * 24)
 #define SI_SLOT(n) ((n) * 24)
 #define SI_STRATEGY SI_SLOT(0)
@@ -275,6 +275,14 @@
 #define SI_ACTALL SI_SLOT(71)      // cumulative activations, the v75 anyskill count
 #define SI_HEAL SI_SLOT(72)        // activate_count_heal, bumped per self recovery
 #define SI_POV2 SI_SLOT(73)        // phase_overtakes[2], the end-phase rank gains
+#define SI_ACT2 SI_SLOT(74)        // activate_count[2], bumped at fire in phase 2
+#define SI_ACTLH SI_SLOT(75)       // activate_count_later_half, bumps past mid-course
+#define SI_POV1 SI_SLOT(76)        // phase_overtakes[1], the middle-phase rank gains
+#define SI_POVFC SI_SLOT(77)       // final_corner_overtakes, tick-start flag gated
+#define SI_BNDIN20 SI_SLOT(78)     // in-20 order band cell, same encoding as out
+#define SI_BNDIN40 SI_SLOT(79)     // in-40 order band cell
+#define SI_BNDIN50 SI_SLOT(80)     // in-50 order band cell
+#define SI_BNDIN80 SI_SLOT(81)     // in-80 order band cell
 #define CP_UNSUPPORTED 1u
 #define CP_CUTOFF 2u
 #define CP_WASBLK 4u
@@ -403,7 +411,7 @@
 
 // Per-race scratch f64, one 24-wide column per slot (field base + runner
 // index). Array fields keep 24 slots per element: base + element * 24 + r.
-#define SD_SLOTS 105
+#define SD_SLOTS 107
 #define SD_STRIDE (SD_SLOTS * 24)
 #define SD_SLOT(n) ((n) * 24)
 #define SD_POS SD_SLOT(0)
@@ -441,6 +449,8 @@
 // Overtake cooldown, pair-keyed like the engine's map: slot SD_OVC + target
 // * 24 + i holds the earliest next rank-gain time for runner i passing target.
 #define SD_OVC SD_SLOT(81)        // 24 slots, -1.0 until the pair fires once
+#define SD_NOUP SD_SLOT(105)      // overtake_target_no_order_up_time, f64
+#define SD_NODOWN SD_SLOT(106)    // overtake_target_no_order_down_time, f64
 #define SRL_RUNNER 0
 #define SRL_HP SD_STRIDE          // hp columns, SH_STRIDE per runner
 #define SH_STRIDE 8
@@ -2415,23 +2425,34 @@ static void field_update(__global uint* scr, __global uint* si,
     }
     // Order-band "continue" tracking runs on the previous rank pass, before
     // the new rank publishes. The rate in the filter's name picks the cell,
-    // and track_order_bands updates all four out cells every tick.
-    const double band_thr[4] = {round(0.2 * (double)n), round(0.4 * (double)n),
-        round(0.5 * (double)n), round(0.7 * (double)n)};
-    const int band_col[4] = {SI_BND20, SI_BND40, SI_BND50, SI_BND70};
+    // and track_order_bands updates all eight cells every tick: the out
+    // bands take rank >= threshold, the in bands rank <= threshold, and the
+    // in-80 cell uses the 0.8 threshold track_order_bands passes as [4].
+    const double band_thr[5] = {round(0.2 * (double)n), round(0.4 * (double)n),
+        round(0.5 * (double)n), round(0.7 * (double)n), round(0.8 * (double)n)};
+    const int band_out[4] = {SI_BND20, SI_BND40, SI_BND50, SI_BND70};
+    const int band_in[4] = {SI_BNDIN20, SI_BNDIN40, SI_BNDIN50, SI_BNDIN80};
+    const int band_in_thr[4] = {0, 1, 2, 4};
     for (int r = 0; r < n; r++) {
         if (sd[SD_CLOCK + r] < 5.0) {
             continue;
         }
         const double prev_rank = (double)(int)rs[RS_PREVRANK + r];
         for (int b = 0; b < 4; b++) {
-            const uint cell = si[band_col[b] + r];
+            uint cell = si[band_out[b] + r];
             const int in_band = prev_rank >= band_thr[b];
             if (cell == 2u) {
             } else if (!in_band) {
-                si[band_col[b] + r] = 2u;
+                si[band_out[b] + r] = 2u;
             } else if (cell == 0u) {
-                si[band_col[b] + r] = 1u;
+                si[band_out[b] + r] = 1u;
+            }
+            cell = si[band_in[b] + r];
+            if (cell == 2u) {
+            } else if (prev_rank > band_thr[band_in_thr[b]]) {
+                si[band_in[b] + r] = 2u;
+            } else if (cell == 0u) {
+                si[band_in[b] + r] = 1u;
             }
         }
     }
@@ -2461,9 +2482,26 @@ static void field_update(__global uint* scr, __global uint* si,
                         *cd = now + 6.0;
                     }
                 }
-                if (event && (int)si[SI_PHASE + i] == 2) {
-                    si[SI_POV2 + i] += 1u;
+                if (event) {
+                    // record_overtakes counts the pass into the current phase,
+                    // and the final-corner history reads the course-event flag
+                    // of the tick start, prepared before the movement above.
+                    const int ph = (int)si[SI_PHASE + i];
+                    if (ph == 1) {
+                        si[SI_POV1 + i] += 1u;
+                    } else if (ph == 2) {
+                        si[SI_POV2 + i] += 1u;
+                    }
+                    if (si[SI_FINALE + i] != 0u) {
+                        si[SI_POVFC + i] += 1u;
+                    }
+                    sd[SD_NOUP + i] = 0.0;
                 }
+            }
+            if ((int)rs[RS_PREVRANK + i] < rank) {
+                // The engine resets the down timer on any rank drop, whether
+                // or not this pass passed anybody.
+                sd[SD_NODOWN + i] = 0.0;
             }
         }
         sd[SD_POSPREV + i] = sd[SD_POS + i];
@@ -2993,7 +3031,8 @@ static double sk_vision(__global const uint* sk, __global const uint* scr, const
 static double sk_feat_value(const uint code, const double arg,
     __global const double* wd, __global const uint* si,
     __global const double* shl, __global const double* sd, __global const double* pd,
-    __global const float* sf, __global const uint* rs, const int r, const int n,
+    __global const float* sf, __global const uint* rs, __global const uint* sk,
+    __global const uint* sks, const int r, const int n,
     const double distance) {
     const uint feat = code >> 3;
     switch (feat) {
@@ -3130,6 +3169,142 @@ static double sk_feat_value(const uint code, const double arg,
             ? (double)(1 + ((int)si[SI_MV_DIR + r] != 0 ? 1 : 0)) : 0.0;
     case FEAT_BFRONT:
         return trunc(sd[SD_BFRONT + r]);
+    case FEAT_INBAND: {
+        const int rate = (int)arg;
+        const uint cell = rate == 20 ? si[SI_BNDIN20 + r]
+            : rate == 40 ? si[SI_BNDIN40 + r]
+            : rate == 80 ? si[SI_BNDIN80 + r] : si[SI_BNDIN50 + r];
+        return cell == 1u ? 1.0 : 0.0;
+    }
+    case FEAT_NEARIF: {
+        // near_infront_count: the near corridor's forward half, in f64 gaps.
+        const double pos = sd[SD_POS + r];
+        const double lane = sd[SD_LANE + r];
+        const double lane_lim = (double)0.16666f;
+        int c = 0;
+        for (int j = 0; j < n; j++) {
+            if (j == r) continue;
+            const double gap = sd[SD_POS + j] - pos;
+            if (gap > 0.0 && gap <= 3.0 && fabs(sd[SD_LANE + j] - lane) <= lane_lim) {
+                c++;
+            }
+        }
+        return (double)c;
+    }
+    case FEAT_VISN:
+        return (double)(int)si[SI_L_VISN + r];
+    case FEAT_USED: {
+        // used_skills holds exactly the skill ids this runner activated, and
+        // the per-record used bit is set on its first fire.
+        const uint sid = (uint)arg;
+        const int nrec = (int)sk[SK_NREC];
+        for (int i = 0; i < nrec; i++) {
+            const __global const uint* ru = sk + SK_RECORDS + SK_RSTRIDE * i;
+            if (ru[0] == sid && (int)ru[1] == r
+                && sks[SKR_STRIDE * i + SKR_USED] != 0u) {
+                return 1.0;
+            }
+        }
+        return 0.0;
+    }
+    case FEAT_ACT2:
+        return (double)(int)si[SI_ACT2 + r];
+    case FEAT_ACTLH:
+        return (double)(int)si[SI_ACTLH + r];
+    case FEAT_ACTALL:
+        return (double)(int)si[SI_ACTALL + r];
+    case FEAT_NOTOP:
+        return floor(sd[SD_NOUP + r]);
+    case FEAT_NOTOD:
+        return floor(sd[SD_NODOWN + r]);
+    case FEAT_CHGUP_MID:
+        return (double)(int)si[SI_POV1 + r];
+    case FEAT_CHGUP_FC:
+        return (double)(int)si[SI_POVFC + r];
+    case FEAT_BALL:
+        return trunc(fmin(sd[SD_BFRONT + r], sd[SD_BSIDE + r]));
+    case FEAT_BFRONTB: {
+        // The engine's blocked_front rebuilds front_blocker from live solver
+        // rows at evaluation time, so the scan recomputes the sample rather
+        // than reading the field-update tick's stored one.
+        int fb = -1;
+        float fg = 0.f;
+        int sb = 0;
+        lane_blocking_sample(sd, si, r, n, pd, &fb, &fg, &sb);
+        return fb >= 0 ? 1.0 : 0.0;
+    }
+    case FEAT_SURR: {
+        // is_surrounded: three-direction membership on f32-rounded gaps.
+        const double pos = sd[SD_POS + r];
+        const double lane = sd[SD_LANE + r];
+        int out = 0;
+        int front = 0;
+        int behind = 0;
+        for (int j = 0; j < n; j++) {
+            if (j == r) continue;
+            const double dg = (double)convert_float_rte(sd[SD_POS + j] - pos);
+            const double lg = (double)convert_float_rte(sd[SD_LANE + j] - lane);
+            if (fabs(dg) <= 1.5 && lg >= 0.0 && lg <= (double)0.16666f) out = 1;
+            if (dg > 0.0 && dg <= 3.0 && fabs(lg) <= (double)0.08333f) front = 1;
+            if (dg >= -3.0 && dg < 0.0 && fabs(lg) <= (double)0.08333f) behind = 1;
+            if (out && front && behind) break;
+        }
+        return out && front && behind ? 1.0 : 0.0;
+    }
+    case FEAT_TEMPT_B:
+    case FEAT_TEMPT_F: {
+        // Published-order slices around the runner, counting kakari rows.
+        const int rank = (int)si[SI_RANKCOL + r];
+        int c = 0;
+        if (feat == FEAT_TEMPT_F) {
+            for (int k = 0; k < rank - 1; k++) {
+                if ((int)si[SI_KAKARI + (int)rs[RS_ORDER + k]] != 0) c++;
+            }
+        } else {
+            for (int k = rank; k < n; k++) {
+                if ((int)si[SI_KAKARI + (int)rs[RS_ORDER + k]] != 0) c++;
+            }
+        }
+        return (double)c;
+    }
+    case FEAT_RTEMP: {
+        // running_style_temptation_count: the base-style group's kakari rows,
+        // the querying runner counted through the caller's own kakari flag.
+        const int group = (int)arg;
+        int c = 0;
+        for (int j = 0; j < n; j++) {
+            if (j == r) continue;
+            if (field_style((int)si[SI_STRATEGY + j]) == group
+                && (int)si[SI_KAKARI + j] != 0) {
+                c++;
+            }
+        }
+        if (field_style((int)si[SI_STRATEGY + r]) == group
+            && (int)si[SI_KAKARI + r] != 0) {
+            c++;
+        }
+        return (double)c;
+    }
+    case FEAT_DDRATE: {
+        // distance_diff_rate: the ranked endpoints with self substitution,
+        // then the f32 spread percentage, Approximately-zero exact.
+        const int lead = (int)rs[RS_ORDER];
+        const int last = (int)rs[RS_ORDER + n - 1];
+        const float first = convert_float_rte(sd[SD_POS + lead]);
+        const float tail = convert_float_rte(sd[SD_POS + last]);
+        const float own = convert_float_rte(sd[SD_POS + r]);
+        const float spread = first - tail;
+        if (fabs(spread) < fmax(1e-6f * fabs(spread), 8.0f * as_float(0x00000001u))) {
+            return 0.0;
+        }
+        return (double)floor(((first - own) / spread) * 100.0f);
+    }
+    case FEAT_DDTOPF: {
+        const int lead = (int)rs[RS_ORDER];
+        const float gap = convert_float_rte(sd[SD_POS + lead])
+            - convert_float_rte(sd[SD_POS + r]);
+        return (double)((floor(gap * 10.0f) / 10.0f));
+    }
     default:
         return 0.0;
     }
@@ -3145,9 +3320,9 @@ static int sk_feat_cmp(const uint code, const double v, const double arg, const 
     const uint feat = code >> 3;
     if (feat == FEAT_ORDER_RATE) {
         b = round((double)n * (arg / 100.0));
-    } else if (feat == FEAT_OUTBAND) {
-        // The argument word carries the band rate; the engine's filter only
-        // accepts the ==1 form of its boolean.
+    } else if (feat == FEAT_OUTBAND || feat == FEAT_INBAND || feat == FEAT_USED) {
+        // The argument word carries the band rate or the skill id, and the
+        // engine's filter only accepts the ==1 form of its boolean.
         b = 1.0;
     }
     switch (code & 7u) {
@@ -3166,7 +3341,8 @@ static int sk_feat_cmp(const uint code, const double v, const double arg, const 
 static int sk_eval(__global const uint* sk, const int prog_base, const int prog_len,
     __global const double* wd, __global const uint* si, __global const double* shl,
     __global const double* sd, __global const double* pd, __global const float* sf,
-    __global const uint* rs, const int r, const int n, const double distance) {
+    __global const uint* rs, __global const uint* sks, const int r, const int n,
+    const double distance) {
     int top = 0;
     char stack[64];
     for (int i = 0; i < prog_len; i++) {
@@ -3179,8 +3355,8 @@ static int sk_eval(__global const uint* sk, const int prog_base, const int prog_
             stack[top++] = (char)(nd[1] != 0u);
         } else {
             const double arg = as_double((ulong)nd[2] | ((ulong)nd[3] << 32));
-            const double v = sk_feat_value(nd[1], arg, wd, si, shl, sd, pd, sf, rs, r, n,
-                distance);
+            const double v = sk_feat_value(nd[1], arg, wd, si, shl, sd, pd, sf, rs,
+                sk, sks, r, n, distance);
             stack[top++] = (char)sk_feat_cmp(nd[1], v, arg, n);
         }
     }
@@ -3222,8 +3398,8 @@ static int sk_eval_arms(__global const uint* sk, __global const uint* rd,
         if (!sk_win_any(wd, SKD_ARMS + 2 * SK_WINMAX * a, nwin, pos)) {
             continue;
         }
-        if (sk_eval(sk, (int)ar[1], (int)ar[0], wd, si, shl, sd, pd, sf, rs, r, n,
-            distance)) {
+        if (sk_eval(sk, (int)ar[1], (int)ar[0], wd, si, shl, sd, pd, sf, rs, sks, r,
+            n, distance)) {
             return 1;
         }
     }
@@ -3236,7 +3412,8 @@ static int sk_eval_arms(__global const uint* sk, __global const uint* rd,
 static int sk_prereq_check(__global const uint* sk, __global const uint* rd,
     __global const double* wd, __global const uint* si, __global const double* shl,
     __global const double* sd, __global const double* pd, __global const float* sf,
-    __global const uint* rs, const int r, const int n, const double distance) {
+    __global const uint* rs, __global const uint* sks, const int r, const int n,
+    const double distance) {
     const double pos = sd[SD_POS + r];
     const int npre = (int)rd[22];
     const __global uint* rg = sk + SK_REGIONS + SK_GSTRIDE * (int)rd[23];
@@ -3252,8 +3429,8 @@ static int sk_prereq_check(__global const uint* sk, __global const uint* rd,
     if (!member) {
         return 0;
     }
-    return sk_eval(sk, (int)rd[25], (int)rd[24], wd, si, shl, sd, pd, sf, rs, r, n,
-        distance);
+    return sk_eval(sk, (int)rd[25], (int)rd[24], wd, si, shl, sd, pd, sf, rs, sks, r,
+        n, distance);
 }
 
 // SkillEffect::duration_coefficient: the leader-gap ramp, the HP tiers, or
@@ -3415,7 +3592,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
     __global const double* shl, __global double* sd, __global const double* pd,
     __global float* sf, __global const uint* rs, const int rec, const int r,
     const double hp, const double gap, const float dist_f, const int init_pass,
-    const int n, __global uint* ev, __global uint* st) {
+    const int n, const double distance, __global uint* ev, __global uint* st) {
     __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
     // The engine's activation hook emits one skillEvents entry per Own-side
     // fire (an immediate one, or a pending entry the deactivate hook or the
@@ -3509,7 +3686,16 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
         si[SI_ACT0 + r] += 1u;
     } else if (phase == 1) {
         si[SI_ACT1 + r] += 1u;
+    } else {
+        si[SI_ACT2 + r] += 1u;
     }
+    // apply_activation counts a fire past the course's distance half into
+    // activate_count_later_half, and marks the skill id used, all unconditionally
+    // for a self-perspective activation.
+    if (sd[SD_POS + r] >= distance * 0.5) {
+        si[SI_ACTLH + r] += 1u;
+    }
+    sks[SKR_STRIDE * rec + SKR_USED] = 1u;
     const double cd = as_double((ulong)rd[13] | ((ulong)rd[14] << 32));
     if (cd <= 0.0) {
         sks[SKR_STRIDE * rec + SKR_STATE] = (uint)SK_S_DEAD;
@@ -3549,8 +3735,8 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
             continue;
         }
         const int r = (int)rd[1];
-        if (sk_prereq_check(sk, rd, skd + SKD_STRIDE * rec, si, shl, sd, pd, sf, rs, r,
-            n, distance)) {
+        if (sk_prereq_check(sk, rd, skd + SKD_STRIDE * rec, si, shl, sd, pd, sf, rs,
+            sks, r, n, distance)) {
             sks[SKR_STRIDE * rec + SKR_LATCH] = 1u;
         }
     }
@@ -3617,7 +3803,8 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
             }
             const double gap = sd[SD_POS + (int)rs[RS_ORDER + 0]] - pos;
             skills_fire(sk, sks, skd, scr, si, shl, sd, pd, sf, rs, rec, r,
-                shl[r * SH_STRIDE + SH_HP], fmax(gap, 0.0), dist_f, init_pass, n, ev, st);
+                shl[r * SH_STRIDE + SH_HP], fmax(gap, 0.0), dist_f, init_pass, n,
+                distance, ev, st);
         }
     }
 }
