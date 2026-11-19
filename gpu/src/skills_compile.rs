@@ -11,7 +11,7 @@
 
 use crate::json::Value;
 
-pub const SK_STRIDE: usize = 34112;
+pub const SK_STRIDE: usize = 54912;
 
 pub const SK_NREC: usize = 0;
 pub const SK_NPROG: usize = 1;
@@ -27,12 +27,12 @@ pub const SK_STRAIGHTS: usize = 16;
 pub const SK_CORNERS: usize = 40;
 pub const SK_SLOPES: usize = 64;
 pub const SK_RECORDS: usize = 112;
-pub const SK_EFFECTS: usize = 4272;
-pub const SK_PROGRAMS: usize = 6192;
-pub const SK_ARMS: usize = 18480;
-pub const SK_REGIONS: usize = 20528;
-pub const SK_TERMS: usize = 28720;
-pub const SK_TAGS: usize = 30000;
+pub const SK_EFFECTS: usize = 25072;
+pub const SK_PROGRAMS: usize = 26992;
+pub const SK_ARMS: usize = 39280;
+pub const SK_REGIONS: usize = 41328;
+pub const SK_TERMS: usize = 49520;
+pub const SK_TAGS: usize = 50800;
 
 pub const SK_RSTRIDE: usize = 26;
 pub const SK_ESTRIDE: usize = 10;
@@ -44,7 +44,10 @@ pub const SK_GSTRIDE: usize = 4;
 pub const SK_MSTRIDE: usize = 8;
 pub const SK_ASTRIDE: usize = 8;
 
-pub const SK_RMAX: usize = 160;
+// Record slots per race: the roster cap times the eight-slot window each
+// runner can hold (skills.cl SK_RMAX). sk_targets caps live targets at the
+// roster, so the raise adds no behavior at small rosters.
+pub const SK_RMAX: usize = 960;
 pub const SK_EMAX: usize = 192;
 pub const SK_PMAX: usize = 3072;
 pub const SK_GMAX: usize = 2048;

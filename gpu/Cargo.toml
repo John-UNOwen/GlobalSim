@@ -53,3 +53,8 @@ required-features = ["race"]
 name = "batch_profile"
 path = "src/bin/batch_profile.rs"
 required-features = ["race"]
+
+[[bin]]
+name = "grid_perf"
+path = "src/bin/grid_perf.rs"
+required-features = ["race"]

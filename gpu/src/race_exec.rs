@@ -13,18 +13,19 @@ use crate::race::{FallbackReason, RaceOutcome, RaceRunner};
 use crate::retail_geometry;
 use ocl::{Buffer, Queue, flags};
 
-pub const RACE_MAXR: usize = 24;
+pub const RACE_MAXR: usize = 120;
 pub const RACE_MAX_TICKS: usize = 6144;
-pub const RI_STRIDE: usize = 352;
-pub const RIL_STRIDE: usize = 640;
-pub const ST_STRIDE: usize = 232;
+pub const RACE_MAX_SLOPES: usize = 16;
+pub const RI_STRIDE: usize = RI_DEBUG_TICK + 16;
+pub const RIL_STRIDE: usize = PD_RUN0 + PD_RUN_STRIDE * RACE_MAXR;
+pub const ST_STRIDE: usize = ST_LSS0 + RACE_MAXR;
 // Skill scratch mirrors of retail_core.cl and skills.cl.
 pub const SK_STRIDE: usize = crate::skills_compile::SK_STRIDE;
-const SK_RMAX: usize = 160;
+const SK_RMAX: usize = crate::skills_compile::SK_RMAX;
 const SKR_STRIDE: usize = 8;
 const SK_SEQN: usize = 40;
 const SKD_STRIDE: usize = 148;
-const SCR_SK: usize = SCR_BANKS + 24 * BANK_WORDS;
+const SCR_SK: usize = SCR_BANKS + RACE_MAXR * BANK_WORDS;
 const SK_TSEQ: usize = SCR_SK + SK_RMAX * SKR_STRIDE;
 const SK_ASEQ: usize = SK_TSEQ + SK_RMAX * SK_SEQN;
 const SK_CSEQ: usize = SK_ASEQ + SK_RMAX * SK_SEQN;
@@ -33,7 +34,7 @@ const SK_VSEQ: usize = SK_LSEQ + SK_RMAX * SK_SEQN;
 const SK_SUB: usize = SK_VSEQ + SK_RMAX * SK_SEQN;
 const SK_STAGED: usize = SK_SUB + BANK_WORDS;
 pub const SCR_U_WORDS: usize = SK_STAGED + 2 * SK_RMAX;
-pub const SRL_SKD: usize = SRL_HP_OUT_L + 24 * 64;
+pub const SRL_SKD: usize = SRL_HP_OUT_L + RACE_MAXR * OOL;
 pub const SRL_WORDS: usize = SRL_SKD + SK_RMAX * SKD_STRIDE;
 pub const DT: f32 = 0.0666;
 
@@ -53,7 +54,7 @@ pub const RI_NCOR: usize = 12;
 pub const RI_LOT_MIN: usize = 13;
 pub const RI_LOT_MAX: usize = 14;
 pub const RI_EMPTY_MOVE: usize = 15;
-pub const RI_DEBUG_TICK: usize = 336;
+pub const RI_DEBUG_TICK: usize = RI_RUN0 + RI_RUN_STRIDE * RACE_MAXR;
 pub const RI_RUN0: usize = 16;
 pub const RI_RUN_STRIDE: usize = 13;
 pub const RR_STYLE: usize = 0;
@@ -68,16 +69,16 @@ pub const RR_SUAPT: usize = 11;
 pub const RR_TEAM: usize = 12;
 pub const PT_SPURT: usize = 51;
 pub const PI_DISTANCE: usize = 106;
-pub const PD_CF_DIST: usize = 400;
-pub const PD_CF_LANE: usize = 401;
-pub const PD_CF_SPEED: usize = 402;
-pub const PD_CF_ACCEL: usize = 405;
-pub const PD_PM_RANGE: usize = 408;
-pub const PD_PM_NOTFWD: usize = 409;
-pub const PD_DTYPE: usize = 410;
-pub const PD_FC_HALF0: usize = 411;
-pub const PD_FC_HALF1: usize = 412;
-pub const PD_RUN0: usize = 448;
+pub const PD_CF_DIST: usize = PL_FRONT_LANE + 16;
+pub const PD_CF_LANE: usize = PD_CF_DIST + 1;
+pub const PD_CF_SPEED: usize = PD_CF_DIST + 2;
+pub const PD_CF_ACCEL: usize = PD_CF_DIST + 5;
+pub const PD_PM_RANGE: usize = PD_CF_DIST + 8;
+pub const PD_PM_NOTFWD: usize = PD_CF_DIST + 9;
+pub const PD_DTYPE: usize = PD_CF_DIST + 10;
+pub const PD_FC_HALF0: usize = PD_CF_DIST + 11;
+pub const PD_FC_HALF1: usize = PD_CF_DIST + 12;
+pub const PD_RUN0: usize = PL_FRONT_LANE + 32;
 pub const PD_RUN_STRIDE: usize = 8;
 pub const PRD_POWF: usize = 0;
 pub const PRD_DUEL_T: usize = 1;
@@ -96,6 +97,12 @@ pub const PC_FIRST_MOVE_POINT: usize = 187;
 pub const PC_MAX_LANE: usize = 188;
 pub const PC_SLOPES: usize = 192;
 pub const PI_RUNNER0: usize = 240;
+pub const PI_RUN_STRIDE: usize = 7;
+pub const PI_RUN_LANE: usize = 5;
+pub const PI_RUN_POS: usize = 6;
+// The TargetParameters lane block follows the per-runner pd block.
+pub const PL_FRONT_LANE: usize = PI_RUNNER0 + PI_RUN_STRIDE * RACE_MAXR;
+pub const PL_FORCE_IN_THRESHOLD: usize = PL_FRONT_LANE + 3;
 // Finish bits per runner live at ST_FINISH0 = 8 (step, then raw, lo/hi u32).
 pub const ST_FALLBACK: usize = 0;
 pub const ST_ARG: usize = 1;
@@ -103,42 +110,51 @@ pub const ST_TICKS: usize = 2;
 pub const ST_FINISH0: usize = 8;
 // Compact-reply exports per runner, mirrors of retail_core.cl. The f32 ones
 // carry raw bits, which the facade widens exactly like the engine's casts.
-pub const ST_TEMPT0: usize = 112;
-pub const ST_RSCORE0: usize = 136;
-pub const ST_HPEMPTY0: usize = 160;
-pub const ST_DELAY0: usize = 184;
-pub const ST_LSS0: usize = 208;
+pub const ST_TEMPT0: usize = ST_FINISH0 + 4 * RACE_MAXR;
+pub const ST_RSCORE0: usize = ST_TEMPT0 + RACE_MAXR;
+pub const ST_HPEMPTY0: usize = ST_RSCORE0 + RACE_MAXR;
+pub const ST_DELAY0: usize = ST_HPEMPTY0 + RACE_MAXR;
+pub const ST_LSS0: usize = ST_DELAY0 + RACE_MAXR;
 // skillEvents log, mirror of retail_core.cl: word 0 is the entry count,
 // then (runner, id) pairs, id EV_KAKARI for a completed rush episode.
 pub const EV_MAX: usize = 512;
 pub const EV_STRIDE: usize = 1 + 2 * EV_MAX;
 pub const EV_KAKARI: u32 = 0xFFFF_FFFF;
 // Scratch bases, mirrors of retail_core.cl.
-const IIU: usize = 96;
+const IIU: usize = crate::initialization::IN_U_STRIDE;
+const IIL: usize = crate::initialization::IN_L_STRIDE;
+const OOU: usize = crate::initialization::OUT_U_STRIDE;
+const OOL: usize = crate::initialization::OUT_L_STRIDE;
 const SF_STRIDE: usize = 56;
-const LIST_STRIDE: usize = 48;
+const LIST_STRIDE: usize = 2 * RACE_MAXR;
+const CACHE_STRIDE: usize = RACE_MAXR;
 const CAND_MAX: usize = 101;
 const SCR_STATS_IN: usize = 0;
-const SCR_STATS_OUT: usize = SCR_STATS_IN + 24 * IIU;
-const SCR_INIT_IN: usize = SCR_STATS_OUT + 24 * 160;
+const SCR_STATS_OUT: usize = SCR_STATS_IN + RACE_MAXR * IIU;
+const SCR_INIT_IN: usize = SCR_STATS_OUT + RACE_MAXR * 160;
 const SCR_INIT_OUT: usize = SCR_INIT_IN + IIU;
-const SCR_HP_IN: usize = SCR_INIT_OUT + 992;
-const SCR_HP_OUT: usize = SCR_HP_IN + 24 * IIU;
-const SCR_STATE: usize = SCR_HP_OUT + 24 * 180;
-const SCR_SF: usize = SCR_STATE + 83 * 24;
-const SCR_LISTS: usize = SCR_SF + SF_STRIDE * 24;
-const SCR_CAND: usize = SCR_LISTS + LIST_STRIDE * 24;
+const SCR_HP_IN: usize = SCR_INIT_OUT + OOU;
+const SCR_HP_OUT: usize = SCR_HP_IN + RACE_MAXR * IIU;
+const SCR_STATE: usize = SCR_HP_OUT + RACE_MAXR * 180;
+const SCR_SF: usize = SCR_STATE + 83 * RACE_MAXR;
+const SCR_LISTS: usize = SCR_SF + SF_STRIDE * RACE_MAXR;
+const SCR_CAND: usize = SCR_LISTS + LIST_STRIDE * RACE_MAXR;
 const SCR_CACHED: usize = (SCR_CAND + 3 * CAND_MAX + 63) & !63;
-const SCR_RACE: usize = SCR_CACHED + 4 * LIST_STRIDE * 24;
-const SCR_BANKS: usize = SCR_RACE + 192; // paired mode: one RUN bank per runner
+const SCR_RACE: usize = SCR_CACHED + 4 * CACHE_STRIDE * RACE_MAXR;
+// Race block tail: order and prev-rank arrays, the pacemaker fields, the
+// aligned strategy counts, then the four scan arrays and the stepped flags.
+const RS_PM: usize = 8 + 2 * RACE_MAXR;
+const RS_COUNTS: usize = (RS_PM + 8 + 7) & !7;
+const RS_ADV: usize = RS_COUNTS + 8 + 4 * RACE_MAXR;
+const SCR_BANKS: usize = SCR_RACE + RS_ADV + RACE_MAXR; // paired mode: one RUN bank per runner
 const BANK_WORDS: usize = 60;
-const SRL_HP: usize = 107 * 24;
-const RD_WORDS: usize = 8 * 24 + SRL_HP + 32;
+const SRL_HP: usize = (2 * RACE_MAXR + 59) * RACE_MAXR;
+const RD_WORDS: usize = 8 * RACE_MAXR + SRL_HP + 32;
 const SRL_STATS_IN_L: usize = RD_WORDS;
-const SRL_INIT_IN_L: usize = SRL_STATS_IN_L + 24 * 48;
-const SRL_INIT_OUT_L: usize = SRL_INIT_IN_L + 48;
-const SRL_HP_IN_L: usize = SRL_INIT_OUT_L + 64;
-const SRL_HP_OUT_L: usize = SRL_HP_IN_L + 24 * 48;
+const SRL_INIT_IN_L: usize = SRL_STATS_IN_L + RACE_MAXR * IIL;
+const SRL_INIT_OUT_L: usize = SRL_INIT_IN_L + IIL;
+const SRL_HP_IN_L: usize = SRL_INIT_OUT_L + OOL;
+const SRL_HP_OUT_L: usize = SRL_HP_IN_L + RACE_MAXR * IIL;
 
 // Fallback codes the kernel reports, mirrors of race.cl FB_*.
 pub const FB_N: u32 = 1;
@@ -155,6 +171,9 @@ pub struct RaceGpu {
     pub frames: Vec<Vec<[f64; 6]>>,
     pub ticks: usize,
     pub fallback: Option<String>,
+    /// The engine's grid-mode starts were in force for this race, so the
+    /// compact reply carries the experimentalGridVersion tag like the engine's.
+    pub grid: bool,
     pub kernel_flag: u32,
     pub kernel_arg: u32,
     pub finish_step: Option<f64>,
@@ -424,8 +443,8 @@ fn pack_shared_parameters(globals: &Value, pd: &mut [f64]) -> Result<(), String>
     copy_keys(pd, 176, slope, &["DownSlopeAddSpeedEndPer", "DownSlopeAddSpeedStartWizRate"])?;
 
     // The Block gaps and the root-level Target/Move parameters.
-    copy_keys(pd, 384, block, &["FrontBlockLaneGap", "SideBlockDistanceGap", "SideBlockLaneGap"])?;
-    copy_keys(pd, 387, p, &[
+    copy_keys(pd, PL_FRONT_LANE, block, &["FrontBlockLaneGap", "SideBlockDistanceGap", "SideBlockLaneGap"])?;
+    copy_keys(pd, PL_FORCE_IN_THRESHOLD, p, &[
         "forceInMoveLaneThreshold",
         "overTakeCoolDownTime",
         "lastMoveOutLaneNormalizeVal",
@@ -463,7 +482,7 @@ fn pack_course_scalars(course: &Value, pd: &mut [f64]) -> Result<usize, String> 
     slopes.sort_by(|a, b| {
         a.get_f64("start").unwrap_or(0.).partial_cmp(&b.get_f64("start").unwrap_or(0.)).unwrap_or(std::cmp::Ordering::Equal)
     });
-    let count = slopes.len().min((RIL_STRIDE - PC_SLOPES) / 3);
+    let count = slopes.len().min(RACE_MAX_SLOPES);
     for (i, slope) in slopes.iter().enumerate().take(count) {
         pd[PC_SLOPES + 3 * i] = slope.get_f64("start")?;
         pd[PC_SLOPES + 3 * i + 1] = slope.get("length").and_then(Value::as_f64).unwrap_or(0.);
@@ -490,6 +509,7 @@ pub struct Prepared {
     sk: Vec<u32>,
     bumps: Vec<(usize, i32, f64)>,
     debug_scratch: bool,
+    grid: bool,
 }
 
 impl Prepared {
@@ -507,6 +527,7 @@ impl Prepared {
             sk: Vec::new(),
             bumps: Vec::new(),
             debug_scratch: false,
+            grid: false,
         }
     }
 
@@ -551,12 +572,31 @@ fn prepare(
         seed: seed_i32,
         sk: Vec::new(),
         debug_scratch: false,
+        grid: false,
     });
+    // One validity test mirrors experimental_grid_enabled (src/lib.rs:262-272),
+    // including its message, so invalid shapes flag with the engine's reason.
+    // It runs ahead of the roster cap: the engine validates the grid key first.
+    let grid = match root.get("experimentalGrid") {
+        None => false,
+        Some(g) => {
+            let valid = g.as_object().is_some_and(|o| o.len() == 2)
+                && g.get("columns").and_then(Value::as_f64) == Some(20.0)
+                && g.get("rowSpacing").and_then(Value::as_f64) == Some(3.0)
+                && (21..=120).contains(&horses.len());
+            if !valid {
+                return flagged(
+                    "experimentalGrid requires 21 through 120 horses, columns=20 and rowSpacing=3.0.",
+                );
+            }
+            true
+        }
+    };
     if horses.is_empty() || horses.len() > RACE_MAXR {
         return flagged("roster size outside the kernel's range");
     }
     // The engine enables the startup pass when the flag is true and the
-    // runtime is retail (lib.rs:1507-1513); the kernel replays it as one dt=0
+    // runtime is retail (lib.rs:1507-1513). The kernel replays it as one dt=0
     // tick ahead of the frame-0 capture. A non-boolean flag errors the CPU.
     let startup = match root.get("experimentalRetailStartup") {
         None => false,
@@ -565,13 +605,12 @@ fn prepare(
             None => return flagged("experimentalRetailStartup must be a boolean"),
         },
     };
-    // The engine enables grid mode whenever the key is present, 21 to 120
-    // horses. The kernel has no grid start, so any presence flags the race.
-    if root.get("experimentalGrid").is_some() {
-        return flagged("grid mode");
-    }
     if root.get("experimentalRetailRuntime").and_then(Value::as_bool) != Some(true) {
         return flagged("non-retail runtime");
+    }
+    // The engine refuses geometry with grid starts (api.rs:68-71).
+    if grid && root.get("experimentalRetailGeometry").and_then(Value::as_bool) == Some(true) {
+        return flagged("World geometry requires the experimental runtime and standard starting grid");
     }
     let mut ri = vec![0u32; RI_STRIDE];
     let mut pd = vec![0f64; RIL_STRIDE];
@@ -663,7 +702,15 @@ fn prepare(
             strategy = 5;
         }
         let rank = gate_order.iter().position(|&i| i == r).unwrap_or(0);
-        let lane = retail_starting_lane(rank, track, horses.len(), grids);
+        // Grid mode takes the engine's row-lane pair (src/lib.rs:274-279, the
+        // f32 round-trip at lib.rs:610), retail takes the track's gate lane.
+        let (start_pos, lane) = if grid {
+            let column = rank % 20;
+            let lane = (column as f64 + if column >= 9 { 0.6 } else { 0.0 }) / 18.0;
+            (f64::from((-3.0 * (rank / 20) as f64) as f32), f64::from(lane as f32))
+        } else {
+            (0.0, retail_starting_lane(rank, track, horses.len(), grids))
+        };
         let b = RI_RUN0 + RI_RUN_STRIDE * r;
         // Retail initialization sees the base style: an Oonige takes the
         // RunningOut force coefficient and its shared-stream draw (lib.rs:1533).
@@ -689,10 +736,11 @@ fn prepare(
             horse.get_f64("wisdom")?,
         ];
         for (k, value) in stats.iter().enumerate() {
-            pd[PI_RUNNER0 + 6 * r + k] = *value;
+            pd[PI_RUNNER0 + PI_RUN_STRIDE * r + k] = *value;
         }
-        // The lane round-trips f32 in the engine's start table.
-        pd[PI_RUNNER0 + 6 * r + 5] = f64::from(lane as f32);
+        // The lane and start position round-trip f32 in the engine's start table.
+        pd[PI_RUNNER0 + PI_RUN_STRIDE * r + PI_RUN_LANE] = f64::from(lane as f32);
+        pd[PI_RUNNER0 + PI_RUN_STRIDE * r + PI_RUN_POS] = start_pos;
         stats_cases.push(StatsCase {
             raw: stats,
             mood: horse.get_i64("mood")? as i32,
@@ -703,7 +751,7 @@ fn prepare(
             css: css.clone(),
         });
     }
-    Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, debug_scratch: false })
+    Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, debug_scratch: false, grid })
 }
 
 /// Engine rule: an installed skill whose definition carries a type 6 effect
@@ -1096,51 +1144,80 @@ impl RaceContext {
     let tables = crate::geometry::course_tables(&table_sets);
     let tables_ms = t_stage.elapsed().as_secs_f64() * 1e3;
 
-    let t_stage = std::time::Instant::now();
     let queue = self.spike.queue();
 
     let m = launched.len();
-    let mut ri_all = vec![0u32; m.max(1) * RI_STRIDE];
-    let mut pd_all = vec![0f64; m.max(1) * RIL_STRIDE];
-    let mut sk_all = vec![0u32; m.max(1) * SK_STRIDE];
-    for (slot, &i) in launched.iter().enumerate() {
-        ri_all[slot * RI_STRIDE..][..RI_STRIDE].copy_from_slice(&prepared[i].ri);
-        pd_all[slot * RIL_STRIDE..][..RIL_STRIDE].copy_from_slice(&prepared[i].pd);
-        if !prepared[i].sk.is_empty() {
-            sk_all[slot * SK_STRIDE..][..SK_STRIDE].copy_from_slice(&prepared[i].sk);
-        }
-    }
-    let b_ri = read_write(&queue, &ri_all)?;
-    let b_pd = read_write(&queue, &pd_all)?;
-    let b_sk = read_only(&queue, &sk_all)?;
-    let b_scr_u = read_write(&queue, &vec![0u32; m.max(1) * SCR_U_WORDS])?;
-    let b_scr_d = read_write(&queue, &vec![0f64; m.max(1) * SRL_WORDS])?;
-    let b_frames = read_write(&queue, &vec![0f64; m.max(1) * RACE_MAX_TICKS * n * 6])?;
-    let b_status = read_write(&queue, &vec![0u32; m.max(1) * ST_STRIDE])?;
-    let b_events = read_write(&queue, &vec![0u32; m.max(1) * EV_STRIDE])?;
-    let b_cs = read_only(&queue, &tables.cs)?;
-    let b_sg_x = read_only(&queue, &tables.sg_x)?;
-    let b_sg_xd = read_only(&queue, &tables.sg_xd)?;
-    let b_sg_z = read_only(&queue, &tables.sg_z)?;
-    let b_sg_zd = read_only(&queue, &tables.sg_zd)?;
-    let b_sg_q = read_only(&queue, &tables.sg_q)?;
-    let b_sg_qd = read_only(&queue, &tables.sg_qd)?;
-    let b_lm_b = read_only(&queue, &tables.lm_b)?;
-    let b_lm_l = read_only(&queue, &tables.lm_l)?;
-    let b_ce_b = read_only(&queue, &tables.ce_b)?;
-    let b_ce_e = read_only(&queue, &tables.ce_e)?;
-    let b_ce_i = read_only(&queue, &tables.ce_i)?;
-    let b_ce_f = read_only(&queue, &tables.ce_f)?;
-    let upload_ms = t_stage.elapsed().as_secs_f64() * 1e3;
+    // Frame-byte budget per launch. One 120-horse race writes
+    // RACE_MAX_TICKS * n * 6 f64 (about 35.4 MB), so a big batch splits into
+    // several launches instead of asking the driver for gigabytes of frames.
+    // Batches whose frames fit the budget, every current suite included,
+    // still launch once.
+    const FRAME_BYTES_BUDGET: usize = 512 << 20;
+    let race_frames_bytes = RACE_MAX_TICKS * n * 6 * std::mem::size_of::<f64>();
+    let chunk_len = (FRAME_BYTES_BUDGET / race_frames_bytes.max(1)).max(1);
 
-    let t_stage = std::time::Instant::now();
-    let mut bench: Option<KernelBench> = None;
-    if m > 0 {
+    let mut status = vec![0u32; m.max(1) * ST_STRIDE];
+    let mut events_all = vec![0u32; m.max(1) * EV_STRIDE];
+    let mut frames_all = if mode.timed() { Vec::new() } else { vec![0f64; m.max(1) * RACE_MAX_TICKS * n * 6] };
+    // The skill scratch readback stays off the normal path: the kernel leaves
+    // the merged windows and the record state there, and a divergence hunt
+    // asks for them per race through `run_with_skill_scratch`.
+    let want_sk = m > 0 && prepared.iter().any(|p| p.debug_scratch);
+    let mut skd_all: Vec<f64> = Vec::new();
+    let mut sks_all: Vec<u32> = Vec::new();
+    if want_sk {
+        skd_all = vec![0f64; m * SRL_WORDS];
+        sks_all = vec![0u32; m * SCR_U_WORDS];
+    }
+    let mut upload_ms = 0.;
+    let mut launch_ms = 0.;
+    let mut readback_ms = 0.;
+    let mut bench_ticks = 0usize;
+    let mut bench_launch_ms = 0.;
+    for chunk_start in (0..m).step_by(chunk_len) {
+        let mc = chunk_len.min(m - chunk_start);
+        let chunk = &launched[chunk_start..chunk_start + mc];
+        let slot0 = chunk_start;
+        let t_stage = std::time::Instant::now();
+        let mut ri_all = vec![0u32; mc * RI_STRIDE];
+        let mut pd_all = vec![0f64; mc * RIL_STRIDE];
+        let mut sk_all = vec![0u32; mc * SK_STRIDE];
+        for (slot, &i) in chunk.iter().enumerate() {
+            ri_all[slot * RI_STRIDE..][..RI_STRIDE].copy_from_slice(&prepared[i].ri);
+            pd_all[slot * RIL_STRIDE..][..RIL_STRIDE].copy_from_slice(&prepared[i].pd);
+            if !prepared[i].sk.is_empty() {
+                sk_all[slot * SK_STRIDE..][..SK_STRIDE].copy_from_slice(&prepared[i].sk);
+            }
+        }
+        let b_ri = read_write(&queue, &ri_all)?;
+        let b_pd = read_write(&queue, &pd_all)?;
+        let b_sk = read_only(&queue, &sk_all)?;
+        let b_scr_u = read_write(&queue, &vec![0u32; mc * SCR_U_WORDS])?;
+        let b_scr_d = read_write(&queue, &vec![0f64; mc * SRL_WORDS])?;
+        let b_frames = read_write(&queue, &vec![0f64; mc * RACE_MAX_TICKS * n * 6])?;
+        let b_status = read_write(&queue, &vec![0u32; mc * ST_STRIDE])?;
+        let b_events = read_write(&queue, &vec![0u32; mc * EV_STRIDE])?;
+        let b_cs = read_only(&queue, &tables.cs)?;
+        let b_sg_x = read_only(&queue, &tables.sg_x)?;
+        let b_sg_xd = read_only(&queue, &tables.sg_xd)?;
+        let b_sg_z = read_only(&queue, &tables.sg_z)?;
+        let b_sg_zd = read_only(&queue, &tables.sg_zd)?;
+        let b_sg_q = read_only(&queue, &tables.sg_q)?;
+        let b_sg_qd = read_only(&queue, &tables.sg_qd)?;
+        let b_lm_b = read_only(&queue, &tables.lm_b)?;
+        let b_lm_l = read_only(&queue, &tables.lm_l)?;
+        let b_ce_b = read_only(&queue, &tables.ce_b)?;
+        let b_ce_e = read_only(&queue, &tables.ce_e)?;
+        let b_ce_i = read_only(&queue, &tables.ce_i)?;
+        let b_ce_f = read_only(&queue, &tables.ce_f)?;
+        upload_ms += t_stage.elapsed().as_secs_f64() * 1e3;
+
+        let t_stage = std::time::Instant::now();
         let kernel = ocl::Kernel::builder()
             .program(&self.program)
             .name("race")
             .queue(queue.clone())
-            .global_work_size(m)
+            .global_work_size(mc)
             .arg(&b_ri)
             .arg(&b_pd)
             .arg(&b_scr_u)
@@ -1170,79 +1247,63 @@ impl RaceContext {
                     unsafe { kernel.enq().map_err(|e| e.to_string())? };
                 }
                 queue.finish().map_err(|e| e.to_string())?;
-                let mut probe = vec![0u32; m * ST_STRIDE];
+                let mut probe = vec![0u32; mc * ST_STRIDE];
                 b_status.cmd().read(&mut probe).enq().map_err(|e| e.to_string())?;
                 queue.finish().map_err(|e| e.to_string())?;
-                let total_ticks = probe.chunks(ST_STRIDE).map(|s| s[ST_TICKS] as usize).sum();
+                bench_ticks += probe.chunks(ST_STRIDE).map(|s| s[ST_TICKS] as usize).sum::<usize>();
                 let start = std::time::Instant::now();
                 for _ in 0..timed {
                     unsafe { kernel.enq().map_err(|e| e.to_string())? };
                     queue.finish().map_err(|e| e.to_string())?;
                 }
-                let launch_ms = start.elapsed().as_secs_f64() * 1e3 / timed as f64;
-                bench = Some(KernelBench {
-                    device: self.spike.device.name.clone(),
-                    build_ms: self.spike.build_ms,
-                    races: m,
-                    runners: m * n,
-                    total_ticks,
-                    launch_ms,
-                });
+                bench_launch_ms += start.elapsed().as_secs_f64() * 1e3 / timed as f64;
             }
             LaunchMode::Burst { warm, count } => {
                 for _ in 0..warm {
                     unsafe { kernel.enq().map_err(|e| e.to_string())? };
                 }
                 queue.finish().map_err(|e| e.to_string())?;
-                let mut probe = vec![0u32; m * ST_STRIDE];
+                let mut probe = vec![0u32; mc * ST_STRIDE];
                 b_status.cmd().read(&mut probe).enq().map_err(|e| e.to_string())?;
                 queue.finish().map_err(|e| e.to_string())?;
-                let total_ticks = probe.chunks(ST_STRIDE).map(|s| s[ST_TICKS] as usize).sum();
+                bench_ticks += probe.chunks(ST_STRIDE).map(|s| s[ST_TICKS] as usize).sum::<usize>();
                 let start = std::time::Instant::now();
                 for _ in 0..count {
                     unsafe { kernel.enq().map_err(|e| e.to_string())? };
                 }
                 queue.finish().map_err(|e| e.to_string())?;
-                let launch_ms = start.elapsed().as_secs_f64() * 1e3 / count as f64;
-                bench = Some(KernelBench {
-                    device: self.spike.device.name.clone(),
-                    build_ms: self.spike.build_ms,
-                    races: m,
-                    runners: m * n,
-                    total_ticks,
-                    launch_ms,
-                });
+                bench_launch_ms += start.elapsed().as_secs_f64() * 1e3 / count as f64;
             }
             LaunchMode::Once => unsafe { kernel.enq().map_err(|e| e.to_string())? },
         }
-    }
-    queue.finish().map_err(|e| e.to_string())?;
-    let launch_ms = t_stage.elapsed().as_secs_f64() * 1e3;
-
-    let t_stage = std::time::Instant::now();
-    let mut status = vec![0u32; m.max(1) * ST_STRIDE];
-    let mut events_all = vec![0u32; m.max(1) * EV_STRIDE];
-    let mut frames_all = if mode.timed() { Vec::new() } else { vec![0f64; m.max(1) * RACE_MAX_TICKS * n * 6] };
-    if m > 0 && !mode.timed() {
-        b_status.cmd().read(&mut status).enq().map_err(|e| e.to_string())?;
-        b_events.cmd().read(&mut events_all).enq().map_err(|e| e.to_string())?;
-        b_frames.cmd().read(&mut frames_all).enq().map_err(|e| e.to_string())?;
-    }
-    // The skill scratch readback stays off the normal path: the kernel leaves
-    // the merged windows and the record state there, and a divergence hunt
-    // asks for them per race through `run_with_skill_scratch`.
-    let want_sk = m > 0 && prepared.iter().any(|p| p.debug_scratch);
-    let mut skd_all: Vec<f64> = Vec::new();
-    let mut sks_all: Vec<u32> = Vec::new();
-    if want_sk {
-        skd_all = vec![0f64; m * SRL_WORDS];
-        sks_all = vec![0u32; m * SCR_U_WORDS];
-        b_scr_d.cmd().read(&mut skd_all).enq().map_err(|e| e.to_string())?;
-        b_scr_u.cmd().read(&mut sks_all).enq().map_err(|e| e.to_string())?;
         queue.finish().map_err(|e| e.to_string())?;
+        launch_ms += t_stage.elapsed().as_secs_f64() * 1e3;
+
+        let t_stage = std::time::Instant::now();
+        if !mode.timed() {
+            b_status.cmd().read(&mut status[slot0 * ST_STRIDE..][..mc * ST_STRIDE]).enq().map_err(|e| e.to_string())?;
+            b_events.cmd().read(&mut events_all[slot0 * EV_STRIDE..][..mc * EV_STRIDE]).enq().map_err(|e| e.to_string())?;
+            b_frames.cmd().read(&mut frames_all[slot0 * RACE_MAX_TICKS * n * 6..][..mc * RACE_MAX_TICKS * n * 6]).enq().map_err(|e| e.to_string())?;
+            if want_sk {
+                b_scr_d.cmd().read(&mut skd_all[slot0 * SRL_WORDS..][..mc * SRL_WORDS]).enq().map_err(|e| e.to_string())?;
+                b_scr_u.cmd().read(&mut sks_all[slot0 * SCR_U_WORDS..][..mc * SCR_U_WORDS]).enq().map_err(|e| e.to_string())?;
+            }
+            queue.finish().map_err(|e| e.to_string())?;
+        }
+        readback_ms += t_stage.elapsed().as_secs_f64() * 1e3;
     }
-    queue.finish().map_err(|e| e.to_string())?;
-    let readback_ms = t_stage.elapsed().as_secs_f64() * 1e3;
+    let bench = if matches!(mode, LaunchMode::Timed { .. } | LaunchMode::Burst { .. }) && m > 0 {
+        Some(KernelBench {
+            device: self.spike.device.name.clone(),
+            build_ms: self.spike.build_ms,
+            races: m,
+            runners: m * n,
+            total_ticks: bench_ticks,
+            launch_ms: bench_launch_ms,
+        })
+    } else {
+        None
+    };
 
     let t_stage = std::time::Instant::now();
     let mut races: Vec<RaceGpu> = Vec::with_capacity(prepared.len());
@@ -1252,6 +1313,7 @@ impl RaceContext {
             frames: Vec::new(),
             ticks: 0,
             fallback: race.host_fallback.clone(),
+            grid: race.grid,
             kernel_flag: 0,
             kernel_arg: 0,
             finish_step: None,

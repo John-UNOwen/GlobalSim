@@ -206,11 +206,16 @@ fn compact_meta(race: &race_exec::RaceGpu, player: f64) -> Value {
             })
             .collect(),
     );
-    json::obj(vec![
+    let mut fields = vec![
         ("playerHorseIndex", json::num(player)),
         ("results", results),
         ("skillEvents", skill_events),
-    ])
+    ];
+    // The engine tags grid replies (src/lib.rs:1135-1138), nothing else.
+    if race.grid {
+        fields.push(("experimentalGridVersion", json::num(1.0)));
+    }
+    json::obj(fields)
 }
 
 /// Device metadata stand-in for the pure gate: the extension string plus the
@@ -249,15 +254,37 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
         Ok(root) => root,
         Err(error) => return Some(error),
     };
-    if root.get("experimentalGrid").is_some() {
-        return Some("grid mode".into());
+    // The grid mirror of prepare(): the engine validates the grid key before
+    // anything else (src/lib.rs:294), so the grid refusal comes first and
+    // quotes the engine's message.
+    let horse_count = match root.get_array("horses") {
+        Ok(horses) => horses.len(),
+        Err(error) => return Some(error),
+    };
+    let grid_valid = root.get("experimentalGrid").is_some_and(|g| {
+        g.as_object().is_some_and(|o| o.len() == 2)
+            && g.get("columns").and_then(Value::as_f64) == Some(20.0)
+            && g.get("rowSpacing").and_then(Value::as_f64) == Some(3.0)
+            && (21..=120).contains(&horse_count)
+    });
+    if root.get("experimentalGrid").is_some() && !grid_valid {
+        return Some(
+            "experimentalGrid requires 21 through 120 horses, columns=20 and rowSpacing=3.0."
+                .into(),
+        );
     }
     if root.get("experimentalRetailRuntime").and_then(Value::as_bool) != Some(true) {
         return Some("non-retail runtime".into());
     }
-    match root.get_array("horses") {
-        Ok(horses) if (1..=race_exec::RACE_MAXR).contains(&horses.len()) => None,
-        Ok(_) => Some("roster size outside the kernel's range".into()),
-        Err(error) => Some(error),
+    // The engine refuses geometry with grid starts (api.rs:68-71).
+    if grid_valid && root.get("experimentalRetailGeometry").and_then(Value::as_bool) == Some(true) {
+        return Some(
+            "World geometry requires the experimental runtime and standard starting grid".into(),
+        );
+    }
+    if (1..=race_exec::RACE_MAXR).contains(&horse_count) {
+        None
+    } else {
+        Some("roster size outside the kernel's range".into())
     }
 }

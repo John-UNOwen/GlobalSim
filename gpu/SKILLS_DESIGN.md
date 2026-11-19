@@ -83,13 +83,13 @@ Sections (word offsets inside the block):
 | straights | 16 | 2 | 12 | f64 start, end (course JSON, sorted) |
 | corners | 40 | 2 | 12 | f64 start, start+length |
 | slopes | 64 | 3 | 16 | f32 start, f32 end, f32 value |
-| records | 112 | 26 | 160 | see below |
-| effects | 4272 | 10 | 192 | see below |
-| programs | 6192 | 4 | 3072 | see below |
-| arms | 18480 | 8 | 256 | see below |
-| regions | 20528 | 4 | 2048 | f64 start, end ([start,end), compiler statics) |
-| terms | 28720 | 8 | 160 | see below |
-| tags | 30000 | 1 | 4096 | tag bytes for substream hashing |
+| records | 112 | 26 | 960 | see below |
+| effects | 25072 | 10 | 192 | see below |
+| programs | 26992 | 4 | 3072 | see below |
+| arms | 39280 | 8 | 256 | see below |
+| regions | 41328 | 4 | 2048 | f64 start, end ([start,end), compiler statics) |
+| terms | 49520 | 8 | 160 | see below |
+| tags | 50800 | 1 | 4096 | tag bytes for substream hashing |
 
 Record (26 words): `skill_id, runner, flags, priority, rarity, n_eff,
 eff_base, arm0_prog_len, arm0_prog_base, sampled, term_index, arm0_pre_n,
@@ -537,7 +537,7 @@ sees a table it cannot run.
 
 ## Bounds (enforced host-side before launch)
 
-`nrec<=160`, `neff<=192`, 8 effects per record, `nprog<=3072`, `narm<=256` and two arms per record,
+`nrec<=960` (8 record slots per runner at the 120-horse grid cap), `neff<=192`, 8 effects per record, `nprog<=3072`, `narm<=256` and two arms per record,
 `ntag<=4096`, `nstr<=12`, `ncor<=12`, `nslope<=16`, at most 2048 regions per
 race and 16 per arm chain, terms at most 160 per race, one sampled term per
 record, 4 sampled windows per term, 12 receiver entries per runner across the

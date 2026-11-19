@@ -19,9 +19,10 @@
 // result with the vendored engine and passes it in (slot PT_POWF). The kernel
 // never evaluates a transcendental power.
 
-// Course and runner caps. The catalog's largest field is 18; the
-// initialization kernel's cap is 24, so 24 is the binding layout bound.
-#define RACE_MAXR 24
+// Course and runner caps. Grid mode admits rosters up to 120
+// (src/lib.rs:262-272), so 120 is the binding layout bound and every
+// runner-indexed region sizes to it.
+#define RACE_MAXR 120
 // 400 s of race time at dt=0.0666 is under 6007 ticks.
 #define RACE_MAX_TICKS 6144
 // Slopes per course, from course_data.json entries.
@@ -30,7 +31,6 @@
 // ---------------------------------------------------------------------------
 // Race input, u32 words per race, stride RI_STRIDE.
 
-#define RI_STRIDE 352
 #define RI_SEED 0            // i32 request seed (RetailRandom seed)
 #define RI_N 1               // runners
 #define RI_COURSE 2          // geometry table index
@@ -51,8 +51,7 @@
 // Debug-only: when nonzero and equal to the frame index just captured, the
 // loop writes pace, clock, rush, lane, and lane-list state for each runner
 // into the fourteen reserved tail frame slots. Zero in production keeps
-// those slots zero.
-#define RI_DEBUG_TICK 336
+// those slots zero. The slot follows the per-runner block below.
 // Per-runner block, slot RI_RUN0 + RI_RUN_STRIDE * r.
 #define RI_RUN0 16
 #define RI_RUN_STRIDE 13
@@ -69,13 +68,17 @@
 #define RR_STAPT 10          // strategy aptitude 0..7
 #define RR_SUAPT 11          // surface aptitude 0..7
 #define RR_TEAM 12           // fixed team id, 0 no team (race_field.rs:461 drop)
+#define RI_DEBUG_TICK (RI_RUN0 + RI_RUN_STRIDE * RACE_MAXR)
+#define RI_STRIDE (RI_DEBUG_TICK + 16)
 
 // ---------------------------------------------------------------------------
 // Race input, f64 words (raw bits) per race, stride RIL_STRIDE. Float
 // parameters are stored as the raw JSON f64 and narrowed once in the kernel,
 // mirroring Parameters::from_value's `get_f64 as f32`.
 
-#define RIL_STRIDE 640
+// Stride: the fixed parameter blocks, then the per-runner stats, race
+// scalars and per-runner precompute blocks at the tail (see below).
+#define RIL_STRIDE (PD_RUN0 + PD_RUN_STRIDE * RACE_MAXR)
 // 0..83: retail physics Parameters, the layout the retail_physics port reads.
 #define PT_COURSE0 0
 #define PT_COURSE1 1
@@ -142,38 +145,43 @@
 #define PC_MAX_LANE 188
 // Slope events, slot 192 + 3*k: start, length, slope.
 #define PC_SLOPES 192
-// 240..: per-runner raw stats and initial lanes. Per runner, six slots:
-// speed, stamina, power, guts, wisdom (raw request f64), lane.
+// 240..: per-runner raw stats, initial lane and start position. Per runner,
+// seven slots: speed, stamina, power, guts, wisdom (raw request f64), lane,
+// and the start position (0.0 retail, the grid's negative rows when grid
+// starts are in play).
 #define PI_RUNNER0 240
-// 384..: TargetParameters from src/retail_lane.rs, the keys of
-// TargetParameters::from_value and MoveParameters::from_value, plus the
-// Block-group lane gaps.
-#define PL_FRONT_LANE 384      // FrontBlockLaneGap
-#define PL_SIDE_DISTANCE 385   // SideBlockDistanceGap
-#define PL_SIDE_LANE 386       // SideBlockLaneGap
-#define PL_FORCE_IN_THRESHOLD 387 // forceInMoveLaneThreshold
-#define PL_COOLDOWN 388        // overTakeCoolDownTime
-#define PL_OUTWARD_NORMALIZE 389 // lastMoveOutLaneNormalizeVal
-#define PL_OUTWARD_COEFFICIENT 390 // lastMoveOutLaneCoef
-#define PL_OUTWARD_RANDOM 391  // lastMoveOutLaneAddRandom
-#define PL_POWER_COEFFICIENT 392 // laneMoveSpeedPowCoef
-#define PL_SPEED_ADD 393       // laneMoveSpeedAdd
-#define PL_BASE_SPEED 394      // laneMoveSpeedBase
-#define PL_OUTER_COEFFICIENT 395 // laneMoveSpeedOutCoef
-#define PL_ACCELERATION 396    // laneMoveAccelMoveSpeedBaseCoef
-// 400..: CompeteFight and CompeteTop settings with the per-runner powf
+#define PI_RUN_STRIDE 7
+#define PI_RUN_LANE 5
+#define PI_RUN_POS 6
+// 240 + PI_RUN_STRIDE * RACE_MAXR..: TargetParameters from src/retail_lane.rs,
+// the keys of TargetParameters::from_value and MoveParameters::from_value,
+// plus the Block-group lane gaps.
+#define PL_FRONT_LANE (PI_RUNNER0 + PI_RUN_STRIDE * RACE_MAXR)      // FrontBlockLaneGap
+#define PL_SIDE_DISTANCE (PL_FRONT_LANE + 1)   // SideBlockDistanceGap
+#define PL_SIDE_LANE (PL_FRONT_LANE + 2)       // SideBlockLaneGap
+#define PL_FORCE_IN_THRESHOLD (PL_FRONT_LANE + 3) // forceInMoveLaneThreshold
+#define PL_COOLDOWN (PL_FRONT_LANE + 4)        // overTakeCoolDownTime
+#define PL_OUTWARD_NORMALIZE (PL_FRONT_LANE + 5) // lastMoveOutLaneNormalizeVal
+#define PL_OUTWARD_COEFFICIENT (PL_FRONT_LANE + 6) // lastMoveOutLaneCoef
+#define PL_OUTWARD_RANDOM (PL_FRONT_LANE + 7)  // lastMoveOutLaneAddRandom
+#define PL_POWER_COEFFICIENT (PL_FRONT_LANE + 8) // laneMoveSpeedPowCoef
+#define PL_SPEED_ADD (PL_FRONT_LANE + 9)       // laneMoveSpeedAdd
+#define PL_BASE_SPEED (PL_FRONT_LANE + 10)     // laneMoveSpeedBase
+#define PL_OUTER_COEFFICIENT (PL_FRONT_LANE + 11) // laneMoveSpeedOutCoef
+#define PL_ACCELERATION (PL_FRONT_LANE + 12)   // laneMoveAccelMoveSpeedBaseCoef
+// ..: CompeteFight and CompeteTop settings with the per-runner powf
 // precomputes. The duel and spot modifiers are race constants derived from
 // guts, so the host supplies them like PT_POWF (no powf in the kernel).
-#define PD_CF_DIST 400         // CompeteFight DistanceGap (raw JSON f64)
-#define PD_CF_LANE 401         // CompeteFight LaneGap (raw JSON f64)
-#define PD_CF_SPEED 402        // [3] CompeteFight AddParam1Coef1..3
-#define PD_CF_ACCEL 405        // [3] CompeteFight AddParam2Coef1..3
-#define PD_PM_RANGE 408        // PaseMakerChangeForwardRunningStyleRange
-#define PD_PM_NOTFWD 409
-#define PD_DTYPE 410               // course distance_type, the asitame coefficient row       // PaseMakerChangeTopHorseNotMostForwardStyleCount
-#define PD_FC_HALF0 411            // final_corner_half start, NaN when the course has none
-#define PD_FC_HALF1 412            // final_corner_half end
-#define PD_RUN0 448            // per runner, stride 5
+#define PD_CF_DIST (PL_FRONT_LANE + 16)        // CompeteFight DistanceGap (raw JSON f64)
+#define PD_CF_LANE (PD_CF_DIST + 1)            // CompeteFight LaneGap (raw JSON f64)
+#define PD_CF_SPEED (PD_CF_DIST + 2)           // [3] CompeteFight AddParam1Coef1..3
+#define PD_CF_ACCEL (PD_CF_DIST + 5)           // [3] CompeteFight AddParam2Coef1..3
+#define PD_PM_RANGE (PD_CF_DIST + 8)           // PaseMakerChangeForwardRunningStyleRange
+#define PD_PM_NOTFWD (PD_CF_DIST + 9)          // PaseMakerChangeTopHorseNotMostForwardStyleCount
+#define PD_DTYPE (PD_CF_DIST + 10)             // course distance_type, the asitame coefficient row
+#define PD_FC_HALF0 (PD_CF_DIST + 11)          // final_corner_half start, NaN when the course has none
+#define PD_FC_HALF1 (PD_CF_DIST + 12)          // final_corner_half end
+#define PD_RUN0 (PL_FRONT_LANE + 32)           // per runner, stride PD_RUN_STRIDE
 #define PD_RUN_STRIDE 8
 #define PRD_POWF 0             // per-runner spurt powf bits as the integer value
 #define PRD_DUEL_T 1           // duel target-speed modifier, f64
@@ -191,17 +199,17 @@
 // initialization sub-blocks, sized to the im_* strides so the race kernel
 // can call the initialization functions in place. The ulong views need the
 // block bases even, and every stride here is even.
-#define SCR_STATS_IN 0                 // 24 * IIU
-#define SCR_STATS_OUT (SCR_STATS_IN + 24 * IIU)  // 24 * 160, ob 128 then olb
-#define SCR_INIT_IN (SCR_STATS_OUT + 24 * 160)   // IIU
+#define SCR_STATS_IN 0                 // RACE_MAXR * IIU
+#define SCR_STATS_OUT (SCR_STATS_IN + RACE_MAXR * IIU)  // RACE_MAXR * 160, ob 128 then olb
+#define SCR_INIT_IN (SCR_STATS_OUT + RACE_MAXR * 160)   // IIU
 #define SCR_INIT_OUT (SCR_INIT_IN + IIU)         // OOU
-#define SCR_HP_IN (SCR_INIT_OUT + OOU)           // 24 * IIU
-#define SCR_HP_OUT (SCR_HP_IN + 24 * IIU)        // 24 * 180, ob 172 then olb
-#define SCR_STATE (SCR_HP_OUT + 24 * 180)
-// Integer state, one 24-wide column per slot (field base + runner index).
+#define SCR_HP_IN (SCR_INIT_OUT + OOU)           // RACE_MAXR * IIU
+#define SCR_HP_OUT (SCR_HP_IN + RACE_MAXR * IIU)        // RACE_MAXR * 180, ob 172 then olb
+#define SCR_STATE (SCR_HP_OUT + RACE_MAXR * 180)
+// Integer state, one RACE_MAXR-wide column per slot (field base + runner index).
 #define SI_SLOTS 83
-#define SI_STRIDE (SI_SLOTS * 24)
-#define SI_SLOT(n) ((n) * 24)
+#define SI_STRIDE (SI_SLOTS * RACE_MAXR)
+#define SI_SLOT(n) ((n) * RACE_MAXR)
 #define SI_STRATEGY SI_SLOT(0)
 #define SI_DISTAPT SI_SLOT(1)
 #define SI_SUAPT SI_SLOT(2)      // surface aptitude (drives the accel ground factor)
@@ -299,10 +307,10 @@
 #define CP_ASIT 2048u
 // Integer slots end.
 #define SCR_SF (SCR_STATE + SI_STRIDE)
-// f32 state (raw-bit floats), one 24-wide column per slot.
+// f32 state (raw-bit floats), one RACE_MAXR-wide column per slot.
 #define SF_SLOTS 56
-#define SF_STRIDE (SF_SLOTS * 24)
-#define SF_SLOT(n) ((n) * 24)
+#define SF_STRIDE (SF_SLOTS * RACE_MAXR)
+#define SF_SLOT(n) ((n) * RACE_MAXR)
 #define SF_LANEMAX SF_SLOT(0)
 #define SF_OBSERVED SF_SLOT(1)
 #define SF_MIN SF_SLOT(2)         // retail minimum
@@ -355,40 +363,41 @@
 #define SF_RREM SF_SLOT(42)       // countdown remaining, starts at 1.0
 #define SCR_LISTS (SCR_SF + SF_STRIDE)
 // Lane lists, SCR_LISTS + LIST_STRIDE * r. The targets list occupies the
-// first RACE_MAXR slots, then the visible list.
-#define LIST_STRIDE 48
-#define SCR_CAND (SCR_LISTS + LIST_STRIDE * 24)
+// first RACE_MAXR slots, then the visible list (both up to n-1 entries).
+#define LIST_STRIDE (2 * RACE_MAXR)
+#define SCR_CAND (SCR_LISTS + LIST_STRIDE * RACE_MAXR)
 #define CAND_MAX 101
 // Race-level integer block after the candidate floats.
 #define SCR_CACHED ((SCR_CAND + 3 * CAND_MAX + 63) & ~63)
-// Cached horses, SCR_CACHED + 4 * (LIST_STRIDE * r + j): position, lane,
+// Cached horses, SCR_CACHED + 4 * (CACHE_STRIDE * r + j): position, lane,
 // speed and target of owner r's view, roster slot j (the owner's own slot
 // is never read).
-#define SCR_RACE (SCR_CACHED + 4 * LIST_STRIDE * 24)
+#define CACHE_STRIDE RACE_MAXR
+#define SCR_RACE (SCR_CACHED + 4 * CACHE_STRIDE * RACE_MAXR)
 #define RS_TICKS 0
 #define RS_FRAMES 1
 #define RS_FALLBACK 2
 #define RS_FB_ARG 3
 #define RS_DONE 4
-#define RS_ORDER 8            // 24: roster indices sorted by position
-#define RS_PREVRANK 32        // 24: rank from the previous tick
-#define RS_PM 56              // section pacemaker, +1 (0 none)
-#define RS_PM_SEC 57          // pacemaker section at the last handover
-#define RS_PM_COUNT 58
-#define RS_PM_HANDED 59
-#define RS_PM_HAS 60          // 0 before the constructor's first selection
-#define RS_COUNTS 64          // 8: exact per-strategy counts
-#define RS_STYLE 72           // 24: base-style prefix maxima over the order
-#define RS_STRAIGHT 96        // 24: pre-movement final-straight row flags
-#define RS_LKEYS 120          // 24: resolve-overlaps truncated lane keys
-#define RS_LORDER 144         // 24: resolve-overlaps scan order
-#define RS_ADV 168            // 24: stepped (not gated) flags of the tick
-#define SCR_BANKS (SCR_RACE + 192) // paired mode: one RUN bank per runner
+#define RS_ORDER 8            // RACE_MAXR: roster indices sorted by position
+#define RS_PREVRANK (RS_ORDER + RACE_MAXR)     // RACE_MAXR: rank from the previous tick
+#define RS_PM (RS_PREVRANK + RACE_MAXR)        // section pacemaker, +1 (0 none)
+#define RS_PM_SEC (RS_PM + 1)   // pacemaker section at the last handover
+#define RS_PM_COUNT (RS_PM + 2)
+#define RS_PM_HANDED (RS_PM + 3)
+#define RS_PM_HAS (RS_PM + 4)   // 0 before the constructor's first selection
+#define RS_COUNTS ((RS_PM + 8 + 7) & ~7)       // 8: exact per-strategy counts
+#define RS_STYLE (RS_COUNTS + 8)               // RACE_MAXR: base-style prefix maxima over the order
+#define RS_STRAIGHT (RS_STYLE + RACE_MAXR)     // RACE_MAXR: pre-movement final-straight row flags
+#define RS_LKEYS (RS_STRAIGHT + RACE_MAXR)     // RACE_MAXR: resolve-overlaps truncated lane keys
+#define RS_LORDER (RS_LKEYS + RACE_MAXR)       // RACE_MAXR: resolve-overlaps scan order
+#define RS_ADV (RS_LORDER + RACE_MAXR)         // RACE_MAXR: stepped (not gated) flags of the tick
+#define SCR_BANKS (SCR_RACE + RS_ADV + RACE_MAXR) // paired mode: one RUN bank per runner
 // Skill runtime scratch: one state word block per table record, the three
 // per-runner receiver token orders, then the keyed-substream bank. The token
 // orders mirror the engine's AdditiveReceiver entry vectors, 0 is the empty
 // sentinel and registration order is append order.
-#define SCR_SK (SCR_BANKS + 24 * BANK_WORDS)
+#define SCR_SK (SCR_BANKS + RACE_MAXR * BANK_WORDS)
 #define SK_SEQN 40
 #define SK_TOK_SPOT 1u
 #define SK_TOK_DUEL 4u
@@ -411,11 +420,12 @@
 #define SCR_SK_WORDS (SK_STAGED + 2 * SK_RMAX)
 #define SCR_U_WORDS SCR_SK_WORDS
 
-// Per-race scratch f64, one 24-wide column per slot (field base + runner
-// index). Array fields keep 24 slots per element: base + element * 24 + r.
-#define SD_SLOTS 107
-#define SD_STRIDE (SD_SLOTS * 24)
-#define SD_SLOT(n) ((n) * 24)
+// Per-race scratch f64, one RACE_MAXR-wide column per slot (field base +
+// runner index). Array fields keep RACE_MAXR slots per element:
+// base + element * RACE_MAXR + r.
+#define SD_SLOTS (2 * RACE_MAXR + 59)
+#define SD_STRIDE (SD_SLOTS * RACE_MAXR)
+#define SD_SLOT(n) ((n) * RACE_MAXR)
 #define SD_POS SD_SLOT(0)
 #define SD_LANE SD_SLOT(1)
 #define SD_LANET SD_SLOT(2)       // lane_target
@@ -427,32 +437,33 @@
 #define SD_OFA SD_SLOT(14)        // modifiers_one_frame_accel, the expiry impulse
 #define SD_MS SD_SLOT(7)          // min_speed
 #define SD_LSS SD_SLOT(8)         // last_spurt_speed
-#define SD_BTS SD_SLOT(9)         // base_target_speed[3], element stride 24
+#define SD_BTS SD_SLOT(9)         // base_target_speed[3], element stride RACE_MAXR
 #define SD_PKCOEF SD_SLOT(12)     // pos_keep_speed_coef
-#define SD_SECMOD SD_SLOT(15)     // section_modifier[25], element stride 24
-#define SD_DUEL SD_SLOT(40)       // duel proximity timers, element j stride 24, -1.0 absent
-#define SD_SPOT_TIMER SD_SLOT(64) // spot_struggle_timer, f64 (f32-rounded steps)
-#define SD_CP_GAUGE SD_SLOT(65)   // conserve power clean ledger gauge
-#define SD_CP_PREVRATE SD_SLOT(66) // conserve previous_rate
-#define SD_CP_INITPW SD_SLOT(67)  // conserve initial_power
-#define SD_CP_ACC SD_SLOT(68)     // legacy cp_acc accumulate
-#define SD_AS_TIMER SD_SLOT(69)   // asitame effect duration timer, counts up to zero
-#define SD_RAWPW SD_SLOT(70)      // horse raw_power from initialization output 2
-#define SD_CLOCK SD_SLOT(71)      // accumulatetime race clock, f64 (f32-rounded steps)
-#define SD_BSIDE SD_SLOT(72)      // blocked_side_continuetime, f64
-#define SD_IFNEAR SD_SLOT(73)     // infront_near_lane_time, f64
-#define SD_BHNEAR SD_SLOT(74)     // behind_near_lane_time, f64
-#define SD_BHNEAR1 SD_SLOT(75)    // behind_near_lane_time_set1, f64
-#define SD_HPS SD_SLOT(76)        // retail_stat_values[0] accumulator, f64 bits of f32
-#define SD_PENDING_HP SD_SLOT(77) // recovery HP banked for the next step head
-#define SD_OTIME SD_SLOT(78)      // overtake_target_time, targeted-by-behind timer
-#define SD_BFRONT SD_SLOT(79)     // blocked_front_continuetime, f64
-#define SD_POSPREV SD_SLOT(80)    // positions as published by the last field_update
-// Overtake cooldown, pair-keyed like the engine's map: slot SD_OVC + target
-// * 24 + i holds the earliest next rank-gain time for runner i passing target.
-#define SD_OVC SD_SLOT(81)        // 24 slots, -1.0 until the pair fires once
-#define SD_NOUP SD_SLOT(105)      // overtake_target_no_order_up_time, f64
-#define SD_NODOWN SD_SLOT(106)    // overtake_target_no_order_down_time, f64
+#define SD_SECMOD SD_SLOT(15)     // section_modifier[25], element stride RACE_MAXR
+#define SD_DUEL SD_SLOT(40)       // duel proximity timers, element j stride RACE_MAXR, -1.0 absent
+// Duel then overtake cooldown, each a RACE_MAXR-wide pair map, then the
+// scalar timers. The duel map spans slots 40..40+RACE_MAXR, the overtake map
+// 40+RACE_MAXR..40+2*RACE_MAXR, the scalars follow.
+#define SD_OVC SD_SLOT(40 + RACE_MAXR)   // slot SD_OVC + target*RACE_MAXR + i, -1.0 until the pair fires once
+#define SD_SPOT_TIMER SD_SLOT(40 + 2 * RACE_MAXR) // spot_struggle_timer, f64 (f32-rounded steps)
+#define SD_CP_GAUGE (SD_SPOT_TIMER + RACE_MAXR)   // conserve power clean ledger gauge
+#define SD_CP_PREVRATE (SD_SPOT_TIMER + 2 * RACE_MAXR) // conserve previous_rate
+#define SD_CP_INITPW (SD_SPOT_TIMER + 3 * RACE_MAXR)  // conserve initial_power
+#define SD_CP_ACC (SD_SPOT_TIMER + 4 * RACE_MAXR)     // legacy cp_acc accumulate
+#define SD_AS_TIMER (SD_SPOT_TIMER + 5 * RACE_MAXR)   // asitame effect duration timer, counts up to zero
+#define SD_RAWPW (SD_SPOT_TIMER + 6 * RACE_MAXR)      // horse raw_power from initialization output 2
+#define SD_CLOCK (SD_SPOT_TIMER + 7 * RACE_MAXR)      // accumulatetime race clock, f64 (f32-rounded steps)
+#define SD_BSIDE (SD_SPOT_TIMER + 8 * RACE_MAXR)      // blocked_side_continuetime, f64
+#define SD_IFNEAR (SD_SPOT_TIMER + 9 * RACE_MAXR)     // infront_near_lane_time, f64
+#define SD_BHNEAR (SD_SPOT_TIMER + 10 * RACE_MAXR)    // behind_near_lane_time, f64
+#define SD_BHNEAR1 (SD_SPOT_TIMER + 11 * RACE_MAXR)   // behind_near_lane_time_set1, f64
+#define SD_HPS (SD_SPOT_TIMER + 12 * RACE_MAXR)       // retail_stat_values[0] accumulator, f64 bits of f32
+#define SD_PENDING_HP (SD_SPOT_TIMER + 13 * RACE_MAXR) // recovery HP banked for the next step head
+#define SD_OTIME (SD_SPOT_TIMER + 14 * RACE_MAXR)      // overtake_target_time, targeted-by-behind timer
+#define SD_BFRONT (SD_SPOT_TIMER + 15 * RACE_MAXR)     // blocked_front_continuetime, f64
+#define SD_POSPREV (SD_SPOT_TIMER + 16 * RACE_MAXR)    // positions as published by the last field_update
+#define SD_NOUP (SD_SPOT_TIMER + 17 * RACE_MAXR)       // overtake_target_no_order_up_time, f64
+#define SD_NODOWN (SD_SPOT_TIMER + 18 * RACE_MAXR)     // overtake_target_no_order_down_time, f64
 #define SRL_RUNNER 0
 #define SRL_HP SD_STRIDE          // hp columns, SH_STRIDE per runner
 #define SH_STRIDE 8
@@ -461,15 +472,15 @@
 #define SH_BASESPEED 2
 #define SH_GROUNDMOD 3
 // Race f64 scalars.
-#define RD_T (SH_STRIDE * 24 + SRL_HP)   // loop time, the engine f64 f32-sum
+#define RD_T (SH_STRIDE * RACE_MAXR + SRL_HP)   // loop time, the engine f64 f32-sum
 #define RD_WORDS (RD_T + 32)
 // im_* f64 block bases in the same scratch (double indices).
-#define SRL_STATS_IN_L RD_WORDS                    // 24 * IIL
-#define SRL_INIT_IN_L (SRL_STATS_IN_L + 24 * IIL)  // IIL
-#define SRL_INIT_OUT_L (SRL_INIT_IN_L + IIL)       // OOL
-#define SRL_HP_IN_L (SRL_INIT_OUT_L + OOL)         // 24 * IIL
-#define SRL_HP_OUT_L (SRL_HP_IN_L + 24 * IIL)      // 24 * OOL
-#define SRL_SKD (SRL_HP_OUT_L + 24 * OOL)          // per-record skill doubles
+#define SRL_STATS_IN_L RD_WORDS                            // RACE_MAXR * IIL
+#define SRL_INIT_IN_L (SRL_STATS_IN_L + RACE_MAXR * IIL)   // IIL
+#define SRL_INIT_OUT_L (SRL_INIT_IN_L + IIL)               // OOL
+#define SRL_HP_IN_L (SRL_INIT_OUT_L + OOL)                 // RACE_MAXR * IIL
+#define SRL_HP_OUT_L (SRL_HP_IN_L + RACE_MAXR * IIL)       // RACE_MAXR * OOL
+#define SRL_SKD (SRL_HP_OUT_L + RACE_MAXR * OOL)           // per-record skill doubles
 #define SRL_WORDS (SRL_SKD + SK_RMAX * SKD_STRIDE)
 
 // SectionModifier length.
@@ -477,18 +488,18 @@
 
 // ---------------------------------------------------------------------------
 // Per-race status output, u32 words at status + id * ST_STRIDE.
-#define ST_STRIDE 232
+#define ST_STRIDE (ST_LSS0 + RACE_MAXR)
 #define ST_FALLBACK 0          // 0 none, 1 unsupported domain (tick in ST_ARG)
 #define ST_ARG 1               // tick or argument of the fallback
 #define ST_TICKS 2             // loop iterations (frames carry ST_TICKS+1)
 #define ST_FINISH0 8           // per runner: finish_step bits then finish_raw
 // Compact-reply exports, per runner in roster order, one word each. The last
 // three are f32 bit patterns, widened by the host like the engine's f64 casts.
-#define ST_TEMPT0 112          // temptation_count (rushingStartCount)
-#define ST_RSCORE0 136         // RushingScore count (rushingPenaltyCount)
-#define ST_HPEMPTY0 160        // hp_empty_on_race, 0 or 1
-#define ST_DELAY0 184          // start_delay f32 bits (startDelayTime)
-#define ST_LSS0 208            // SF_SP_START f32 bits (lastSpurtStartDistance)
+#define ST_TEMPT0 (ST_FINISH0 + 4 * RACE_MAXR)  // temptation_count (rushingStartCount)
+#define ST_RSCORE0 (ST_TEMPT0 + RACE_MAXR)      // RushingScore count (rushingPenaltyCount)
+#define ST_HPEMPTY0 (ST_RSCORE0 + RACE_MAXR)    // hp_empty_on_race, 0 or 1
+#define ST_DELAY0 (ST_HPEMPTY0 + RACE_MAXR)     // start_delay f32 bits (startDelayTime)
+#define ST_LSS0 (ST_DELAY0 + RACE_MAXR)         // SF_SP_START f32 bits (lastSpurtStartDistance)
 
 // Race frames output: frames + (id * RACE_MAX_TICKS + tick) * n_runners * 6
 // + runner * 6, in the engine's row order pos, speed, hp, lane, rushing,
@@ -1452,8 +1463,8 @@ static int lane_has_front_blocker(__global const float* cached, const int n,
     const float front_lane) {
     int j = 0;
     while (j < n) {
-        const float gap = cached[4 * (LIST_STRIDE * r + j)] - position;
-        const float lane_gap = fabs(cached[4 * (LIST_STRIDE * r + j) + 1] - lane);
+        const float gap = cached[4 * (CACHE_STRIDE * r + j)] - position;
+        const float lane_gap = fabs(cached[4 * (CACHE_STRIDE * r + j) + 1] - lane);
         if (gap > 0. && gap < front_distance && lane_gap <= lane_front_lane_limit(
             gap, front_distance, front_lane)) {
             return 1;
@@ -1496,10 +1507,10 @@ static void lane_collect(__global uint* si, __global float* sf, __global uint* l
         // extend_from_slice does. The reach cutoff below only trims the
         // visible/front/side analysis; the crowd walk and front blocker
         // scan read cached rows far behind and far ahead.
-        cached[4 * (LIST_STRIDE * r + k)] = convert_float_rte(sd[SD_POS + k]);
-        cached[4 * (LIST_STRIDE * r + k) + 1] = convert_float_rte(sd[SD_LANE + k]);
-        cached[4 * (LIST_STRIDE * r + k) + 2] = sf0[SF_OBSERVED + k];
-        cached[4 * (LIST_STRIDE * r + k) + 3] = convert_float_rte(sd[SD_TSWSK + k]);
+        cached[4 * (CACHE_STRIDE * r + k)] = convert_float_rte(sd[SD_POS + k]);
+        cached[4 * (CACHE_STRIDE * r + k) + 1] = convert_float_rte(sd[SD_LANE + k]);
+        cached[4 * (CACHE_STRIDE * r + k) + 2] = sf0[SF_OBSERVED + k];
+        cached[4 * (CACHE_STRIDE * r + k) + 3] = convert_float_rte(sd[SD_TSWSK + k]);
         if (k != r) {
             const float other_position = convert_float_rte(sd[SD_POS + k]);
             const float position_gap = other_position - position;
@@ -1564,9 +1575,9 @@ static int lane_eligible(__global float* cached, __global const double* sd,
     __global const double* pd, const int front, const int j, const float position,
     const float owner_speed, const float owner_target) {
     const int k = j;
-    const float gap = cached[4 * (LIST_STRIDE * r + k)]
+    const float gap = cached[4 * (CACHE_STRIDE * r + k)]
         - convert_float_rte(sd[SD_POS + r]);
-    const float speed_gap = owner_speed - cached[4 * (LIST_STRIDE * r + k) + 2];
+    const float speed_gap = owner_speed - cached[4 * (CACHE_STRIDE * r + k) + 2];
     const int directly = (front == k);
     const float other_speed = sf0[SF_OBSERVED + k];
     const float other_target = convert_float_rte(sd[SD_TSWSK + k]);
@@ -1587,7 +1598,7 @@ static int lane_eligible(__global float* cached, __global const double* sd,
         if (blocked_result == unblocked_result) {
             res = blocked_result;
         } else if (lane_has_front_blocker(cached, n, r,
-            cached[4 * (LIST_STRIDE * r + k)], cached[4 * (LIST_STRIDE * r + k) + 1],
+            cached[4 * (CACHE_STRIDE * r + k)], cached[4 * (CACHE_STRIDE * r + k) + 1],
             convert_float_rte(pd[PT_BLOCKING]),
             convert_float_rte(pd[PL_FRONT_LANE]))) {
             res = blocked_result;
@@ -1614,8 +1625,8 @@ static void lane_update_targets(__global uint* si, __global float* sf, __global 
         int k = 0;
         while (k < n) {
             if (k != r) {
-                const float gap = cached[4 * (LIST_STRIDE * r + k)] - position;
-                const float lane_gap = fabs(cached[4 * (LIST_STRIDE * r + k) + 1] - lane);
+                const float gap = cached[4 * (CACHE_STRIDE * r + k)] - position;
+                const float lane_gap = fabs(cached[4 * (CACHE_STRIDE * r + k) + 1] - lane);
                 if (gap > 0. && gap < front_distance
                     && lane_gap <= lane_front_lane_limit(gap, front_distance,
                         front_lane_param)
@@ -1760,17 +1771,17 @@ static float lane_passing_target(__global uint* si, __global uint* lists,
             while (walk) {
                 const float live_lane = convert_float_rte(sd[SD_LANE + edge]);
                 const float live_position = convert_float_rte(sd[SD_POS + edge]);
-                const float cached_lane = cached[4 * (LIST_STRIDE * r + edge) + 1];
-                const float cached_position = cached[4 * (LIST_STRIDE * r + edge)];
+                const float cached_lane = cached[4 * (CACHE_STRIDE * r + edge) + 1];
+                const float cached_position = cached[4 * (CACHE_STRIDE * r + edge)];
                 int next = -1;
                 float next_lane = 0.f;
                 int j = 0;
                 while (j < n) {
                     if (j != r) {
-                        const float row_position = cached[4 * (LIST_STRIDE * r + j)];
+                        const float row_position = cached[4 * (CACHE_STRIDE * r + j)];
                         const float position_gap = row_position - cached_position;
                         const float lane_gap = direction
-                            * (cached[4 * (LIST_STRIDE * r + j) + 1] - cached_lane);
+                            * (cached[4 * (CACHE_STRIDE * r + j) + 1] - cached_lane);
                         if (position_gap >= 0. && position_gap <= 3.f && lane_gap > 0.f
                             && lane_gap < LANE_CROWD && direction
                             * (convert_float_rte(sd[SD_LANE + j]) - live_lane) > 0.f) {
@@ -1817,18 +1828,18 @@ static float lane_passing_target(__global uint* si, __global uint* lists,
                 // target 1 (row 3's cached and live lane, row 4's cached
                 // and live lane) and the + direction's final edge.
                 fr[row3 + 6 * (long)r + 0] =
-                    (double)cached[4 * (LIST_STRIDE * r + 3) + 1];
+                    (double)cached[4 * (CACHE_STRIDE * r + 3) + 1];
                 fr[row3 + 6 * (long)r + 1] =
                     (double)convert_float_rte(sd[SD_LANE + 3]);
                 fr[row3 + 6 * (long)r + 2] =
-                    (double)cached[4 * (LIST_STRIDE * r + 4) + 1];
+                    (double)cached[4 * (CACHE_STRIDE * r + 4) + 1];
                 fr[row3 + 6 * (long)r + 3] =
                     (double)convert_float_rte(sd[SD_LANE + 4]);
                 fr[row3 + 6 * (long)r + 4] = (double)(candidate);
                 fr[row3 + 6 * (long)r + 5] = (double)(edge);
             }
             if (!blocked) {
-                const float origin = cached[4 * (LIST_STRIDE * r + idx)];
+                const float origin = cached[4 * (CACHE_STRIDE * r + idx)];
                 const float weight = (candidate < lane)
                     ? ((phase == 0) ? 100.f : ((phase >= 2) ? 1.149999976158142f : 1.f))
                     : 1.f;

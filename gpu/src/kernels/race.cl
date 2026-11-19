@@ -697,7 +697,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         __global ulong* ilb =
             (__global ulong*)(scr_d + SRL_STATS_IN_L + r * IIL);
         for (int s = 0; s < 5; s++) {
-            ilb[s] = as_ulong(pd[PI_RUNNER0 + 6 * r + s]);
+            ilb[s] = as_ulong(pd[PI_RUNNER0 + PI_RUN_STRIDE * r + s]);
         }
         __global uint* ob = scr + SCR_STATS_OUT + r * 160;
         __global ulong* olb = (__global ulong*)(ob + 128);
@@ -988,7 +988,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
 
         const float speed = convert_float_rte(as_double(scol[7]));
         const float guts = convert_float_rte(as_double(scol[10]));
-        const float lane_f = convert_float_rte(pd[PI_RUNNER0 + 6 * r + 5]);
+        const float lane_f = convert_float_rte(pd[PI_RUNNER0 + PI_RUN_STRIDE * r + PI_RUN_LANE]);
         sf[SF_MV_LANE + r] = lane_f;
         sf[SF_MV_TARGET + r] = 0.f;
         sf[SF_LANEMAX + r] = geom_on ? geo_lane_max_at(cb, lm_b, lm_l, 0.f)
@@ -1012,7 +1012,9 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             sd[SD_BTS + ph * RACE_MAXR + r] = (double)phys_base_target_speed(pd, speed,
                 strategy, ph, aptitude, dist_f);
         }
-        sd[SD_POS + r] = 0.0;
+        // The engine's start position: 0.0 for the retail rows, the grid's
+        // negative rows when grid starts are in play (f32-rounded by the host).
+        sd[SD_POS + r] = pd[PI_RUNNER0 + PI_RUN_STRIDE * r + PI_RUN_POS];
         sd[SD_LANE + r] = (double)lane_f;
         sd[SD_LANET + r] = 0.0;
         sd[SD_LCS + r] = 0.0;

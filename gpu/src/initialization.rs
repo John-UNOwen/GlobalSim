@@ -31,18 +31,20 @@ pub fn engine_parse(text: &str) -> Result<EngineValue, String> {
     json::parse(text)
 }
 
-// Kernel layout, mirrors gpu/src/kernels/initialization.cl.
-pub const IN_U_STRIDE: usize = 96;
-pub const IN_L_STRIDE: usize = 48;
-pub const OUT_U_STRIDE: usize = 992;
-pub const OUT_L_STRIDE: usize = 64;
+// Kernel layout, mirrors gpu/src/kernels/initialization.cl. The strides are
+// sized to the widest case (IM_INIT with the grid-mode roster cap).
+pub const IN_U_STRIDE: usize = 384;
+pub const IN_L_STRIDE: usize = 144;
+pub const OUT_U_STRIDE: usize = 3840;
+pub const OUT_L_STRIDE: usize = 144;
 
 pub const MODE_STATS: u32 = 0;
 pub const MODE_R30: u32 = 1;
 pub const MODE_INIT: u32 = 2;
 pub const MODE_HP: u32 = 3;
 
-pub const MAX_RUNNERS: usize = 24;
+// The grid-mode roster cap (src/lib.rs:267).
+pub const MAX_RUNNERS: usize = 120;
 pub const MAX_SLOPES: usize = 8;
 
 // Input u32 slots.
@@ -90,7 +92,7 @@ pub const O3_HILL0_LO: usize = 156;
 pub const O3_CAPFLAG: usize = 157;
 pub const O3_SOLVER_HI: usize = 158;
 pub const O3_SOLVER_LO: usize = 159;
-pub const OS_CONT_I: usize = 848;
+pub const OS_CONT_I: usize = OS_RUN0 + IRS_STRIDE * MAX_RUNNERS;
 pub const OH_GUTS: usize = 170;
 pub const OH_WISDOM: usize = 171;
 
@@ -100,7 +102,11 @@ pub const STAGE_AFTER_WISDOM: usize = 2;
 pub const STAGE_AFTER_DELAYS: usize = 3;
 pub const STAGE_AFTER_SECTIONS: usize = 4;
 pub const STAGE_AFTER_RUSHING: usize = 5;
-pub const CONT_DOUBLES_L: usize = 32;
+// IM_INIT: the per-runner input block and the parameter block that follows
+// it, mirrors of the kernel's US_R0/IIS_STRIDE and IL_RUNNER0/IL_PARAMS.
+const IL_RUNNER0: usize = 8;
+const IL_PARAMS: usize = IL_RUNNER0 + MAX_RUNNERS;
+pub const CONT_DOUBLES_L: usize = MAX_RUNNERS;
 
 #[derive(Clone, Debug)]
 pub struct StatsCase {
@@ -269,18 +275,18 @@ impl Case {
             Case::Init(c) => {
                 w[0] = c.distance.to_bits();
                 for (r, runner) in c.runners.iter().enumerate() {
-                    w[8 + r] = runner.base_wisdom.to_bits();
+                    w[IL_RUNNER0 + r] = runner.base_wisdom.to_bits();
                 }
-                w[32] = c.params.force[0].to_bits();
-                w[33] = c.params.force[1].to_bits();
-                w[34] = c.params.force[2].to_bits();
-                w[35] = c.params.force[3].to_bits();
-                w[36] = c.params.force_span.to_bits();
-                w[37] = c.params.delay_max.to_bits();
-                w[38] = c.params.minus_val1.to_bits();
-                w[39] = c.params.minus_val2.to_bits();
-                w[40] = c.params.plus_val1.to_bits();
-                w[41] = c.params.tempt_val1.to_bits();
+                w[IL_PARAMS] = c.params.force[0].to_bits();
+                w[IL_PARAMS + 1] = c.params.force[1].to_bits();
+                w[IL_PARAMS + 2] = c.params.force[2].to_bits();
+                w[IL_PARAMS + 3] = c.params.force[3].to_bits();
+                w[IL_PARAMS + 4] = c.params.force_span.to_bits();
+                w[IL_PARAMS + 5] = c.params.delay_max.to_bits();
+                w[IL_PARAMS + 6] = c.params.minus_val1.to_bits();
+                w[IL_PARAMS + 7] = c.params.minus_val2.to_bits();
+                w[IL_PARAMS + 8] = c.params.plus_val1.to_bits();
+                w[IL_PARAMS + 9] = c.params.tempt_val1.to_bits();
             }
             Case::Hp(c) => {
                 w[0] = c.stamina.to_bits();

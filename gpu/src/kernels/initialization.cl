@@ -7,8 +7,9 @@
 // no fast math, and every f64-to-f32 store is a single-rounding
 // convert_float_rte matching the Rust `as f32`.
 
-// Runners per initialization case, hills per course, section count.
-#define MAXR 24
+// Runners per initialization case (the grid-mode roster cap, src/lib.rs:267),
+// hills per course, section count.
+#define MAXR 120
 #define MAXH 8
 #define SEC 24
 
@@ -17,8 +18,8 @@
 #define IM_INIT 2
 #define IM_HP 3
 
-// Input u32 slots, stride IIU.
-#define IIU 96
+// Input u32 slots, stride IIU (sized to the IM_INIT per-runner block).
+#define IIU 384
 #define US_MODE 0
 #define US_A 1
 #define US_B 2
@@ -38,25 +39,26 @@
 #define US_BONUS 2
 
 // Input f64 slots (raw bits), stride IIL.
-#define IIL 48
+#define IIL 144
 // IM_STATS: 0..4 = raw speed, stamina, power, guts, wisdom.
 // IM_R30: 0 = first slope start, 1 = first slope value, 2 = adjusted wisdom,
 //         3 = course distance.
 // IM_INIT: 0 = course distance, 8 + r = per-runner base_wisdom,
-//          params from 32: force1..4, force_span, start_delay_max,
+//          params from IL_PARAMS: force1..4, force_span, start_delay_max,
 //          minus_val1, minus_val2, plus_val1, temptation_start_per_val1.
 #define IL_DISTANCE 0
 #define IL_RUNNER0 8
-#define IL_FORCE1 32
-#define IL_FORCE2 33
-#define IL_FORCE3 34
-#define IL_FORCE4 35
-#define IL_FORCE_SPAN 36
-#define IL_DELAY_MAX 37
-#define IL_MINUS1 38
-#define IL_MINUS2 39
-#define IL_PLUS1 40
-#define IL_TEMPT1 41
+#define IL_PARAMS (IL_RUNNER0 + MAXR)  // directly after the per-runner block
+#define IL_FORCE1 (IL_PARAMS + 0)
+#define IL_FORCE2 (IL_PARAMS + 1)
+#define IL_FORCE3 (IL_PARAMS + 2)
+#define IL_FORCE4 (IL_PARAMS + 3)
+#define IL_FORCE_SPAN (IL_PARAMS + 4)
+#define IL_DELAY_MAX (IL_PARAMS + 5)
+#define IL_MINUS1 (IL_PARAMS + 6)
+#define IL_MINUS2 (IL_PARAMS + 7)
+#define IL_PLUS1 (IL_PARAMS + 8)
+#define IL_TEMPT1 (IL_PARAMS + 9)
 // IM_HP: 0 stamina, 1 guts, 2 wisdom, 3 distance, 4 hp_initial,
 //        5..9 hp_style[0..4], 10..12 course speed c0, c1, c2,
 //        13..14 hp_drain[3] (HpGutsCoefSqrt), hp_drain[4] (HpGutsCoef).
@@ -64,10 +66,9 @@
 // Output u32 slots, stride OOU. 0..59 is the RetailRandom bank, 60..119 the
 // per-runner RUSH bank (paired mode). Slot 120 is the fallback flag:
 // 0 ok, 1 a capped uniform() ran out, 2 an item input exceeded a layout bound.
-#define OOU 992
+#define OOU 3840
 #define OS_BANK 0
 #define OS_RUSHBANK 60
-#define OS_BANK_FOR_RACE 928 // bank state the runtime rng clones at the after_delays point
 #define OS_FLAG 120
 // IM_INIT draw-stage counters.
 #define OS_STAGES 121
@@ -100,19 +101,24 @@
 #define O3_CAPFLAG 157    // 1 when one of the three uniform() caps was hit
 #define O3_SOLVER_HI 158  // solver_rng state after every draw of this chain
 #define O3_SOLVER_LO 159
-// IM_INIT continuation draws (state equality without exposing internals).
-#define OS_CONT_I 848     // 8 next_int, next_double bits go to out_l 32..39
+// IM_INIT continuation draws (state equality without exposing internals),
+// directly after the per-runner block. The bank state the runtime rng clones
+// at the after_delays point follows with a gap kept for growth.
+#define OS_CONT_I (OS_RUN0 + IRS_STRIDE * MAXR)
+#define OS_BANK_FOR_RACE (OS_CONT_I + 16)
 // IM_HP outputs, from 120.
 #define OH_GUTS 170
 #define OH_WISDOM 171
 
 // Output f64 slots (raw bits), stride OOL.
-#define OOL 64
+#define OOL 144
 // IM_HP: out_l 0 ground_modifier, 1 base_speed, 2 max_hp (all raw f64).
 // IM_STATS: 0..4 base stats, 5 raw_stamina, 6 raw_power, 7..11 adjusted.
 // IM_R30: 0 start-delay random, 1 kakari check random, 2..4 r1..r3,
 //         5..28 the 24 section randoms, 29 the gate hill-roll bits.
-// IM_INIT: 0..23 per-runner kakari_start, 32..39 continuation next_double bits.
+// IM_INIT: 0..MAXR-1 per-runner kakari_start, OL_CONT..OL_CONT+7 continuation
+//          next_double bits.
+#define OL_CONT MAXR
 
 static double clamp_1_2000(const double v) {
     // Rust clamp passes NaN through, which both comparisons failing does.
@@ -565,7 +571,7 @@ static void im_init(__global const uint* ib, __global const ulong* ilb,
         for (int i = 0; i < BANK_WORDS; i++) ob[OS_BANK_FOR_RACE + i] = bank[i];
 
         for (int i = 0; i < 8; i++) ob[OS_CONT_I + i] = r128_next_int(bank);
-        for (int i = 0; i < 8; i++) olb[32 + i] = as_ulong(r128_next_double(bank));
+        for (int i = 0; i < 8; i++) olb[OL_CONT + i] = as_ulong(r128_next_double(bank));
 }
 
 // GameHpState::with_retail + init() from race_solver_retail.rs,

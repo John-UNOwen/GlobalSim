@@ -457,12 +457,23 @@ fn gate_reasons_names_every_refusal() {
     );
 
     // Request refusals, in the order the facade's domain gates ask them.
-    // The startup flag is ported, so it no longer refuses; only grid, the
-    // runtime and roster gates stay.
+    // The startup flag is ported, so it no longer refuses, and a valid grid
+    // key runs, so only the invalid grid shape, runtime and roster gates stay.
     let startup = r#"{"horses":[{}],"experimentalRetailRuntime":true,"experimentalRetailStartup":true}"#;
     assert_eq!(facade::gate_reasons(startup, Some(&accepted)), None);
+    // An invalid grid key (too few keys, too few horses) quotes the engine's
+    // message, matching prepare() and src/lib.rs:262-272.
     let grid = r#"{"horses":[{}],"experimentalRetailRuntime":true,"experimentalGrid":{}}"#;
-    assert_eq!(facade::gate_reasons(grid, Some(&accepted)).as_deref(), Some("grid mode"));
+    assert_eq!(
+        facade::gate_reasons(grid, Some(&accepted)).as_deref(),
+        Some("experimentalGrid requires 21 through 120 horses, columns=20 and rowSpacing=3.0.")
+    );
+    // A valid grid key on a 21-horse retail roster is now runnable.
+    let grid_ok = format!(
+        "{{\"experimentalRetailRuntime\":true,\"experimentalGrid\":{{\"columns\":20,\"rowSpacing\":3}},\"horses\":[{}]}}",
+        vec!["{}"; 21].join(",")
+    );
+    assert_eq!(facade::gate_reasons(&grid_ok, Some(&accepted)), None);
     let legacy = r#"{"horses":[{}]}"#;
     assert_eq!(facade::gate_reasons(legacy, Some(&accepted)).as_deref(), Some("non-retail runtime"));
     let empty = r#"{"horses":[],"experimentalRetailRuntime":true}"#;

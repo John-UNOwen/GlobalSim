@@ -10,11 +10,35 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     // The kernel's retail_core.cl scratch map grows by the skill regions, and
     // the host mirror must keep the same layout the work item reads.
     use globalsim_gpu::race_exec as re;
-    assert_eq!(re::SK_STRIDE, 34112);
+    assert_eq!(re::SK_STRIDE, 54912);
     // The full scratch mirrors: stat rows, race state, banks, then the skill
     // state block, five token orders, the substream bank and the staging.
-    assert_eq!(re::SCR_U_WORDS, 58588);
-    assert_eq!(re::SRL_WORDS, 30424);
+    // Sized to the grid-mode roster cap RACE_MAXR 120 and SK_RMAX 960.
+    assert_eq!(re::SCR_U_WORDS, 450300);
+    assert_eq!(re::SRL_WORDS, 231080);
+    // Input and status strides track RACE_MAXR.
+    assert_eq!(re::RI_STRIDE, 1592);
+    assert_eq!(re::RIL_STRIDE, 2072);
+    assert_eq!(re::ST_STRIDE, 1088);
+    // The pd runner block, race scalars and per-runner precompute block stack
+    // in that order, each behind the last per the kernel's formulas.
+    assert_eq!(re::PL_FRONT_LANE, re::PI_RUNNER0 + re::PI_RUN_STRIDE * re::RACE_MAXR);
+    assert_eq!(re::PD_CF_DIST, re::PL_FRONT_LANE + 16);
+    assert_eq!(re::PD_RUN0, re::PL_FRONT_LANE + 32);
+    assert_eq!(re::RIL_STRIDE, re::PD_RUN0 + re::PD_RUN_STRIDE * re::RACE_MAXR);
+    // The init program's per-case strides fit the 120-runner IM_INIT block.
+    assert!(globalsim_gpu::initialization::OS_RUN0
+        + globalsim_gpu::initialization::IRS_STRIDE
+            * globalsim_gpu::initialization::MAX_RUNNERS
+        <= globalsim_gpu::initialization::OS_CONT_I);
+    assert!(
+        globalsim_gpu::initialization::OUT_U_STRIDE
+            >= globalsim_gpu::initialization::OS_CONT_I + 16 + 60 + 32
+    );
+    assert_eq!(
+        globalsim_gpu::initialization::OUT_L_STRIDE,
+        globalsim_gpu::initialization::MAX_RUNNERS + 24
+    );
     // Table areas stay inside the stride, header first, then course lists,
     // records, effects, programs, arms, regions, terms and tags.
     assert!(16 <= globalsim_gpu::skills_compile::SK_STRAIGHTS);

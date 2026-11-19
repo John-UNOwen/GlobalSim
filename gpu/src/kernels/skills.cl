@@ -8,7 +8,7 @@
 // -cl-fp32-correctly-rounded-divide-sqrt; every Rust `as f32` mirrors
 // convert_float_rte and no constant expression may contract to an FMA.
 
-#define SK_STRIDE 34112
+#define SK_STRIDE 54912
 
 #define SK_NREC 0
 #define SK_NPROG 1
@@ -24,12 +24,12 @@
 #define SK_CORNERS 40
 #define SK_SLOPES 64
 #define SK_RECORDS 112
-#define SK_EFFECTS 4272
-#define SK_PROGRAMS 6192
-#define SK_ARMS 18480
-#define SK_REGIONS 20528
-#define SK_TERMS 28720
-#define SK_TAGS 30000
+#define SK_EFFECTS 25072
+#define SK_PROGRAMS 26992
+#define SK_ARMS 39280
+#define SK_REGIONS 41328
+#define SK_TERMS 49520
+#define SK_TAGS 50800
 
 #define SK_RSTRIDE 26
 #define SK_ESTRIDE 10
@@ -38,7 +38,10 @@
 #define SK_MSTRIDE 8
 #define SK_ASTRIDE 8
 
-#define SK_RMAX 160
+// Records per race: the grid-mode cap of 120 runners with a full skill kit
+// plus unique skill (8 per runner). sk_targets caps targets at the roster,
+// so raising this past 120 changes no result, only the table budget.
+#define SK_RMAX 960
 #define SK_STRMAX 12
 #define SK_CORMAX 12
 #define SK_SLOPEMAX 16
