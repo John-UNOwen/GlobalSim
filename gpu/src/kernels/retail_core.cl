@@ -357,6 +357,7 @@
 #define SF_AS_VALUE SF_SLOT(48)   // asitame accel effect modifier
 #define SF_CP_GELAP SF_SLOT(49)   // conserve gain_elapsed (f32 accumulator)
 #define SF_CP_GTHRESH SF_SLOT(50) // conserve gain_threshold
+#define SF_RS_FORCED SF_SLOT(55)  // rushing forced_remaining, -1.0 when None
 // RushingScore (stadium_score.rs): per-tick countdown while kakari is held;
 // each zero crossing charges one penalty. The count stays an exact integer.
 #define SF_RSCORE SF_SLOT(41)     // penalties charged (integer-valued f32)
@@ -423,7 +424,7 @@
 // Per-race scratch f64, one RACE_MAXR-wide column per slot (field base +
 // runner index). Array fields keep RACE_MAXR slots per element:
 // base + element * RACE_MAXR + r.
-#define SD_SLOTS (2 * RACE_MAXR + 59)
+#define SD_SLOTS (2 * RACE_MAXR + 70)
 #define SD_STRIDE (SD_SLOTS * RACE_MAXR)
 #define SD_SLOT(n) ((n) * RACE_MAXR)
 #define SD_POS SD_SLOT(0)
@@ -464,6 +465,17 @@
 #define SD_POSPREV (SD_SPOT_TIMER + 16 * RACE_MAXR)    // positions as published by the last field_update
 #define SD_NOUP (SD_SPOT_TIMER + 17 * RACE_MAXR)       // overtake_target_no_order_up_time, f64
 #define SD_NODOWN (SD_SPOT_TIMER + 18 * RACE_MAXR)     // overtake_target_no_order_down_time, f64
+// The aux-skill lifetimes the target filter and the lane search read. The
+// countdowns mirror the engine's new_skill_timer chain (negative runs, the
+// SkillTimer::step rounding, retired when the timer reaches zero), and the
+// retired state is +inf so an armed exact zero keeps the entry present for
+// the tick it fires, exactly like the engine's vector before its sweep.
+#define SK_GOALN 4                                     // live SetTargetLane entries per runner
+#define SD_IMMUNE (SD_SPOT_TIMER + 19 * RACE_MAXR)     // DebuffImmunity countdown, engine race_solver.rs:2454
+#define SD_GOAL_OUT (SD_SPOT_TIMER + 20 * RACE_MAXR)   // PreferOutsideLane presence countdown
+#define SD_GOAL_IN (SD_SPOT_TIMER + 21 * RACE_MAXR)    // PreferInsideLane presence countdown
+#define SD_GOALV (SD_SPOT_TIMER + 22 * RACE_MAXR)      // SetTargetLane entry lane, element stride RACE_MAXR
+#define SD_GOALT (SD_SPOT_TIMER + (22 + SK_GOALN) * RACE_MAXR) // ... and its countdown, +inf free
 #define SRL_RUNNER 0
 #define SRL_HP SD_STRIDE          // hp columns, SH_STRIDE per runner
 #define SH_STRIDE 8
@@ -986,17 +998,27 @@ static int rushing_step(__global uint* si, __global float* sf, const int r,
         return 1;
     }
     int ended;
-    sf[SF_RS_MAXREM + r] = fmax(sf[SF_RS_MAXREM + r] - dt, 0.f);
-    int natural_end = (sf[SF_RS_MAXREM + r] == 0.f);
-    if (!natural_end) {
-        float check = fmax(sf[SF_RS_CHECK + r] - dt, 0.f);
-        sf[SF_RS_CHECK + r] = check;
-        if (check == 0.f) {
-            sf[SF_RS_CHECK + r] = rush_param(pdp, PR_CHECK_TIME);
-            natural_end = ((float)r128_integer(bank, 0, 100)) < rush_param(pdp, PR_END_PERCENT);
+    const float forced = sf[SF_RS_FORCED + r];
+    if (forced >= 0.f) {
+        // An armed forced clock owns the rush: the natural clocks freeze and
+        // the end-percent lottery spends no draw (retail_states.rs:178-181).
+        const float remaining = fmax(forced - dt, 0.f);
+        sf[SF_RS_FORCED + r] = remaining;
+        ended = remaining == 0.f;
+    } else {
+        sf[SF_RS_MAXREM + r] = fmax(sf[SF_RS_MAXREM + r] - dt, 0.f);
+        int natural_end = (sf[SF_RS_MAXREM + r] == 0.f);
+        if (!natural_end) {
+            float check = fmax(sf[SF_RS_CHECK + r] - dt, 0.f);
+            sf[SF_RS_CHECK + r] = check;
+            if (check == 0.f) {
+                sf[SF_RS_CHECK + r] = rush_param(pdp, PR_CHECK_TIME);
+                natural_end = ((float)r128_integer(bank, 0, 100)) < rush_param(pdp, PR_END_PERCENT);
+            }
         }
+        ended = natural_end;
     }
-    if (natural_end) {
+    if (ended) {
         si[SI_RS_ACTIVE + r] = 0u;
         si[SI_RS_MODE + r] = 0u;
         return -1;
@@ -1927,13 +1949,15 @@ static float lane_passing_target(__global uint* si, __global uint* lists,
     return best;
 }
 
-// TargetState::target_sorted. fixed_goal stays 0 and lane_preference 0
-// because no skills are active, and has_hp tracks the live HP column.
+// TargetState::target_sorted. lane_preference carries the presence of the
+// PreferOutsideLane/PreferInsideLane aux flags and fixed_goal the last live
+// SetTargetLane lane, both read from the aux lifetimes in the sd block.
 static float lane_target(__global uint* si, __global float* sf, __global uint* lists,
     __global float* cached, __global const double* sd, __global const float* sf0,
     __global const double* pd, __global uint* bank, const int r, const int n,
     const float position, const float lane, const float owner_speed,
     const float owner_target, const int phase, const int has_hp, const int pace_down,
+    const int lane_preference, const float fixed_goal,
     const long dbg_base, __global double* fr) {
     const int can_in = (int)si[SI_L_CANIN + r];
     const int can_out = (int)si[SI_L_CANOUT + r];
@@ -1964,13 +1988,23 @@ static float lane_target(__global uint* si, __global float* sf, __global uint* l
             || !(first_move - 200.f <= position && position <= first_move));
     if (passing) {
         float target = lane_passing_target(si, lists, cached, sd, sf0, r, n, lane,
-            position, phase, max_lane, side_lane, can_in, can_out, in_space, out_space, 0,
-            dbg_base, fr);
-        if ((int)si[SI_L_XOP + r] && target >= lane && sf[SF_L_XO + r] > target
-            && lane_reachable(can_in, can_out, in_space, out_space, lane, sf[SF_L_XO + r])) {
-            target = sf[SF_L_XO + r];
+            position, phase, max_lane, side_lane, can_in, can_out, in_space, out_space,
+            lane_preference, dbg_base, fr);
+        // The outward fallback: extra_outward is Some once the random bonus
+        // is drawn, else a non-zero fixed_goal takes its place
+        // (retail_lane.rs:400-411).
+        const int has_xop = (int)si[SI_L_XOP + r];
+        const int has_extra = has_xop || fixed_goal != 0.f;
+        const float extra = has_xop ? sf[SF_L_XO + r] : fixed_goal;
+        if (has_extra && target >= lane && extra > target
+            && lane_reachable(can_in, can_out, in_space, out_space, lane, extra)) {
+            target = extra;
         }
         return target;
+    }
+    if (fixed_goal != 0.f) {
+        return fixed_goal > lane && can_out ? fmin(fixed_goal, lane + 0.05f)
+            : (fixed_goal < lane && can_in ? fmax(fixed_goal, lane - 0.05f) : lane);
     }
     if (!has_hp) {
         return lane;
@@ -2956,6 +2990,50 @@ static int sk_queued_kind(const int kind) {
         || kind == SK_EFF_VISION;
 }
 
+// is_skill_demerit (race_field.rs:55-63): the debuff class the target filter
+// and the immune self-skip gate on. Kind 13 is a demerit whatever its value.
+static int sk_is_debuff(const int kind, const double modifier) {
+    if (kind == 13 || kind == 14) {
+        return 1;
+    }
+    if (kind == 10) {
+        return modifier > 1.0;
+    }
+    if (kind == 29) {
+        return !(modifier < 0.0);
+    }
+    if ((kind >= 1 && kind <= 5) || kind == 8 || kind == 9 || kind == 21
+        || kind == 22 || kind == 27 || kind == 28 || kind == 30 || kind == 31
+        || kind == 32) {
+        return modifier < 0.0;
+    }
+    return 0;
+}
+
+// Arm one aux presence cell from a fire: the engine keeps one entry per
+// fire and presence reads any of them, so the single cell takes the newest
+// entry's countdown only when it outlives what is already armed.
+static void sk_aux_arm(__global double* cell, const double scaled) {
+    const double dur = convert_float_rte(scaled);
+    *cell = fmin(*cell, dur < 0.0 ? -INFINITY : -dur);
+}
+
+// Append a SetTargetLane entry (lane value plus its countdown) to the
+// runner's live list. 0 when all SK_GOALN slots are busy, the rare case
+// that flags the race.
+static int sk_goal_push(__global double* sd, const int j, const float lane,
+    const double scaled) {
+    for (int e = 0; e < SK_GOALN; e++) {
+        if (sd[SD_GOALT + e * RACE_MAXR + j] >= 0.0) {
+            sd[SD_GOALV + e * RACE_MAXR + j] = (double)lane;
+            const double dur = convert_float_rte(scaled);
+            sd[SD_GOALT + e * RACE_MAXR + j] = dur < 0.0 ? -INFINITY : -dur;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // The effect word a token was registered for, the (record, slot) it packs.
 static __global const uint* sk_tok_effect(__global const uint* sk, const uint tok) {
     const int rec = (int)SK_TOK_REC(tok);
@@ -3065,6 +3143,8 @@ static double sk_feat_value(const uint code, const double arg,
         return (int)si[SI_LS_TICK + r] != 0 ? 1.0 : 0.0;
     case FEAT_PHASE:
         return (double)(int)si[SI_PHASE + r];
+    case FEAT_RPHASE:
+        return (double)(int)si[SI_RPHASE + r];
     case FEAT_CORNER:
         return (double)(int)si[SI_CORNER + r];
     case FEAT_FINALE:
@@ -3280,10 +3360,20 @@ static double sk_feat_value(const uint code, const double arg,
         }
         return (double)c;
     }
-    case FEAT_RTEMP: {
-        // running_style_temptation_count: the base-style group's kakari rows,
-        // the querying runner counted through the caller's own kakari flag.
-        const int group = (int)arg;
+    case FEAT_RTEMP:
+    case FEAT_RTEMP + 1:
+    case FEAT_RTEMP + 2:
+    case FEAT_RTEMP + 3:
+    case FEAT_RTEMP_OPP:
+    case FEAT_RTEMP_OPP + 1:
+    case FEAT_RTEMP_OPP + 2:
+    case FEAT_RTEMP_OPP + 3: {
+        // running_style_temptation_count_{nige,senko,sashi,oikomi}: the
+        // base-style group's kakari rows. The plain arm counts the querying
+        // runner when it is in the group and rushing, the _opponent_ arm
+        // drops it (race_field.rs:945).
+        const int opp = feat >= FEAT_RTEMP_OPP;
+        const int group = 1 + (int)(feat - (opp ? FEAT_RTEMP_OPP : FEAT_RTEMP));
         int c = 0;
         for (int j = 0; j < n; j++) {
             if (j == r) continue;
@@ -3292,7 +3382,7 @@ static double sk_feat_value(const uint code, const double arg,
                 c++;
             }
         }
-        if (field_style((int)si[SI_STRATEGY + r]) == group
+        if (!opp && field_style((int)si[SI_STRATEGY + r]) == group
             && (int)si[SI_KAKARI + r] != 0) {
             c++;
         }
@@ -3501,6 +3591,18 @@ static void skills_expire_current(__global const uint* sk, __global uint* scr,
     }
 }
 
+// One aux presence countdown: step while the engine timer runs, retire to
+// the free sentinel once its sweep would drop the entry
+// (race_solver.rs:1990-1996, new_skill_timer chain).
+static void sk_aux_step(__global double* cell, const float dt) {
+    if (*cell < 0.0) {
+        const double next = (double)(convert_float_rte((float)*cell) + dt);
+        *cell = next < 0.0 ? next : INFINITY;
+    } else {
+        *cell = INFINITY;
+    }
+}
+
 // start_expired_skill_cooldowns for one whole field, after the per-runner
 // prepare loop. Dead records keep stepping because the engine's timer map is
 // keyed by the firing, not by the pending record's life.
@@ -3508,6 +3610,31 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
     __global double* skd, __global uint* scr, __global double* sd, const float dt,
     const int n, const float dist_f) {
     const int nrec = (int)sk[SK_NREC];
+    // The aux lifetimes the target filter and the lane search read, stepped
+    // and swept like the engine's active_aux_skills retain, which keeps
+    // vector order for the SetTargetLane last-live read.
+    for (int r = 0; r < n; r++) {
+        sk_aux_step(sd + SD_IMMUNE + r, dt);
+        sk_aux_step(sd + SD_GOAL_OUT + r, dt);
+        sk_aux_step(sd + SD_GOAL_IN + r, dt);
+        int keep = 0;
+        for (int e = 0; e < SK_GOALN; e++) {
+            double t = sd[SD_GOALT + e * RACE_MAXR + r];
+            if (t >= 0.0) {
+                continue;
+            }
+            t = (double)(convert_float_rte((float)t) + dt);
+            if (t >= 0.0) {
+                continue;
+            }
+            sd[SD_GOALV + keep * RACE_MAXR + r] = sd[SD_GOALV + e * RACE_MAXR + r];
+            sd[SD_GOALT + keep * RACE_MAXR + r] = t;
+            keep++;
+        }
+        for (int e = keep; e < SK_GOALN; e++) {
+            sd[SD_GOALT + e * RACE_MAXR + r] = INFINITY;
+        }
+    }
     for (int rec = 0; rec < nrec; rec++) {
         const uint state = sks[SKR_STRIDE * rec + SKR_STATE];
         if (state < (uint)SK_S_WAITING) {
@@ -3550,20 +3677,23 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
     skills_expire_current(sk, scr, skd, sd, n);
 }
 
-// skill_targets for the three rank-window codes: the first `limit` candidates
-// in the engine's order. The ahead code (9) slices the published order outward
-// ahead of self, the behind code (10) includes self then walks behind, and the
-// visible code (4) filters the order by this tick's visible column. The debuff
-// same-team drop is applied by the caller on this capped list, matching
-// race_field.rs:458-461.
+// skill_targets for the rank-window codes and the kakari group code: the
+// first `limit` candidates in the engine's order. The ahead code (9) slices
+// the published order outward ahead of self, the behind code (10) includes
+// self then walks behind, the visible code (4) filters the order by this
+// tick's visible column, and the group code (21) takes every runner whose
+// strategy equals limit and who is currently rushing, uncapped
+// (race_field.rs:439-445). The debuff same-team drop is applied by the
+// caller on this capped list, matching race_field.rs:458-461.
 static int sk_targets(__global const uint* si, __global const uint* rs,
     __global const uint* scr, const int r, const int target, const int limit,
     const int n, int* outs) {
     const int rank = (int)si[SI_RANKCOL + r];
     const int vis_base = (int)(SCR_LISTS + (uint)r * LIST_STRIDE + RACE_MAXR);
     const int vis_len = (int)si[SI_L_VISN + r];
+    const int cap = target == 21 ? RACE_MAXR : limit;
     int cnt = 0;
-    for (int k = 0; k < n && cnt < limit; k++) {
+    for (int k = 0; k < n && cnt < cap; k++) {
         int j;
         if (target == 9) {
             if (k >= rank - 1) {
@@ -3575,6 +3705,12 @@ static int sk_targets(__global const uint* si, __global const uint* rs,
                 break;
             }
             j = (int)rs[RS_ORDER + rank + k];
+        } else if (target == 21) {
+            j = (int)rs[RS_ORDER + k];
+            if (j == r || !(int)si[SI_KAKARI + j]
+                || field_style((int)si[SI_STRATEGY + j]) != (limit == 5 ? 1 : limit)) {
+                continue;
+            }
         } else {
             j = (int)rs[RS_ORDER + k];
             if (j == r) {
@@ -3640,12 +3776,16 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                 const int cnt = sk_targets(si, rs, scr, r, target, (int)ef[4], n, outs);
                 const uint tok = SK_TOK_EFF((uint)rec, (uint)e);
                 const uint owner_team = si[SI_TEAM + r];
-                const int debuff = modifier < 0.0;
+                const int debuff = sk_is_debuff(kind, modifier);
                 for (int q = 0; q < cnt; q++) {
                     const int j = outs[q];
                     // The skill_targets debuff filter (race_field.rs:458-461):
-                    // after the cap a negative-modifier receiver on the owner's
-                    // non-zero team drops out, no backfill. Immunity is kind 38.
+                    // after the cap an immune receiver drops out, then a
+                    // same-team receiver on the owner's non-zero team, no
+                    // backfill.
+                    if (debuff && sd[SD_IMMUNE + j] <= 0.0) {
+                        continue;
+                    }
                     if (debuff && owner_team != 0u && j != r && si[SI_TEAM + j] == owner_team) {
                         continue;
                     }
@@ -3656,6 +3796,21 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                         sd[SD_PENDING_HP + j] += (double)(convert_float_rte(
                             shl[j * SH_STRIDE + SH_MAX]) * convert_float_rte(modifier));
                     }
+                    if (kind == SK_EFF_GOAL_OUT || kind == SK_EFF_GOAL_IN
+                        || kind == SK_EFF_IMMUNE) {
+                        sk_aux_arm(sd + (kind == SK_EFF_GOAL_OUT ? SD_GOAL_OUT
+                            : (kind == SK_EFF_GOAL_IN ? SD_GOAL_IN : SD_IMMUNE)) + j, scaled);
+                    }
+                    if (kind == SK_EFF_SETLANE
+                        && !sk_goal_push(sd, j, convert_float_rte(modifier), scaled)) {
+                        st[ST_FALLBACK] = 1u;
+                        st[ST_ARG] = FB_SKILL_SEQ;
+                    }
+                    if (kind == SK_EFF_EXTKAKARI && (int)si[SI_KAKARI + j] != 0) {
+                        // set_forced_end replaces the rush's forced clock
+                        // (retail_states.rs:154-158, race_solver.rs:2584-2590).
+                        sf[SF_RS_FORCED + j] = fmax(convert_float_rte(modifier), 0.f);
+                    }
                     if (sk_queued_kind(kind)) {
                         __global uint* qq = sk_seq(scr, kind) + j * SK_SEQN;
                         if (sk_seq_find(qq, tok) < 0 && !sk_seq_push(qq, tok)) {
@@ -3665,6 +3820,11 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                     }
                 }
             }
+            continue;
+        }
+        // apply_activation's own-side guard (race_solver.rs:2526): an immune
+        // runner skips a debuff-class effect aimed at self.
+        if (sk_is_debuff(kind, modifier) && sd[SD_IMMUNE + r] <= 0.0) {
             continue;
         }
         if (kind == SK_EFF_RECOVERY) {
@@ -3689,6 +3849,24 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
             sf[SF_SPURT_MAX + r] = convert_float_rte(phys_maximum_spurt_speed(pd, speed,
                 (int)si[SI_STRATEGY + r], aptitude, dist_f,
                 pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_POWF]));
+            continue;
+        }
+        if (kind == SK_EFF_GOAL_OUT || kind == SK_EFF_GOAL_IN || kind == SK_EFF_IMMUNE) {
+            sk_aux_arm(sd + (kind == SK_EFF_GOAL_OUT ? SD_GOAL_OUT
+                : (kind == SK_EFF_GOAL_IN ? SD_GOAL_IN : SD_IMMUNE)) + r, scaled);
+            continue;
+        }
+        if (kind == SK_EFF_SETLANE) {
+            if (!sk_goal_push(sd, r, convert_float_rte(modifier), scaled)) {
+                st[ST_FALLBACK] = 1u;
+                st[ST_ARG] = FB_SKILL_SEQ;
+            }
+            continue;
+        }
+        if (kind == SK_EFF_EXTKAKARI) {
+            if ((int)si[SI_KAKARI + r] != 0) {
+                sf[SF_RS_FORCED + r] = fmax(convert_float_rte(modifier), 0.f);
+            }
             continue;
         }
         if (!sk_queued_kind(kind)) {
@@ -3733,6 +3911,36 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
     // v75 anyskill count: every own activation counts, and the engine's
     // excluded skill ids are the non-numeric legacy ones, never a record.
     si[SI_ACTALL + r] += 1u;
+    // The shared cooldown key covers the whole skill id
+    // (race_solver_builder.rs:589), so the fire's park lowers every live
+    // record of the (runner, id) group. Each ready sibling inherits the
+    // leader's state and timers: a READY one and a Cooldown one whose timer
+    // already ran up, which the engine's key map also reads as ready. DEAD
+    // and DISABLED siblings left the engine's pending list before the key
+    // was consulted and stay untouched.
+    __global uint* ls = sks + SKR_STRIDE * rec;
+    const uint lead_state = ls[SKR_STATE];
+    for (int other = 0; other < (int)sk[SK_NREC]; other++) {
+        if (other == rec) {
+            continue;
+        }
+        const __global const uint* od = sk + SK_RECORDS + SK_RSTRIDE * other;
+        if ((int)od[0] != (int)rd[0] || (int)od[1] != r) {
+            continue;
+        }
+        __global uint* os = sks + SKR_STRIDE * other;
+        __global double* ow = skd + SKD_STRIDE * other;
+        const uint ost = os[SKR_STATE];
+        const int ready = ost == (uint)SK_S_READY
+            || (ost == (uint)SK_S_COOLDOWN && ow[SKD_COOLDOWN] >= 0.0);
+        if (!ready) {
+            continue;
+        }
+        os[SKR_USED] = 1u;
+        os[SKR_STATE] = lead_state;
+        ow[SKD_INSTANCE] = wd[SKD_INSTANCE];
+        ow[SKD_COOLDOWN] = wd[SKD_COOLDOWN];
+    }
 }
 
 // process_skill_priority for one priority pass: the whole field in roster

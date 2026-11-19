@@ -45,7 +45,7 @@ Suites:
 | --- | --- |
 | `lib` (28 tests) | Vendored engine tests pass inside this crate |
 | `reference_trace` | The in-crate runner reproduces `restricted_trace.json` from the Jax oracle byte-for-byte (CRLF normalized) |
-| `layout` | The three `repr(C)` kernel structs are 104/36/244 bytes with the exact field offsets, `kernel_params()` equals the engine's `Parameters` public methods for every scalar the kernel reads, and the scratch stride mirrors are pinned (`SK_STRIDE` 54,912, `SCR_U_WORDS` 450,300, `SRL_WORDS` 231,080, the `RI`/`RIL`/`ST` strides and the init strides) |
+| `layout` | The three `repr(C)` kernel structs are 104/36/244 bytes with the exact field offsets, `kernel_params()` equals the engine's `Parameters` public methods for every scalar the kernel reads, and the scratch stride mirrors are pinned (`SK_STRIDE` 54,912, `SCR_U_WORDS` 450,300, `SRL_WORDS` 232,400, the `RI`/`RIL`/`ST` strides and the init strides) |
 | `comparator` | No device needed: one injected wrong value in a fake GPU outcome reports exactly the injected tick, runner, field and both raw bit patterns, equal frames with a flag are not parity |
 | `gpu_gate` | See below |
 | `rng_gate` (gpu only) | See "RNG port" below |
@@ -61,12 +61,14 @@ Suites:
 | `wave1_gate` (gpu + initialization + geometry + race) | The six Phase A chart variant jobs, course 10504 seeds 1..3: zero fallback and frame identity, plus a v77-roster race firing the any-skill, shadowed-alternative, wisdom-carrier and out-band constructs bit-exact (see "Wave-1 fallback-histogram constructs") |
 | `wave2_folds` | Compile-time gates for the wave-2 dynamic leaves and the roster style-count folds: each live leaf stays live, the sampled and folded shapes, and the still-refused value_usage refusals |
 | `wave2_gate` (gpu + initialization + geometry + race) | One real merged skill per ported construct plus a v77-roster race firing each through synthetic defs, seeds 1..3: zero fallback and frame identity, including the constructor-pass defer and the absolute init cooldown (see "Wave-2 condition fields") |
-| `wave2b_folds` | Compile-time gates for the effect side: cross-target records stay live, self-only kinds refuse cross targets, kinds 4 and 5 refuse mid-race fires and record construction-time bumps, the 8-effect cap, the `value_usage` refusals and the by-name refusals for kinds 36 to 38 |
+| `wave2b_folds` | Compile-time gates for the effect side: cross-target records stay live, self-only kinds refuse cross targets, kinds 4 and 5 refuse mid-race fires and record construction-time bumps, the 8-effect cap, the `value_usage` refusals and the by-name refusals for kinds 36 and 37 |
 | `wave2b_gate` (gpu + initialization + geometry + race) | Ten real merged skills, one per ported effect family, plus a twelve-skill synthetic battery firing every cross-target and bump path, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-2b effect side") |
 | `wave3_folds` | Compile-time gates for the wave-3 leaves: the in-band cell forms, the activation-history folds including the provably-false self-gate, the roster reads in both fold directions, the opponent-count team gate and the still-refused names |
 | `wave3_gate` (gpu + initialization + geometry + race) | Fourteen real merged rows, one per ported construct with the seats the condition needs, plus a twenty-eight-skill synthetic battery firing every new leaf, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-3 condition tail") |
-| `wave4_folds` | Compile-time gates for the effect tail: cross debuffs compile on any roster, a cross-target start-delay fires inert, and the remaining effect families (lane goals 11/12/35, kakari 13, all-stat 32, variantless 33/34, random 36/37, immunity 38, stat cross 1/4/5, two live alternatives, every `value_usage` tier) refuse by name with the reason |
+| `wave4_folds` | Compile-time gates for the effect tail: cross debuffs compile on any roster, a cross-target start-delay fires inert, and the still-refused effect families (all-stat 32, variantless 33/34, random 36/37, stat cross 1/4/5, every `value_usage` tier) refuse by name with the reason; lane goals, kakari, immunity and the shared-key alternative pair assert live records (see "Wave-6a lane, rush and cooldown tail") |
 | `wave4_gate` (gpu + initialization + geometry + race) | The real cross-debuff 910581 on a teamed roster plus a four-skill battery forcing the same-team drop, the different-team delivery and the inert cross start-delay both ways, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-4 effect tail") |
+| `wave6a_folds` | Compile-time gates for the wave-6a constructs: lane goal and immunity records compile live for self and cross targets, stray target combinations refuse, and the shared-key alternative pair lowers both live alternatives (see "Wave-6a lane, rush and cooldown tail") |
+| `wave6a_gate` (gpu + initialization + geometry + race) | The real shared-cooldown pair 910151, the real SetTargetLane 201261 and the real ExtendKakari 200801 on fitted seats, plus a ten-skill synthetic battery firing kinds 11, 12, 13 (self and group), 35 (self and delivered), 38 and the shared-key pair both ways, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-6a lane, rush and cooldown tail") |
 | `grid_gate` (gpu + initialization + geometry + race) | Grid starts at 21, 24, 40 and 120 horses, two courses, seeds 1..2: zero fallback and frame-for-frame `to_bits` identity against the CPU engine, the 21-horse grid-vs-retail control pair differing at frame 0, and invalid grid shapes falling back with the engine's own message (see "Grid mode") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 
@@ -975,7 +977,7 @@ per-skill branch anywhere.
 - Scratch grew to `SCR_U_WORDS` 58524 and `SRL_WORDS` 30424 (eight `SI_` slots
   times 24, two `SD_` slots times 24), repinned in `tests/layout.rs` (the grid
   capacity port later resized every region to 120 runners, now 450,300 and
-  231,080).
+  232,400).
 
 `wave3_folds` compiles each shape alone: the four in-band rates live with `==1`,
 30 and every other comparator refused, the narrow counters refuse their
@@ -1023,15 +1025,16 @@ authority:
   not model.
 - Lane goals 11, 12 (a lane-preference presence flag) and 35 (a last-set
   `lane_target`), read by the passing-lane search (`race_solver.rs:1310-1358`): the
-  kernel already threads a `lane_preference` and `fixed_goal` argument through the
-  target search but drives them at zero, and no ported leaf consumes a live lane
-  goal, so a real-skill bit-exact gate is not available and the wiring stays out.
-  Refused by name.
+  kernel already threaded a `lane_preference` and `fixed_goal` argument through the
+  target search but drove them at zero, and no ported leaf consumed a live lane
+  goal, so a real-skill bit-exact gate was not available and the wiring stayed out.
+  Refused by name in this wave; ported with wave 6a.
 - 13 ExtendKakari (a replace into the rush forced-end and kakari timer, no-op
   unless already rushing), 32 AllStatusUp (a mid-race all-stat bump with no kernel
   consumer), 33 and 34 (no `SkillType` variant at all), 36 and 37 random skill
   activation (a re-activation of another eligible skill via an activation-time
-  draw, `race_solver.rs:2677-2737`), 38 debuff immunity: all refused by name.
+  draw, `race_solver.rs:2677-2737`), 38 debuff immunity: all refused by name in
+  this wave; 13 and 38 ported with wave 6a.
 - `additionalActivate`: refused with the precise reason. The extra activation is
   never applied on the activation tick; it is enqueued into `running_skills` and
   applied later on the running skill's own turn in the ascending-id pass
@@ -1044,17 +1047,19 @@ authority:
   (`race_solver.rs:2485-2488`) and usages 11 and 14 read runtime counters, so both
   halves of the range stay out until the fold plumbing and the draw-position proof
   land.
-- Two live alternatives (910151): still refused. Every alternative shares the
+- Two live alternatives (910151): refused in this wave. Every alternative shares the
   skill cooldown key (`race_solver_builder.rs:589`); the first to fire parks it and
-  blocks the rest, a shared per-skill state the kernel lacks while it cools per
+  blocks the rest, a shared per-skill state the kernel lacked while it cooled per
   record, so it would let a second alternative fire where the engine does not.
+  Ported with wave 6a.
 
 Gates: `wave4_folds` compiles each shape alone: cross debuffs of every queued kind
 compile whether the runner has a team or not, a cross-target start-delay lowers a
-live inert record, and each refused family names its reason (lane goal, kakari
-duration, all-stat bump, no SkillType variant, random skill activation, debuff
-immunity, targeting another runner, other than one alternative, every `value_usage`
-tier). `wave4_gate` replays the real merged cross-debuff 910581 on a roster where
+live inert record, and each refused family names its reason (all-stat bump, no
+SkillType variant, random skill activation, targeting another runner, every
+`value_usage` tier); the lane goal, kakari, immunity and alternative-pair shapes
+now assert live records, gated in `wave6a_folds`. `wave4_gate` replays the real
+merged cross-debuff 910581 on a roster where
 the owner shares a team with some runners and not others, seeds 1..3, zero fallback
 and frame identity with 910581 present in the CPU activation events. The battery
 (synthetic 665001 to 665004) forces every new path both ways: an ahead speed
@@ -1063,7 +1068,82 @@ positive control delivered to all candidates, and the inert cross start-delay, e
 fired on the teamed back seat. Scratch grew to `SCR_U_WORDS` 58588 (`SI_TEAM` plus
 the 64-byte alignment of the cached block); `SRL_WORDS` holds at 30424, repinned in
 `tests/layout.rs` (the grid capacity port later resized every region to 120
-runners, now 450,300 and 231,080).
+runners, then lane and rush aux cells moved it further, now 450,300 and 232,400).
+
+### Wave-6a lane, rush and cooldown tail
+
+Four wave-4 refusals closed, with no app traffic: the merged skill table is the
+traffic. Each construct is gated on a real id from the merged table, and a
+synthetic battery covers what the table cannot.
+
+- Lane goals 11, 12 and 35. Two presence countdown cells per runner
+  (`SD_GOAL_OUT`, `SD_GOAL_IN`) and a four-slot ordered goal vector
+  (`SD_GOALV`/`SD_GOALT`) step and compact in `skills_advance`. While a
+  preference cell is present the lane search carries the outside (bit 1) or
+  inside (bit 2) flag and both present reads 3, no preference
+  (`lane_preference_flags()`, `race_solver.rs:1310-1314`); the same test
+  moves the skill lane cost to 1.5 when the preference points against the
+  gap. The goal push takes the first free slot and the lane search reads the
+  last live entry, the engine's `.rev().find` at `race_solver_retail.rs:766-771`,
+  with the passing-lane extra and the non-pass clamp of `retail_lane.rs:400-421`
+  consuming both arguments the search already threaded.
+- ExtendKakari 13. On a rushing receiver `set_forced_end` replaces the forced
+  remaining with the effect value (`race_solver.rs:2584-2590`) and the forced
+  stretch skips the natural clocks and the per-tick end-percent lottery
+  (`retail_states.rs:154-158, 178-181`). Target `21` resolves the rushing
+  runners of the strategy group carried in `target_value`, uncapped and
+  without self, Nige and Oonige in the same group (`race_field.rs:439-445`).
+- Debuff immunity 38. A presence cell `SD_IMMUNE` gates the target filter's
+  immunity arm (an immune receiver is dropped ahead of the same-team test)
+  and the owner's own debuff fires skip self while present
+  (`race_solver.rs:2526`, `race_field.rs:458-461`).
+- Shared cooldown key. The two-live-alternative refusal is gone: every
+  alternative of a skill id rides one cooldown key
+  (`race_solver_builder.rs:589`), so a fire fans its parked state and both
+  timers over the ready records of the (runner, skill id) group. READY and
+  COOLDOWN-with-expired-timer both read ready, the same pair the engine's key
+  map reports (`race_solver.rs:2371-2435`); WAITING records keep their own
+  running instance, and DEAD or DISABLED ones are skipped. The wave-1 rules
+  stand unchanged: the wisdom roll stays once per (runner, skill id), the
+  priority draws share one roll, and a shadowed alternative still folds into
+  the first live record's start-delay multiplier.
+
+Three engine-read bugs the gates caught, each a real divergence:
+
+- The `phase` condition reads the runtime phase, not the clamped solver
+  field. Retail keeps 3 while `RaceSolver::phase` clamps at 2
+  (`condition_parser.rs:170`, `race_solver_retail.rs:1311-1312`). The leaf
+  moved to `FEAT_RPHASE` 57 reading `SI_RPHASE`; `FEAT_PHASE` keeps the
+  clamped read for the last-spurt and phase-half constructs.
+- `running_style_temptation_count_*` compared the count against the strategy
+  group instead of the threshold: the program slot's one f64 carried the
+  group. The group now lives in the feature id (`FEAT_RTEMP` 58 to 61 and
+  `FEAT_RTEMP_OPP` 62 to 65, the opponent arms dropping self like
+  `race_field.rs:945`) and the slot carries the threshold.
+- `SK_FLAG_RETAIN` was set for every alternative of a retaining rarity while
+  the engine keeps only `detail_index == 0` (`race_solver.rs:2243`), so a
+  second alternative could survive the scan removal that the engine does not.
+
+Gates: `wave6a_folds` compiles the shapes: lane goals and immunity compile
+live for self and cross targets, target `21` is live only with kind `13` (a
+kind `27` at target `21` refuses), and the merged 910151, 201261 and 200801
+shapes lower with the expected live, shadowed and dead records. `wave6a_gate`
+replays on the v77 roster, seeds 1..3, zero fallback and frame identity:
+910151 on three runners fires through the shared key and the second
+alternative takes the fire exactly when the key reopens, 201261 on three nige
+seats fires the fixed goal with the lane column tracking it, 200801 on nine
+senko seats fires the extend onto rushing allies, and the battery
+666001 to 666010 fires all ten ids on all three seeds: kinds 11 and 12 both
+ways, 35 self and delivered, 13 self and group, the immunity drop pair (an
+immune ally survives the same-team drop that takes the plain ally, and the
+immune host's own debuff lands outside the armed window and skips inside it),
+and the shared-key pair firing both alternatives across the runtime-phase
+boundary. Kind 38 has no real id in the merged table, so its gate is
+battery-only.
+
+Scratch: `SD_SLOTS` grew from `2 * RACE_MAXR + 59` to `2 * RACE_MAXR + 70`
+(the eleven aux cells per runner), `SCR_U_WORDS` holds at 450,300 and
+`SRL_WORDS` moved 231,080 to 232,400, repinned in `tests/layout.rs`.
 
 ### Cost
 
@@ -1322,7 +1402,7 @@ kernel `#define` chains were checked line by line against them):
 | `SK_RMAX` | 160 | 960 | 8 record slots per runner at the 120 cap. `sk_targets` caps live targets at the roster, so the raise adds no behavior at small rosters |
 | `SK_STRIDE` | 34,112 | 54,912 | records at 26 words per slot drive the whole offset chain (`SKILLS_DESIGN.md` table updated) |
 | `SCR_U_WORDS` | 58,588 | 450,300 | 1.80 MB u32 scratch per race slot, fixed at the cap for every roster |
-| `SRL_WORDS` | 30,424 | 231,080 | 1.85 MB f64 scratch per race slot |
+| `SRL_WORDS` | 30,424 | 232,400 | 1.86 MB f64 scratch per race slot |
 | `PI_RUN_STRIDE` | 6 | 7 | the `PI_RUN_POS` slot, and `PL_FRONT_LANE` moves 384 to 1,080 with `PD_CF_*` and `PD_RUN0` chaining behind it |
 | `RI_STRIDE` | 352 | 1,592 | 13 debug rows per runner at the cap, `RI_DEBUG_TICK + 16` |
 | `RIL_STRIDE` | 640 | 2,072 | pd block plus race scalars plus per-runner precompute |

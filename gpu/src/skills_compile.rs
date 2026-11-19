@@ -121,8 +121,7 @@ pub const FEAT_BHIN: u32 = 35;
 pub const FEAT_MOVELANE: u32 = 36;
 pub const FEAT_BFRONT: u32 = 37;
 // Wave-3 leaves. FEAT_INBAND packs the band rate (20/40/50/80) in the
-// argument word, FEAT_USED the queried skill id and FEAT_RTEMP the base
-// strategy group (1..4).
+// argument word and FEAT_USED the queried skill id.
 pub const FEAT_INBAND: u32 = 38;
 pub const FEAT_NEARIF: u32 = 39;
 pub const FEAT_VISN: u32 = 40;
@@ -139,9 +138,19 @@ pub const FEAT_BFRONTB: u32 = 50;
 pub const FEAT_SURR: u32 = 51;
 pub const FEAT_TEMPT_B: u32 = 52;
 pub const FEAT_TEMPT_F: u32 = 53;
-pub const FEAT_RTEMP: u32 = 54;
 pub const FEAT_DDRATE: u32 = 55;
 pub const FEAT_DDTOPF: u32 = 56;
+// Retail races compare the phase condition against the runtime phase, which
+// keeps 3 while the solver field clamps at 2 (race_solver_retail.rs:1311).
+pub const FEAT_RPHASE: u32 = 57;
+// running_style_temptation_count_{nige,senko,sashi,oikomi} take 58 to 61, the
+// group in the low two id bits, and the _opponent_count_ variants take 62 to
+// 65 and leave the querying runner out, like the engine's opponents_only arm.
+// The group lives in the feature id because the program slot's one f64
+// carries the comparison threshold.
+pub const FEAT_RTEMP: u32 = 58;
+pub const FEAT_RTEMP_OPP: u32 = 62;
+pub const FEAT_RTEMP_END: u32 = 65;
 
 /// One race's compiled table. `reason` is Some when the race must run on the
 /// CPU, naming the first construct the kernel cannot evaluate. `bumps` are
@@ -461,10 +470,11 @@ impl Compiler {
         };
         // build_skill_data installs one record per alternative and skips an
         // alternative whose region algebra is empty. Records share one
-        // cooldown key per skill id, so the kernel's per-record cooldown can
-        // hold a second live alternative only when it is provably never the
-        // one that fires: identical program, no random term, and the earlier
-        // alternative's scan priority plus the shared key keep it Blocked.
+        // cooldown key per skill id, and the kernel parks the key across all
+        // live records of the group when one fires, so every live alternative
+        // lowers and the first to pass its gate blocks the rest like the
+        // engine's key map (race_solver.rs:2437). A shadowed duplicate
+        // (identical program, no random term) still collapses instead.
         let alts = match def.get("alternatives").and_then(Value::as_array) {
             Some(a) if !a.is_empty() => a,
             _ => {
@@ -496,7 +506,7 @@ impl Compiler {
             }
             // The engine keeps a primary white/gold/evolution record alive after
             // its trigger ends, which the kernel mirrors as a retained record.
-            let retain = matches!(rarity, 1 | 2 | 6);
+            let retain = alt_index == 0 && matches!(rarity, 1 | 2 | 6);
 
             let condition = alt.get("condition").and_then(Value::as_str).unwrap_or("");
             let terms = match parse_terms(condition) {
@@ -570,7 +580,7 @@ impl Compiler {
                         | FEAT_BFRONT | FEAT_NEARIF | FEAT_VISN | FEAT_INBAND
                         | FEAT_BALL | FEAT_BFRONTB | FEAT_CHGUP_MID | FEAT_CHGUP_FC
                         | FEAT_NOTOP | FEAT_NOTOD | FEAT_SURR | FEAT_TEMPT_B
-                        | FEAT_TEMPT_F | FEAT_RTEMP | FEAT_DDRATE | FEAT_DDTOPF)
+                        | FEAT_TEMPT_F | FEAT_RTEMP..=FEAT_RTEMP_END | FEAT_DDRATE | FEAT_DDTOPF)
                 });
                 let mut pre_regions: Vec<(f64, f64)> = vec![(0.0, g.distance)];
                 for leaf in pre_leaves.iter() {
@@ -712,8 +722,9 @@ impl Compiler {
                         }
                         continue;
                     }
-                    self.unsupported(format!("skill {sid} has other than one alternative"));
-                    return;
+                    // A second live alternative lowers too: the kernel fans the
+                    // shared key's park out over the group, so whichever passes
+                    // first blocks the rest exactly like the engine's key map.
                 }
                 live = Some((condition.to_string(), pre_sig));
                 live_rec = Some(self.nrec);
@@ -903,13 +914,10 @@ impl Compiler {
                 && leaves.iter().all(|l| matches!(l, Leaf::True));
             for ef in effect_list {
                 let kind = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
-                if !matches!(kind, 1 | 4 | 5 | 6 | 8 | 9 | 10 | 14 | 21 | 22 | 27 | 28 | 29 | 31) {
+                if !matches!(kind, 1 | 4 | 5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 14
+                    | 21 | 22 | 27 | 28 | 29 | 31 | 35 | 38)
+                {
                     let reason = match kind {
-                        11 | 12 | 35 => "lane goal (presence flag or last-set lane_target) \
-                                        needs a lane-preference consumer"
-                            .to_string(),
-                        13 => "kakari duration is a replace into the rush state, not an accumulator"
-                            .to_string(),
                         32 => "all-stat bump is a mid-race stat write with no kernel consumer"
                             .to_string(),
                         33 | 34 => {
@@ -919,15 +927,13 @@ impl Compiler {
                         36 | 37 => "random skill activation re-activates another skill via an \
                                    activation-time draw"
                             .to_string(),
-                        38 => "debuff immunity gates the target filter and needs the same-team drop"
-                            .to_string(),
                         other => format!("type {other} is not ported"),
                     };
                     self.unsupported(format!("skill {sid} effect {reason}"));
                     return;
                 }
                 let target = ef.get("target").and_then(Value::as_i64).unwrap_or(1) as i32;
-                if !matches!(target, 1 | 4 | 9 | 10) {
+                if !(matches!(target, 1 | 4 | 9 | 10) || (target == 21 && kind == 13)) {
                     self.unsupported(format!(
                         "skill {sid} effect target {target} is not ported"
                     ));
@@ -1011,7 +1017,7 @@ impl Compiler {
                     | FEAT_BFRONT | FEAT_NEARIF | FEAT_VISN | FEAT_INBAND
                     | FEAT_BALL | FEAT_BFRONTB | FEAT_CHGUP_MID | FEAT_CHGUP_FC
                     | FEAT_NOTOP | FEAT_NOTOD | FEAT_SURR | FEAT_TEMPT_B
-                    | FEAT_TEMPT_F | FEAT_RTEMP | FEAT_DDRATE | FEAT_DDTOPF)
+                    | FEAT_TEMPT_F | FEAT_RTEMP..=FEAT_RTEMP_END | FEAT_DDRATE | FEAT_DDTOPF)
             });
 
             // retail_initialization rolls the wisdom lottery once per skill id;
@@ -1613,7 +1619,7 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
             }
         }
         "overtake_target_time" => Ok(dyn_leaf(FEAT_OTIME, t)),
-        "phase" => Ok(dyn_leaf(FEAT_PHASE, t)),
+        "phase" => Ok(dyn_leaf(FEAT_RPHASE, t)),
         "popularity" => Ok(fold(s.popularity, t)),
         "remain_distance" => Ok(dyn_leaf(FEAT_REMAIN, t)),
         "rotation" => Ok(fold(s.turn as f64, t)),
@@ -1644,17 +1650,17 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
             // only while every roster team is zero.
             let opponents = name.contains("_opponent_");
             let group = match name.rsplit('_').next() {
-                Some("nige") => Some(1.),
-                Some("senko") => Some(2.),
-                Some("sashi") => Some(3.),
-                Some("oikomi") => Some(4.),
+                Some("nige") => Some(0),
+                Some("senko") => Some(1),
+                Some("sashi") => Some(2),
+                Some("oikomi") => Some(3),
                 _ => None,
             };
             match group {
                 Some(g) if !opponents || !s.any_team => Ok(Leaf::Dynamic {
-                    feat: FEAT_RTEMP,
+                    feat: if opponents { FEAT_RTEMP_OPP } else { FEAT_RTEMP } + g,
                     cmp: t.op,
-                    arg: Some(g),
+                    arg: None,
                 }),
                 _ => Err(format!("'{name}'{}{} is not ported", op_text(t.op), t.arg)),
             }

@@ -216,6 +216,33 @@ tiers, 3 and 7 are the retail HP tiers). Modifier dispatch follows retail
   nothing (initialization already applied the gate), so the record fires inert:
   event, counters and cooldown, no state write. Kinds `1`, `4` and `5` aimed at
   another runner stay refused (the receiver stat bump and its refresh).
+- `PreferOutsideLane(11)` and `PreferInsideLane(12)`: arm the owner's lane
+  preference presence cell. While present the runner's lane search carries the
+  outside (bit 1) or inside (bit 2) preference flag, and both present reads 3,
+  which the engine treats as no preference (`lane_preference_flags()`,
+  `race_solver.rs:1310-1314`). The flag also moves the skill lane cost factor
+  to 1.5 when it points against the gap (`retail_lane.rs`).
+- `SetTargetLane(35)`: push the lane onto the owner's ordered goal vector (four
+  slots), and the lane search reads the last live entry (`lane_target`'s fixed
+  goal, `race_solver_retail.rs:766-771`).
+- `ExtendKakari(13)`: on a receiver already rushing, `set_forced_end` replaces
+  the rush's forced remaining with `fmax(modifier as f32, 0)` and the forced
+  stretch skips the natural clocks and the per-tick end lottery
+  (`race_solver.rs:2584-2590`, `retail_states.rs:154-158, 178-181`). The kind
+  is a debuff (`is_skill_demerit`), so the same-team drop and immunity gate
+  it, and target `21` resolves the strategy group carried in `target_value`
+  among rushing runners, uncapped and without self (`race_field.rs:439-445`).
+- `DebuffImmunity(38)`: arm the owner's immunity presence cell. While present,
+  debuff deliveries skip the runner in the target filter, and the owner's own
+  debuff fire skips delivery to self (`race_solver.rs:2526`,
+  `race_field.rs:458-461`).
+
+Kinds 11, 12, 35 and 38 write per-runner aux cells that the per-tick advance
+steps and retires like the record timers (`race_solver.rs:1990-1996`): the
+effect is present while the cell
+is at or below zero, armed from the per-effect scaled duration
+(`race_solver.rs:2530, 2540-2548`), and a negative duration arms it for the
+rest of the race.
 
 The lists mirror `AdditiveReceiver`: registration-order folds, in-place token
 update on refire, order-preserving token removal at expiry.
@@ -238,7 +265,8 @@ non-zero team (`race_field.rs:458-461`), applied after the `target_value` cap so
 no later candidate backfills the slot. The kernel mirrors it: the owner's team
 and each receiver's team reach `skills_fire` through `SI_TEAM`, and a negative
 modifier skips the same-team receivers off the capped list. Debuff immunity, the
-filter's other arm, stays refused with kind 38, so it reads false here.
+filter's other arm, reads a per-runner presence cell `SD_IMMUNE` armed by a kind
+`38` fire, and an immune receiver skips the drop before the team test.
 
 ## Modifier application points (exact engine sites)
 
@@ -337,7 +365,7 @@ comparators (`activation_conditions.rs:229-243`).
 | name | fold |
 |---|---|
 | always | TRUE |
-| phase | dynamic FEAT_PHASE |
+| phase | dynamic FEAT_RPHASE, the unclamped runtime phase (the engine compares `retail.phase`, which keeps 3 while the solver field clamps at 2, `race_solver_retail.rs:1311`) |
 | distance_rate | dynamic FEAT_DIST_RATE, `arg` rescaled by `distance*rate/100` |
 | remain_distance | dynamic FEAT_REMAIN |
 | is_finalcorner | dynamic FEAT_FINALE |
@@ -405,8 +433,8 @@ comparators (`activation_conditions.rs:229-243`).
 | is_surrounded | dynamic FEAT_SURR: out, front and behind membership in one scan (f32-rounded gaps, 0.16666/0.08333 lane tolerances), six |
 | temptation_count_behind, temptation_count_infront | dynamic FEAT_TEMPT_B/F, published-order slices behind and ahead, counting kakari rows, six |
 | temptation_opponent_count_behind, temptation_opponent_count_infront | same leaves, gated to all-zero-team rosters: `is_opponent` is identity there, a team in the roster refuses by name |
-| running_style_temptation_count_nige/senko/sashi/oikomi | dynamic FEAT_RTEMP with the base group in the argument: kakari rows of that group including self, six |
-| running_style_temptation_opponent_count_nige/senko/sashi/oikomi | same leaf, all-zero-team gate as the pair above |
+| running_style_temptation_count_nige/senko/sashi/oikomi | dynamic FEAT_RTEMP 58 to 61, the group in the low two id bits: kakari rows of that group including self, six |
+| running_style_temptation_opponent_count_nige/senko/sashi/oikomi | dynamic FEAT_RTEMP_OPP 62 to 65, the same rows with self dropped like the engine's `opponents_only` arm, all-zero-team gate as the pair above |
 | distance_diff_rate | dynamic FEAT_DDRATE, the ranked endpoints with self substitution, the f32 `((first-own)/spread)*100` floored, an approximately-zero spread returning exactly 0 |
 | distance_diff_top_float | dynamic FEAT_DDTOPF, `floor(gap*10)/10` in f32 from the leader, six |
 | running_style_count_same | roster fold: the runner's own base-style count including self, six (`roster_condition`, refuses without a parsable strategy) |
@@ -475,33 +503,26 @@ Not yet ported (fallback-flagged, plan order in the README):
   becomes readable and the compiler refuses it by name
 - `base_*` (base stat reads), `motivation`, `grade`, `time`, `post_number`,
   `course_distance`, `furlong`
-- effects outside the accepted set 1, 4, 5, 6, 8, 9, 10, 14, 21, 22, 27, 28,
-  29 and 31 (`skills_compile.rs` refuses the rest by kind): `13` ExtendKakari
-  (a replace into the rush forced-end and kakari timer, no-op unless already
-  rushing), `35`, `11` and `12` lane goals (a presence flag and the last-set
-  `lane_target`, read by the passing-lane search the kernel does not drive),
-  `32` AllStatusUp (a mid-race all-stat bump with no kernel consumer), `33` and
-  `34` (no `SkillType` variant: the retail builder errors, the no-ffi path
-  degrades to Noop), `36` and `37` random skill activation (a re-activation of
-  another eligible skill through an activation-time draw), `38` debuff immunity
-  (a per-runner flag gating the target filter)
-- effect targets outside 1, 4, 9 and 10, and kinds `1`, `4` and `5` aimed at
-  another runner (they write the receiver's stats through a full
+- effects outside the accepted set 1, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 21,
+  22, 27, 28, 29, 31, 35 and 38 (`skills_compile.rs` refuses the rest by
+  kind): `32` AllStatusUp (a mid-race all-stat bump with no kernel consumer),
+  `33` and `34` (no `SkillType` variant: the retail builder errors, the no-ffi
+  path degrades to Noop), `36` and `37` random skill activation (a
+  re-activation of another eligible skill through an activation-time draw)
+- effect targets outside 1, 4, 9, 10 and 21, and target `21` only with kind
+  `13` (the rushing strategy-group receiver set), and kinds `1`, `4` and `5`
+  aimed at another runner (they write the receiver's stats through a full
   `refresh_stat_effects` the kernel does not model). `10`
   `MultiplyStartDelay` at another runner fires inert in retail (the receiver
   keeps its init-applied gate) and is accepted. The same-team debuff drop is a
   real delivery gate now, not a roster flag: each runner's fixed team id reaches
   the kernel (`RR_TEAM` into `SI_TEAM`) and `skills_fire` drops same-team
   receivers off the capped receiver list, matching `race_field.rs:458-461`.
-  Debuff immunity, the other half of that filter, stays refused with kind 38.
+  The immunity arm of that filter reads the `SD_IMMUNE` presence cell.
 - a mid-race (non-constructor) fire of `GutsUp(4)` or `WisdomUp(5)`, and more
   than 8 effects on one record (the per-record token cap the receiver orders
   index)
-- structural: two live alternatives whose condition or precondition differs
-  (refused as `skill {sid} has other than one alternative`, see below: both
-  ride the shared skill cooldown key, and the kernel cools per record, so it
-  would let a second alternative fire where the engine parks the key),
-  `value_usage` 3 to 14 (usages 3 to 7, 10 and 12 13 rescale the modifier from
+- structural: `value_usage` 3 to 14 (usages 3 to 7, 10 and 12 13 rescale the modifier from
   roster team stats, wins, fans and the displayed-stat tier and fold once the
   roster read reaches the table; usages 8 and 9 draw `RetailRandom` at
   activation and usages 11 and 14 read runtime counters),
@@ -509,8 +530,8 @@ Not yet ported (fallback-flagged, plan order in the README):
   `additional_activate` not 0 (the extra activation is enqueued into
   `running_skills` and applied on the running skill's own turn, not within the
   firing scan pass),
-  rarity outside 1..6 (3, 4 and 5 all fold to 3), priority outside {0,1}, debuff
-  immunity, the legacy non-retail wisdom path, `isGeneralSkill` gates
+  rarity outside 1..6 (3, 4 and 5 all fold to 3), priority outside {0,1}, the
+  legacy non-retail wisdom path, `isGeneralSkill` gates
 
 Multi-alternative skills compile one record per alternative. An alternative
 whose region chain folds empty (a false precondition or condition) stays as a
@@ -521,10 +542,16 @@ skill carries the roll (`SK_FLAG_WISDOM`) and the rest inherit it
 text, a matching precondition signature and no sampled term is shadowed by
 the first live one (shared cooldown key, scanned first, identical gate), gets
 no record, and only its start-delay factor folds into the first record's
-multiplier. Any other second live alternative is refused by name: every
-alternative shares the skill cooldown key (`race_solver_builder.rs:589`), so the
-first one to fire parks the key and blocks the rest, a shared state the kernel
-has no model for while it cools per record.
+multiplier. A second live alternative with a different gate lowers as its own
+record too: every alternative shares the skill cooldown key
+(`race_solver_builder.rs:589`), so the fire of one parks the key for the rest.
+The kernel models the key at fire time: the fire fans its parked state and
+both timers over the ready siblings of the (runner, skill id) group, where a
+READY record and a COOLDOWN record whose timer already ran up both read as
+ready, the same pair the engine's single key map reports
+(`race_solver.rs:2371-2435`). WAITING siblings hold their own running
+instance, and DEAD or DISABLED siblings left the engine's pending list before
+the key was consulted; none of them inherits the park.
 `accumulatetime`-style precondition terms lower to a precondition program and
 region list the gate checks before the condition, mirroring the engine's
 `pre_condition` pass.

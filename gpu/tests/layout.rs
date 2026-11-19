@@ -15,7 +15,7 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     // state block, five token orders, the substream bank and the staging.
     // Sized to the grid-mode roster cap RACE_MAXR 120 and SK_RMAX 960.
     assert_eq!(re::SCR_U_WORDS, 450300);
-    assert_eq!(re::SRL_WORDS, 231080);
+    assert_eq!(re::SRL_WORDS, 232400);
     // Input and status strides track RACE_MAXR.
     assert_eq!(re::RI_STRIDE, 1592);
     assert_eq!(re::RIL_STRIDE, 2072);

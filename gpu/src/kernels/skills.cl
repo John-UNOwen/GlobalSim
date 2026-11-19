@@ -119,9 +119,8 @@
 #define FEAT_MOVELANE 36
 #define FEAT_BFRONT 37
 // Wave-3 leaves: the in-band order cells read the band rate from the argument
-// word (20/40/50/80), FEAT_USED the queried skill id, FEAT_RTEMP the base
-// strategy group (1..4). The band and used leaves only compare ==1, like the
-// engine's filters.
+// word (20/40/50/80), FEAT_USED the queried skill id. The band and used
+// leaves only compare ==1, like the engine's filters.
 #define FEAT_INBAND 38
 #define FEAT_NEARIF 39
 #define FEAT_VISN 40
@@ -138,9 +137,15 @@
 #define FEAT_SURR 51
 #define FEAT_TEMPT_B 52
 #define FEAT_TEMPT_F 53
-#define FEAT_RTEMP 54
 #define FEAT_DDRATE 55
 #define FEAT_DDTOPF 56
+#define FEAT_RPHASE 57
+// running_style_temptation_count_{nige,senko,sashi,oikomi} take 58 to 61, the
+// group in the low two id bits. The _opponent_count_ variants take 62 to 65
+// and leave the querying runner out, like the engine's opponents_only arm.
+#define FEAT_RTEMP 58
+#define FEAT_RTEMP_OPP 62
+#define FEAT_RTEMP_END 65
 
 // The (skill, effect) dispatch kinds the port covers.
 #define SK_EFF_SPEEDUP 1
@@ -149,6 +154,9 @@
 #define SK_EFF_RUNAWAY 6
 #define SK_EFF_VISION 8
 #define SK_EFF_NOOP 10
+#define SK_EFF_GOAL_OUT 11     // PreferOutsideLane
+#define SK_EFF_GOAL_IN 12      // PreferInsideLane
+#define SK_EFF_EXTKAKARI 13    // ExtendKakari
 #define SK_EFF_SETDELAY 14
 #define SK_EFF_CURRENT 21
 #define SK_EFF_CURRENT_NAT 22
@@ -156,6 +164,8 @@
 #define SK_EFF_LANESPEED 28
 #define SK_EFF_KAKARI 29
 #define SK_EFF_ACCEL 31
+#define SK_EFF_SETLANE 35      // SetTargetLane
+#define SK_EFF_IMMUNE 38       // DebuffImmunity
 #define SK_EFF_RECOVERY 9
 
 // Runtime record state, per record in the per-race scratch state block.

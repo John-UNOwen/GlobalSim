@@ -182,10 +182,21 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
         position_f, lane_f, sf[SF_OBSERVED + r], convert_float_rte(sd[SD_TSWSK + r]),
         dbg_base >= 0 ? dbg_base + (long)6 * n : -1, fr);
     if (empty_move && sf[SF_AFTER_GOAL + r] < 1.f) {
+        // The aux reads of retail_lane_context: preference presence for the
+        // passing search's skill cost, and the last live SetTargetLane lane
+        // in engine vector order (race_solver_retail.rs:750-771).
+        int lane_pref = (sd[SD_GOAL_OUT + r] <= 0.0) ? 1 : 0;
+        lane_pref |= (sd[SD_GOAL_IN + r] <= 0.0) ? 2 : 0;
+        float fixed_goal = 0.f;
+        for (int e = 0; e < SK_GOALN; e++) {
+            if (sd[SD_GOALT + e * RACE_MAXR + r] <= 0.0) {
+                fixed_goal = convert_float_rte(sd[SD_GOALV + e * RACE_MAXR + r]);
+            }
+        }
         const float target = lane_target(si, sf, lists, cached, sd, sf, pd, bank,
             r, n, position_f, lane_f, sf[SF_OBSERVED + r],
             convert_float_rte(sd[SD_TSWSK + r]), phase, (int)(shl_r[SH_HP] > 0.),
-            (int)si[SI_PACEDOWN + r], dbg_base, fr);
+            (int)si[SI_PACEDOWN + r], lane_pref, fixed_goal, dbg_base, fr);
         sd[SD_LANET + r] = (double)target;
     }
 
@@ -962,6 +973,13 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         st[ST_DELAY0 + r] = scr[runb + OR_DELAY];
         sf[SF_RS_CHECK + r] = 0.f;
         sf[SF_RS_MAXREM + r] = 0.f;
+        sf[SF_RS_FORCED + r] = -1.f;
+        sd[SD_IMMUNE + r] = INFINITY;
+        sd[SD_GOAL_OUT + r] = INFINITY;
+        sd[SD_GOAL_IN + r] = INFINITY;
+        for (int e = 0; e < SK_GOALN; e++) {
+            sd[SD_GOALT + e * RACE_MAXR + r] = INFINITY;
+        }
         sf[SF_DS_REM + r] = 0.f;
         sf[SF_SL_END + r] = 0.f;
         sf[SF_SL_VALUE + r] = 0.f;

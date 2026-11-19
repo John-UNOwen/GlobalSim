@@ -191,8 +191,8 @@ fn value_usage_refusal_unchanged() {
 
 #[test]
 fn unported_effect_kinds_refuse_by_name() {
-    // The histogram kinds the parent deferred: the stateful time machines and
-    // the immune-state writer.
+    // The deferred random-activation kinds; the lane goals, kakari extend and
+    // immune-state writer ported with wave 6a.
     for kind in [27i64, 9, 21, 22, 28, 31] {
         let effect = format!("{{\"type\":{kind},\"target\":9,\"modifier\":1000,\"targetValue\":2}}");
         is_live(
@@ -204,9 +204,9 @@ fn unported_effect_kinds_refuse_by_name() {
         &one_runner("order>=2", 500000, &["{\"type\":37,\"target\":1,\"modifier\":1000}"]),
         "random skill activation",
     );
-    refused(
+    is_live(
         &one_runner("order>=2", 500000, &["{\"type\":38,\"target\":1,\"modifier\":1000}"]),
-        "debuff immunity",
+        "debuff immunity live",
     );
     refused(
         &one_runner("order>=2", 500000, &["{\"type\":36,\"target\":1,\"modifier\":1000}"]),

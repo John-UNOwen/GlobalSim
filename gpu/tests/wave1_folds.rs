@@ -166,8 +166,10 @@ fn multi_alternative_rules() {
     let dead_flags = folded_off.words[SK_RECORDS + 2];
     assert_ne!(dead_flags & SK_FLAG_DEAD, 0, "folded alternative is DEAD");
 
-    // Two live alternatives that do not shadow stay refused, naming the skill.
+    // Two live alternatives that do not shadow lower together: the kernel
+    // fans the shared key's park over the group on a fire, so whichever
+    // loses its gate can never emit after the winner blocked the key.
     let diverging = plan_alt(&format!("{},{}", alt("", "order_rate>=40"), alt("", "order<=3")));
-    let reason = diverging.reason.expect("two live alternatives refused");
-    assert!(reason.contains("550001 has other than one alternative"), "got {reason}");
+    assert!(diverging.reason.is_none(), "got {:?}", diverging.reason);
+    assert_eq!(diverging.words[SK_NREC], 2, "both live alternatives lower");
 }

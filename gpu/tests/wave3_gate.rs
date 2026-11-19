@@ -32,12 +32,13 @@ struct Row {
     fires: bool,
 }
 
-/// The merged table blocks the wave-3 roster-rate and temptation-opponent
-/// constructs on their effect side (910151 two alternatives, 200281 effect
-/// type 3, 200771/200781/200801 effect target 20/19 or type 13), so those
-/// leaves ride the battery and fold gates only. The mid-pack and back markers
-/// ride horses 2, 4, 5 and 8 so rank windows, front blockers and final-corner
-/// passes can hold.
+/// The merged table blocked the wave-3 roster-rate and temptation-opponent
+/// constructs on their effect side (910151 two live alternatives, 200281
+/// effect type 3, 200771/200781 effect target 20/19, 200801 ExtendKakari
+/// type 13). Wave 6a ports 910151 and the kakari extend family and gates
+/// them there; the rest ride the battery and fold gates only. The mid-pack
+/// and back markers ride horses 2, 4, 5 and 8 so rank windows, front
+/// blockers and final-corner passes can hold.
 const REAL_SKILLS: [Row; 14] = [
     Row { sid: 900561, what: "blocked_front binary", skills: &[900561], host: 2, spread: true, seats: &[], pop: None, fires: true },
     Row { sid: 200622, what: "distance_diff_rate", skills: &[200622], host: 0, spread: false, seats: &[(0, Some("Oikomi"))], pop: None, fires: true },

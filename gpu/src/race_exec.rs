@@ -148,7 +148,7 @@ const RS_COUNTS: usize = (RS_PM + 8 + 7) & !7;
 const RS_ADV: usize = RS_COUNTS + 8 + 4 * RACE_MAXR;
 const SCR_BANKS: usize = SCR_RACE + RS_ADV + RACE_MAXR; // paired mode: one RUN bank per runner
 const BANK_WORDS: usize = 60;
-const SRL_HP: usize = (2 * RACE_MAXR + 59) * RACE_MAXR;
+const SRL_HP: usize = (2 * RACE_MAXR + 70) * RACE_MAXR;
 const RD_WORDS: usize = 8 * RACE_MAXR + SRL_HP + 32;
 const SRL_STATS_IN_L: usize = RD_WORDS;
 const SRL_INIT_IN_L: usize = SRL_STATS_IN_L + RACE_MAXR * IIL;
@@ -1149,9 +1149,7 @@ impl RaceContext {
     let m = launched.len();
     // Frame-byte budget per launch. One 120-horse race writes
     // RACE_MAX_TICKS * n * 6 f64 (about 35.4 MB), so a big batch splits into
-    // several launches instead of asking the driver for gigabytes of frames.
-    // Batches whose frames fit the budget, every current suite included,
-    // still launch once.
+    // several launches; every current suite fits a single one.
     const FRAME_BYTES_BUDGET: usize = 512 << 20;
     let race_frames_bytes = RACE_MAX_TICKS * n * 6 * std::mem::size_of::<f64>();
     let chunk_len = (FRAME_BYTES_BUDGET / race_frames_bytes.max(1)).max(1);

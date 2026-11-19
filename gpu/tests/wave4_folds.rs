@@ -106,12 +106,13 @@ fn stat_kinds_still_refuse_cross_targets() {
 }
 
 #[test]
-fn lane_goal_kinds_refuse_by_name() {
-    // 11 and 12 set a lane-preference flag, 35 a literal lane_target goal, both
-    // consumed by the passing lane search the kernel has not wired.
+fn lane_goal_kinds_compile_both_directions() {
+    // 11 and 12 arm a lane-preference presence, 35 a last-set lane goal; all
+    // three lower now the passing search consumes them, and the unported
+    // duration_usage tiers still refuse.
     for kind in [11i64, 12, 35] {
         let effect = format!("{{\"type\":{kind},\"target\":1,\"modifier\":1000}}");
-        refused(
+        is_live(
             &one_runner("order>=2", 500000, &[effect.as_str()]),
             "lane goal",
         );
@@ -120,11 +121,11 @@ fn lane_goal_kinds_refuse_by_name() {
 
 #[test]
 fn kakari_allstat_and_variantless_kinds_refuse_by_name() {
-    // 13 replaces the rush forced-end and kakari timer, 32 is a mid-race
-    // all-stat bump, 33 and 34 have no SkillType variant at all.
-    refused(
+    // 13 replaces the rush forced-end and ports; 32 is a mid-race all-stat
+    // bump, 33 and 34 have no SkillType variant at all.
+    is_live(
         &one_runner("order>=2", 500000, &[r#"{"type":13,"target":1,"modifier":5000}"#]),
-        "kakari duration",
+        "kakari extend",
     );
     refused(
         &one_runner("order>=2", 500000, &[r#"{"type":32,"target":1,"modifier":5000}"#]),
@@ -141,8 +142,9 @@ fn kakari_allstat_and_variantless_kinds_refuse_by_name() {
 
 #[test]
 fn random_and_immune_kinds_refuse_by_name() {
-    // 36 and 37 re-activate another skill through an activation-time draw, 38
-    // gates the same-team drop on a receiver's immunity flag.
+    // 36 and 37 re-activate another skill through an activation-time draw,
+    // still refused; 38 arms the immunity presence now the target filter
+    // reads it.
     for kind in [36i64, 37] {
         let effect = format!("{{\"type\":{kind},\"target\":1,\"modifier\":1000}}");
         refused(
@@ -150,7 +152,7 @@ fn random_and_immune_kinds_refuse_by_name() {
             "random skill activation",
         );
     }
-    refused(
+    is_live(
         &one_runner("order>=2", 500000, &[r#"{"type":38,"target":1,"modifier":1}"#]),
         "debuff immunity",
     );
@@ -181,17 +183,22 @@ fn value_usage_tiers_stay_refused() {
 }
 
 #[test]
-fn two_live_alternatives_stay_refused() {
+fn two_live_alternatives_lower_together() {
     // 910151's shape: two alternatives, mutually exclusive on a runtime count,
-    // each live and unshadowed, sharing the skill cooldown key. Two live
-    // alternatives stay refused until the shared key is modelled in the kernel.
+    // each live and unshadowed, sharing the skill cooldown key. The kernel
+    // fans the key's park over the group on a fire, so both can lower.
     let skill = concat!(
         r#"{"rarity":1,"wisdomCheck":0,"priority":0,"alternatives":["#,
         r#"{"precondition":"","condition":"order>=2","cooldown":50000,"effects":[{"type":27,"target":1,"modifier":2500}]},"#,
         r#"{"precondition":"","condition":"phase==2","cooldown":50000,"effects":[{"type":27,"target":1,"modifier":1500}]}]}"#
     );
-    refused(
-        &plan_skill(skill, r#"{"skills":["550001"]}"#),
-        "other than one alternative",
-    );
+    let plan = plan_skill(skill, r#"{"skills":["550001"]}"#);
+    if let Some(reason) = &plan.reason {
+        panic!("two live alternatives must lower, got refusal: {reason}");
+    }
+    assert_eq!(plan.words[SK_NREC], 2, "both alternatives lower");
+    for rec in 0..2usize {
+        let flags = plan.words[SK_RECORDS + SK_RSTRIDE * rec + 2];
+        assert_eq!(flags & SK_FLAG_DEAD, 0, "alternative {rec} stays live");
+    }
 }
