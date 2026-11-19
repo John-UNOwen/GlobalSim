@@ -12,10 +12,16 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     use globalsim_gpu::race_exec as re;
     assert_eq!(re::SK_STRIDE, 54912);
     // The full scratch mirrors: stat rows, race state, banks, then the skill
-    // state block, five token orders, the substream bank and the staging.
+    // state block, five token orders, the substream bank, the staging, the
+    // additional-activation token pool and the per-runner running lists.
     // Sized to the grid-mode roster cap RACE_MAXR 120 and SK_RMAX 960.
-    assert_eq!(re::SCR_U_WORDS, 450300);
-    assert_eq!(re::SRL_WORDS, 232400);
+    // Wave 6b grew the record state 8 to 20 words per record (plus 11520),
+    // the token pool 128 x 6 (plus 768) and the running lists (plus 1080),
+    // the scalar block 83 to 89 slots per runner (plus 720 plus alignment),
+    // one staged value per effect slot of every record (plus 15360), and the
+    // double block gained 6 columns of RACE_MAXR (SRL plus 720).
+    assert_eq!(re::SCR_U_WORDS, 479796);
+    assert_eq!(re::SRL_WORDS, 233120);
     // Input and status strides track RACE_MAXR.
     assert_eq!(re::RI_STRIDE, 1592);
     assert_eq!(re::RIL_STRIDE, 2072);

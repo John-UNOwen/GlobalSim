@@ -141,15 +141,14 @@ fn kakari_allstat_and_variantless_kinds_refuse_by_name() {
 }
 
 #[test]
-fn random_and_immune_kinds_refuse_by_name() {
-    // 36 and 37 re-activate another skill through an activation-time draw,
-    // still refused; 38 arms the immunity presence now the target filter
-    // reads it.
+fn random_kinds_compile_and_immune_arms() {
+    // Wave 6b: 36 and 37 file their request at activation, so they lower;
+    // 38 arms the immunity presence.
     for kind in [36i64, 37] {
         let effect = format!("{{\"type\":{kind},\"target\":1,\"modifier\":1000}}");
-        refused(
+        is_live(
             &one_runner("order>=2", 500000, &[effect.as_str()]),
-            "random skill activation",
+            "random activation request",
         );
     }
     is_live(
@@ -160,26 +159,46 @@ fn random_and_immune_kinds_refuse_by_name() {
 
 #[test]
 fn additional_activate_names_the_deferred_turn() {
-    let skill = format!(
+    // Wave 6b ports the self kinds; the turn machinery runs them in the
+    // kernel, so only cross-target or unregistered kinds still refuse.
+    let live = format!(
         "{{\"rarity\":1,\"wisdomCheck\":0,\"priority\":0,\"alternatives\":[{{\"precondition\":\"\",\"condition\":\"order>=2\",\"cooldown\":60000,\"effects\":[{{\"type\":27,\"target\":1,\"modifier\":1000,\"additionalActivate\":2}}]}}]}}"
     );
+    is_live(
+        &plan_skill(&live, r#"{"skills":["550001"]}"#),
+        "additionalActivate self kind",
+    );
+    let cross = format!(
+        "{{\"rarity\":1,\"wisdomCheck\":0,\"priority\":0,\"alternatives\":[{{\"precondition\":\"\",\"condition\":\"order>=2\",\"cooldown\":60000,\"effects\":[{{\"type\":27,\"target\":9,\"targetValue\":2,\"modifier\":1000,\"additionalActivate\":2}}]}}]}}"
+    );
     refused(
-        &plan_skill(&skill, r#"{"skills":["550001"]}"#),
-        "additionalActivate defers the extra activation",
+        &plan_skill(&cross, r#"{"skills":["550001"],"teamId":2}"#),
+        "additionalActivate 2 on type 27 target 9",
+    );
+    let roll = format!(
+        "{{\"rarity\":1,\"wisdomCheck\":0,\"priority\":0,\"alternatives\":[{{\"precondition\":\"\",\"condition\":\"order>=2\",\"cooldown\":60000,\"effects\":[{{\"type\":9,\"target\":1,\"modifier\":1000,\"additionalActivate\":3}}]}}]}}"
+    );
+    refused(
+        &plan_skill(&roll, r#"{"skills":["550001"]}"#),
+        "additionalActivate 3 on type 9",
     );
 }
 
 #[test]
 fn value_usage_tiers_stay_refused() {
-    // The fold-from-roster tiers (3 to 7, 10, 12, 13) and the roll or runtime
-    // tiers (8, 9, 11, 14) all refuse until their half reaches the table.
+    // Wave 6b closes the runtime half: 8 and 9 draw at activation and 11 and
+    // 14 read live counters, so no value_usage 1..=14 refuses on its own.
     for vu in [3i64, 7, 8, 9, 10, 11, 12, 13, 14] {
         let effect = format!("{{\"type\":27,\"target\":1,\"modifier\":1000,\"valueUsage\":{vu}}}");
-        refused(
+        is_live(
             &one_runner("order>=2", 500000, &[effect.as_str()]),
             &format!("value_usage {vu}"),
         );
     }
+    refused(
+        &one_runner("order>=2", 500000, &[r#"{"type":27,"target":1,"modifier":1000,"valueUsage":15}"#]),
+        "value_usage 15",
+    );
 }
 
 #[test]

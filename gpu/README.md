@@ -59,16 +59,18 @@ Suites:
 | `startup_gate` (gpu + initialization + geometry + race) | Startup pass: the app mob-preset jobs flagged `experimentalRetailStartup: true`, both courses, seeds 1..3: zero fallback, frame identity, and per-race start values against the in-process engine's `retail_initialization::initialize` (see "Startup pass") |
 | `wave1_folds` | Compile-time gates for the request-static condition folds and the multi-alternative rules, both fold directions plus the still-refused names (see "Wave-1 fallback-histogram constructs") |
 | `wave1_gate` (gpu + initialization + geometry + race) | The six Phase A chart variant jobs, course 10504 seeds 1..3: zero fallback and frame identity, plus a v77-roster race firing the any-skill, shadowed-alternative, wisdom-carrier and out-band constructs bit-exact (see "Wave-1 fallback-histogram constructs") |
-| `wave2_folds` | Compile-time gates for the wave-2 dynamic leaves and the roster style-count folds: each live leaf stays live, the sampled and folded shapes, and the still-refused value_usage refusals |
+| `wave2_folds` | Compile-time gates for the wave-2 dynamic leaves and the roster style-count folds: each live leaf stays live, the sampled and folded shapes, and the still-refused names |
 | `wave2_gate` (gpu + initialization + geometry + race) | One real merged skill per ported construct plus a v77-roster race firing each through synthetic defs, seeds 1..3: zero fallback and frame identity, including the constructor-pass defer and the absolute init cooldown (see "Wave-2 condition fields") |
-| `wave2b_folds` | Compile-time gates for the effect side: cross-target records stay live, self-only kinds refuse cross targets, kinds 4 and 5 refuse mid-race fires and record construction-time bumps, the 8-effect cap, the `value_usage` refusals and the by-name refusals for kinds 36 and 37 |
+| `wave2b_folds` | Compile-time gates for the effect side: cross-target records stay live, self-only kinds refuse cross targets, kinds 4 and 5 refuse mid-race fires and record construction-time bumps, the 8-effect cap, the live `value_usage` readers and the live random-activation kinds 36 and 37 at self target |
 | `wave2b_gate` (gpu + initialization + geometry + race) | Ten real merged skills, one per ported effect family, plus a twelve-skill synthetic battery firing every cross-target and bump path, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-2b effect side") |
 | `wave3_folds` | Compile-time gates for the wave-3 leaves: the in-band cell forms, the activation-history folds including the provably-false self-gate, the roster reads in both fold directions, the opponent-count team gate and the still-refused names |
 | `wave3_gate` (gpu + initialization + geometry + race) | Fourteen real merged rows, one per ported construct with the seats the condition needs, plus a twenty-eight-skill synthetic battery firing every new leaf, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-3 condition tail") |
-| `wave4_folds` | Compile-time gates for the effect tail: cross debuffs compile on any roster, a cross-target start-delay fires inert, and the still-refused effect families (all-stat 32, variantless 33/34, random 36/37, stat cross 1/4/5, every `value_usage` tier) refuse by name with the reason; lane goals, kakari, immunity and the shared-key alternative pair assert live records (see "Wave-6a lane, rush and cooldown tail") |
+| `wave4_folds` | Compile-time gates for the effect tail: cross debuffs compile on any roster, a cross-target start-delay fires inert, and the still-refused effect families (all-stat 32, variantless 33/34, stat cross 1/4/5) plus the refused `value_usage` 15 and the cross-target random kinds refuse by name with the reason; lane goals, kakari, immunity, kinds 36/37 at self target and the shared-key alternative pair assert live records (see "Wave-6a lane, rush and cooldown tail") |
 | `wave4_gate` (gpu + initialization + geometry + race) | The real cross-debuff 910581 on a teamed roster plus a four-skill battery forcing the same-team drop, the different-team delivery and the inert cross start-delay both ways, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-4 effect tail") |
 | `wave6a_folds` | Compile-time gates for the wave-6a constructs: lane goal and immunity records compile live for self and cross targets, stray target combinations refuse, and the shared-key alternative pair lowers both live alternatives (see "Wave-6a lane, rush and cooldown tail") |
 | `wave6a_gate` (gpu + initialization + geometry + race) | The real shared-cooldown pair 910151, the real SetTargetLane 201261 and the real ExtendKakari 200801 on fitted seats, plus a ten-skill synthetic battery firing kinds 11, 12, 13 (self and group), 35 (self and delivered), 38 and the shared-key pair both ways, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-6a lane, rush and cooldown tail") |
+| `wave6b_folds` | Compile-time gates: the runtime `value_usage` readers (8, 9, 11, 14) and the self-target additionalActivate shapes compile live, and `value_usage` 15 refuses by name (see "Wave-6b activation-time values and turns") |
+| `wave6b_gate` (gpu + initialization + geometry + race) | The real merged ids for value_usage 8/11/14 (202031, 202032, 910341, 100981), additionalActivate (910211, 910351) and kind 37 (910071) on fitted seats, plus a 667xxx battery for kind 36, value_usage 9, the aa 1 cap and the never-fires white candidate, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-6b activation-time values and turns") |
 | `grid_gate` (gpu + initialization + geometry + race) | Grid starts at 21, 24, 40 and 120 horses, two courses, seeds 1..2: zero fallback and frame-for-frame `to_bits` identity against the CPU engine, the 21-horse grid-vs-retail control pair differing at frame 0, and invalid grid shapes falling back with the engine's own message (see "Grid mode") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 
@@ -806,11 +808,12 @@ player-swapped chart traffic still refused (Phase C, course 10504):
   timer map yet, so its cooldown starts at once as an absolute ready time instead
   of the Waiting-to-instance path a loop fire takes. Both are in `SKILLS_DESIGN.md`
   and reproduced by `wave2_gate`.
-- `value_usage` 3 to 14 now refuses by name: those usages rescale the modifier
-  from stat, win and fan tiers, the activation rolls, the late-corner count and
-  the green-tag count, state the numeric table cannot carry. This is the reason a
-  couple of the histogram's carriers (for example the fans-tier skill 210072) stay
-  refused even though their condition is ported.
+- `value_usage` 3 to 14 refused by name in this wave: those usages rescale the
+  modifier from stat, win and fan tiers, the activation rolls, the late-corner
+  count and the green-tag count, state the numeric table could not carry. This
+  was the reason a couple of the histogram's carriers (for example the fans-tier
+  skill 210072) stayed refused even though their condition was ported. The whole
+  range landed with wave 6b.
 
 The compile-only scratch sweep over the 108 merged skills that carry these
 constructs (plus the wave-1 static recheck) compiled 62 at the time;
@@ -891,7 +894,7 @@ order and cooldown-free conditions) covers what the real skills cannot
 (accel-behind, lane-speed-behind, natural-speed-behind, vision-debuff-visible).
 A compile-only sweep of the 32 ids the wave-2a histogram refused on effect
 constructs now compiles 29 (solo horse, best over the seven strategy seats);
-the three remain refuse `value_usage` 7 or 11.
+the three remain refused `value_usage` 7 or 11, both tiers since ported (wave 6b).
 
 ### Wave-3 condition tail
 
@@ -1034,19 +1037,17 @@ authority:
   consumer), 33 and 34 (no `SkillType` variant at all), 36 and 37 random skill
   activation (a re-activation of another eligible skill via an activation-time
   draw, `race_solver.rs:2677-2737`), 38 debuff immunity: all refused by name in
-  this wave; 13 and 38 ported with wave 6a.
-- `additionalActivate`: refused with the precise reason. The extra activation is
-  never applied on the activation tick; it is enqueued into `running_skills` and
-  applied later on the running skill's own turn in the ascending-id pass
-  (`race_solver.rs:1841-1941`), with turn-taking counters, per-kind caps and a
-  deferred cooldown. That is not a same-scan-pass enqueue, so it is not portable.
-- `value_usage` 3 to 14: refused by name. Usages 3 to 7, 10 and 12 13 rescale the
-  modifier from roster team stats, wins, fans and the displayed-stat tier
-  (`race_solver_builder.rs:908-939`) and would fold at build once the roster read
-  reaches the table; usages 8 and 9 draw `RetailRandom` at activation
-  (`race_solver.rs:2485-2488`) and usages 11 and 14 read runtime counters, so both
-  halves of the range stay out until the fold plumbing and the draw-position proof
-  land.
+  this wave; 13 and 38 ported with wave 6a, 36 and 37 with wave 6b.
+- `additionalActivate`: refused with the precise reason in this wave. The extra
+  activation is never applied on the activation tick; it is enqueued into
+  `running_skills` and applied later on the running skill's own turn in the
+  ascending-id pass (`race_solver.rs:1841-1941`), with turn-taking counters,
+  per-kind caps and a deferred cooldown. Ported with wave 6b.
+- `value_usage` 3 to 14: refused by name in this wave. Usages 3 to 7, 10 and 12
+  to 13 rescale the modifier from roster team stats, wins, fans and the
+  displayed-stat tier (`race_solver_builder.rs:908-939`) and fold at build;
+  usages 8 and 9 draw `RetailRandom` at activation (`race_solver.rs:2485-2488`)
+  and usages 11 and 14 read runtime counters. All of it landed with wave 6b.
 - Two live alternatives (910151): refused in this wave. Every alternative shares the
   skill cooldown key (`race_solver_builder.rs:589`); the first to fire parks it and
   blocks the rest, a shared per-skill state the kernel lacked while it cooled per
@@ -1056,9 +1057,9 @@ authority:
 Gates: `wave4_folds` compiles each shape alone: cross debuffs of every queued kind
 compile whether the runner has a team or not, a cross-target start-delay lowers a
 live inert record, and each refused family names its reason (all-stat bump, no
-SkillType variant, random skill activation, targeting another runner, every
-`value_usage` tier); the lane goal, kakari, immunity and alternative-pair shapes
-now assert live records, gated in `wave6a_folds`. `wave4_gate` replays the real
+SkillType variant, targeting another runner, `value_usage` outside 1 to 14); the
+lane goal, kakari, immunity, random-activation and alternative-pair shapes
+assert live records, gated in `wave6a_folds` and `wave6b_folds`. `wave4_gate` replays the real
 merged cross-debuff 910581 on a roster where
 the owner shares a team with some runners and not others, seeds 1..3, zero fallback
 and frame identity with 910581 present in the CPU activation events. The battery
@@ -1068,7 +1069,7 @@ positive control delivered to all candidates, and the inert cross start-delay, e
 fired on the teamed back seat. Scratch grew to `SCR_U_WORDS` 58588 (`SI_TEAM` plus
 the 64-byte alignment of the cached block); `SRL_WORDS` holds at 30424, repinned in
 `tests/layout.rs` (the grid capacity port later resized every region to 120
-runners, then lane and rush aux cells moved it further, now 450,300 and 232,400).
+runners, then lane and rush aux cells moved it further, now 479,796 and 233,120).
 
 ### Wave-6a lane, rush and cooldown tail
 
@@ -1144,6 +1145,104 @@ battery-only.
 Scratch: `SD_SLOTS` grew from `2 * RACE_MAXR + 59` to `2 * RACE_MAXR + 70`
 (the eleven aux cells per runner), `SCR_U_WORDS` holds at 450,300 and
 `SRL_WORDS` moved 231,080 to 232,400, repinned in `tests/layout.rs`.
+
+### Wave-6b activation-time values and turns
+
+The last skill-side refusals closed, still with the merged table as the traffic.
+Three families landed: the activation-time `value_usage` tiers, the
+`additionalActivate` turn machinery, and the random-skill reservations (kinds 36
+and 37).
+
+`value_usage`, per tier, with the fold or read point:
+
+| usage | authority | how it lands | gated on |
+| --- | --- | --- | --- |
+| 1, 2 | level table | compile fold, unchanged | wave 2b |
+| 3 to 7 | ranked team stat, bounds 1200 1800 2600 3600, factor 0.8 to 1.2, sentinel 99999 gives 1.0 (`race_solver_builder.rs:908-939`) | compile fold `value_fold` (`skills_compile.rs:1157-1213`) | `wave6b_folds` |
+| 8, 9 | `rng_uniform(100)` at each application, `<=60` gives 0, `<=90` gives 0.02, else 0.04 (`race_solver.rs:2485-2488`) | runtime draw in `sk_vu_factor` (`retail_core.cl:3669`) on the same bank the fire's other draws use | 202031 and 202032 real, 667010 battery (no real 9 id in the table) |
+| 10, 12 | career wins 6 14 18 25, fans 20000 50000 100000 160000 | compile fold, same table | `wave6b_folds` |
+| 11 | late-corner overtakes, tiers 2 3 4 (`race_solver.rs:2500-2503`) | runtime read of `SI_LCO`, bumped in `field_update` when an overtake lands inside a corner in runtime phase 2 or later | 910341 real |
+| 13 | highest raw stat, bounds 600 800 1000 1100 | compile fold | `wave6b_folds` |
+| 14 | activated green-tag id count, tiers 3 5 6 giving 0 1 2 3 (`race_solver.rs:296-301`) | runtime read of `SI_GREEN`, a per-runner set mirror bumped once per id at fire | 100981 real, trio 667012 to 667014 carries the tags |
+
+Every read happens at the same point in `skills_fire`'s effect loop as the
+engine's, before that tick's movement draws, and the roll consumption is per
+application: an additionalActivate follow-up re-draws exactly like the engine's
+second `apply_activation`. The real-id gates are the proof.
+
+`additionalActivate` mirrors the engine's deferral exactly
+(`race_solver.rs:1841-1941`, 2443-2461, 2642-2648): a slot with a non-zero count
+counts into the instance duration but never applies on the fire tick; the fire
+pushes the record onto the runner's running list (8 slots), and each activation
+elsewhere files one pending turn per running skill (`additional_skill_event(2)`,
+kind-2 or kind-3 slot required, own id excluded), as does each overtake
+(`additional_skill_event(1)`, kind-1 slots, three per slot, durations collected
+before delivery). The priority-0 scan walks the pending records in the engine's
+order and, at each record id boundary, delivers each running skill's queued
+turns before moving on, with one final sweep per runner at the pass end: up to
+`min(count, cap - already)` applications, cap 3 for kind-2 slots and 2 for
+kind-3. `aa_retire` drops a running entry only past
+its timer and past the id floor, and defers any entry with a kind-2 or kind-3
+slot while a later entry is unretired, the engine's `retiring` flag. The
+follow-up applications register their value and duration in a 128-entry pool
+whose tokens join the same per-kind orders, so `sk_tok_value` reports them
+without reading the wire. Gates: real 910211 (aa 3, gated by
+`activate_count_middle >= 2`, lifted by inert carriers 667120/667121) and
+910351 (aa 2, last-spurt window); battery 667001 (two aa-3 follow-ups, one
+turn), 667002 (four aa-2 follow-ups, the cap strands one and the entry never
+retires) and 667003 (aa 1, overtake-driven). No self-target aa id with
+`durationUsage` 1 exists for kind 1, so the kind-1 delivery arm stays
+battery-covered, and 100531 keeps refusing for its refused `durationUsage` 4.
+
+Random activation, kinds 36 and 37. The effect stores its request count
+(`race_solver.rs:2677-2684`, never during the constructor pass); at the end of
+every priority-0 pass `aa_select` rebuilds the candidate list (primary
+alternative, general skill, every effect `base_duration >= 0` and kind above
+5 and not 32, rarity gold or evolution and also white for a 36 request, key
+ready, no live instance, id not already running), draws one index per requested
+pick and removes it, and marks the winners. A marked record fires on the next
+visit bypassing the arms, the windows and the extra condition, which also
+overrides a failed wisdom lottery: a retained primary that lost the roll stays
+pending exactly for this path (`race_solver_builder.rs:1002-1005`), so the scan
+keeps DISABLED retained primaries as candidates and the record returns to
+DISABLED, not READY, after such a fire (`SKR_WISFAIL`, `skills.cl:198`).
+Gates: real 910071 (kind 37, gold request at the half-distance point, gold
+generals 200331/200361 as the pool); battery 667020 (kind 36) with the
+never-fires whites 667021/667022 as the pool, so their appearance in the
+activation events is the reserved path's own proof.
+
+Three real bugs the gates caught:
+
+- The fold readers (`sk_has_speed`, the target column, the physics chains) read
+  the wire modifier of a queued record token, so a usage whose factor is 0
+  (real 100981 at green count 0) still moved the target speed while the engine's
+  active-skill entry held 0. Every fired application now stages its applied
+  value per token (`sk_tok_stage`, `retail_core.cl:3084`) and the readers take
+  it, matching the pool tokens' behavior.
+- The host scratch mirror pinned the scalar block at 83 slots per runner while
+  the kernel grew to 89, so every region after it sat 720 words short of the
+  kernel's view and late-runner lists wrote past the buffer. `race_exec.rs:146`
+  now mirrors `SI_SLOTS`.
+- The any-request pool required both the gold and the white rarity bit, an
+  impossible mask, so no kind-36 pick was ever reserved. The filter now asks
+  for one of the pool's rarity bits (`retail_core.cl:4452-4464`).
+
+Scratch: the record state grew 8 to 20 words (aa counters, the reservation and
+wisdom-fail flags), the scalar block 83 to 89 slots (`SI_LCO`, `SI_PENDN`,
+`SI_GREEN`, `SI_AANU`, `SI_AARET`, `SI_RESRV`), plus the 128-entry token pool,
+the per-runner running lists and the staged value table. `SCR_U_WORDS` moved
+450,300 to 479,796 and `SRL_WORDS` 232,400 to 233,120, repinned in
+`tests/layout.rs`.
+
+Sharp edges: the additionalActivate turn order assumes the scan visits records
+in wire order, which equals the engine's `first_index` order, true while the
+builder pushes alternatives in request order; a reserved fire of a DISABLED
+record promotes it into the live state machine, and `SKR_WISFAIL` keeps it from
+re-arming through the normal gate; a stalled entry that never retires holds one
+of the 8 running slots for the rest of the race, and more than 8 such records
+for one runner flag the race (same for the 128-entry pool and 16 candidates per
+pass); the other-advantage classifier stays unmodeled as before (no merged
+consumer of the aa-1 window is reachable with real ids).
 
 ### Cost
 

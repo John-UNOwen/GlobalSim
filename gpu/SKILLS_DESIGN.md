@@ -504,11 +504,11 @@ Not yet ported (fallback-flagged, plan order in the README):
 - `base_*` (base stat reads), `motivation`, `grade`, `time`, `post_number`,
   `course_distance`, `furlong`
 - effects outside the accepted set 1, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 21,
-  22, 27, 28, 29, 31, 35 and 38 (`skills_compile.rs` refuses the rest by
-  kind): `32` AllStatusUp (a mid-race all-stat bump with no kernel consumer),
-  `33` and `34` (no `SkillType` variant: the retail builder errors, the no-ffi
-  path degrades to Noop), `36` and `37` random skill activation (a
-  re-activation of another eligible skill through an activation-time draw)
+  22, 27, 28, 29, 31, 35, 36, 37 and 38 (`skills_compile.rs` refuses the rest
+  by kind): `32` AllStatusUp (a mid-race all-stat bump with no kernel consumer)
+  and `33` and `34` (no `SkillType` variant: the retail builder errors, the
+  no-ffi path degrades to Noop). `36` and `37` (random skill activation,
+  `race_solver.rs:2677-2737`) are accepted at self target only.
 - effect targets outside 1, 4, 9, 10 and 21, and target `21` only with kind
   `13` (the rushing strategy-group receiver set), and kinds `1`, `4` and `5`
   aimed at another runner (they write the receiver's stats through a full
@@ -522,16 +522,15 @@ Not yet ported (fallback-flagged, plan order in the README):
 - a mid-race (non-constructor) fire of `GutsUp(4)` or `WisdomUp(5)`, and more
   than 8 effects on one record (the per-record token cap the receiver orders
   index)
-- structural: `value_usage` 3 to 14 (usages 3 to 7, 10 and 12 13 rescale the modifier from
-  roster team stats, wins, fans and the displayed-stat tier and fold once the
-  roster read reaches the table; usages 8 and 9 draw `RetailRandom` at
-  activation and usages 11 and 14 read runtime counters),
+- structural: `value_usage` outside 1 to 14 (usages 3 to 7, 10, 12 and 13 fold
+  at compile from request-static data, `race_solver_builder.rs:908-939`;
+  usages 8 and 9 draw `RetailRandom` at each application and usages 11 and 14
+  read runtime counters, `race_solver.rs:2485-2503`),
   `duration_usage` 4 (the delayed running-instance path),
-  `additional_activate` not 0 (the extra activation is enqueued into
-  `running_skills` and applied on the running skill's own turn, not within the
-  firing scan pass),
+  `additional_activate` outside the self-target kinds 27, 28 and 31 (the shape
+  the turn machinery models), a `36` or `37` effect at another runner,
   rarity outside 1..6 (3, 4 and 5 all fold to 3), priority outside {0,1}, the
-  legacy non-retail wisdom path, `isGeneralSkill` gates
+  legacy non-retail wisdom path
 
 Multi-alternative skills compile one record per alternative. An alternative
 whose region chain folds empty (a false precondition or condition) stays as a
@@ -556,6 +555,36 @@ the key was consulted; none of them inherits the park.
 region list the gate checks before the condition, mirroring the engine's
 `pre_condition` pass.
 
+Activation-time values and turns. `sk_vu_factor` (`retail_core.cl`) maps each
+effect's `value_usage` at the moment the engine reads it, inside the effect loop
+of `skills_fire` and again for every additionalActivate application: 8 and 9
+draw the paired-run or shared bank the fire already uses, 11 reads `SI_LCO`
+(late-corner overtakes, bumped in `field_update` off the rank-neighbor flip),
+14 reads `SI_GREEN` (distinct activated green-tag ids, bumped once per id at
+fire). The applied value is staged per token (`sk_tok_stage` into `SK_VVAL`)
+because the pace gate, the target column and the physics chains all read the
+engine's active-skill entry, never the wire modifier.
+
+additionalActivate defers: a counted slot contributes to the instance duration
+but not to the fire, the fire registers the record in the runner's running list
+(`SK_RUN`, 8 slots), and every later activation or overtake files pending turns
+(`SI_AANU` counts the holders). At each record-id boundary of the priority-0
+scan, and once more per runner at the pass end, `aa_turns` delivers up to
+`min(count, cap - delivered)` applications, cap 3 for kind 2 slots and 2 for
+kind 3, and each application allocates a pool token (`SK_AAP`, 128 entries)
+whose value and timer ride the same per-kind orders. `aa_retire` reproduces the
+engine's deferral: an entry past its timer and past the id floor retires unless
+a later unretired entry owns a kind-2 or kind-3 slot.
+
+Kinds 36 and 37 only file a request (`SD_RANY`/`SD_RGOLD`). `aa_select` at the
+end of each priority-0 pass rebuilds the ordered candidate list, draws one index
+per requested pick from the same bank, and marks the winners' records; the next
+visit of a marked record fires with the arms, the windows and the extra
+condition bypassed, and the run-skip fast path stays off while any reservation
+is live. A wisdom-failed retained primary is a candidate and can fire exactly
+this way (`race_solver_builder.rs:1002-1005`), and `SKR_WISFAIL` sends it back
+to DISABLED rather than READY when its cooldown expires.
+
 Rule: an unsupported construct is refused by the compiler before upload, the
 host flags the whole race for CPU fallback, and the flag reason names the
 construct (for example `'lane_type' is not ported`, or `skill 200333 effect
@@ -568,7 +597,9 @@ sees a table it cannot run.
 `ntag<=4096`, `nstr<=12`, `ncor<=12`, `nslope<=16`, at most 2048 regions per
 race and 16 per arm chain, terms at most 160 per race, one sampled term per
 record, 4 sampled windows per term, 12 receiver entries per runner across the
-three lists, 64 active effect entries per race, and 40 receiver tokens per
-runner and kind (an overflow raises the `FB_SKILL_SEQ` fallback, not a wrong
+three lists, 64 active effect entries per race, 40 receiver tokens per
+runner and kind, 8 running additionalActivate entries per runner, 128 pool
+tokens per race, and 16 candidates per reservation pass (an overflow raises the
+`FB_SKILL_SEQ` fallback, not a wrong
 fold). Overflow
 is a host `flagged("skill table overflow ...")`, never a kernel fault.

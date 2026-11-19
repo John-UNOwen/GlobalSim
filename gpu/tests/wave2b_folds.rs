@@ -178,12 +178,14 @@ fn cross_debuffs_compile_on_any_roster() {
 }
 
 #[test]
-fn value_usage_refusal_unchanged() {
-    refused(
+fn value_usage_runtime_readers_now_live() {
+    // Wave 6b: 7 folds at compile, and 14 reads the live green-skill counter
+    // through the kernel, so neither refuses.
+    is_live(
         &one_runner("order>=2", 500000, &["{\"type\":8,\"target\":1,\"modifier\":1000,\"valueUsage\":7}"]),
         "value_usage 7",
     );
-    refused(
+    is_live(
         &one_runner("order>=2", 500000, &["{\"type\":27,\"target\":1,\"modifier\":1000,\"valueUsage\":14}"]),
         "value_usage 14",
     );
@@ -192,7 +194,7 @@ fn value_usage_refusal_unchanged() {
 #[test]
 fn unported_effect_kinds_refuse_by_name() {
     // The deferred random-activation kinds; the lane goals, kakari extend and
-    // immune-state writer ported with wave 6a.
+    // immune-state writer ported with wave 6a, the random requests with 6b.
     for kind in [27i64, 9, 21, 22, 28, 31] {
         let effect = format!("{{\"type\":{kind},\"target\":9,\"modifier\":1000,\"targetValue\":2}}");
         is_live(
@@ -200,16 +202,20 @@ fn unported_effect_kinds_refuse_by_name() {
             "ported cross kind",
         );
     }
-    refused(
+    is_live(
         &one_runner("order>=2", 500000, &["{\"type\":37,\"target\":1,\"modifier\":1000}"]),
-        "random skill activation",
+        "random gold request",
     );
     is_live(
         &one_runner("order>=2", 500000, &["{\"type\":38,\"target\":1,\"modifier\":1000}"]),
         "debuff immunity live",
     );
-    refused(
+    is_live(
         &one_runner("order>=2", 500000, &["{\"type\":36,\"target\":1,\"modifier\":1000}"]),
-        "random skill activation",
+        "random any request",
+    );
+    refused(
+        &one_runner("order>=2", 500000, &["{\"type\":36,\"target\":9,\"modifier\":1000,\"targetValue\":2}"]),
+        "random-activation effect targeting another runner",
     );
 }

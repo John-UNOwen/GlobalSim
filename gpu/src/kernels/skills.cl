@@ -56,6 +56,12 @@
 #define SK_FLAG_ANYACT 16
 #define SK_FLAG_WISDOM_FOLLOW 32
 #define SK_FLAG_INIT_DEFER 64
+#define SK_FLAG_GREEN 128
+#define SK_FLAG_PRIMARY 256
+#define SK_FLAG_RSELIG 512
+#define SK_FLAG_RANGOLD 1024
+#define SK_FLAG_RANWHITE 2048
+#define SK_FLAG_GENERAL 4096
 
 #define SK_TERM_ALL_CORNER 0
 #define SK_TERM_STRAIGHT 1
@@ -176,7 +182,7 @@
 #define SK_S_DISABLED 4
 
 // Word layout of one record's state block (SKR_STRIDE words).
-#define SKR_STRIDE 8
+#define SKR_STRIDE 20
 #define SKR_STATE 0
 #define SKR_NWIN 1
 #define SKR_SINGLE 2
@@ -184,6 +190,12 @@
 #define SKR_AWIN0 4
 #define SKR_AWIN1 5
 #define SKR_USED 6         // the record owner has activated this skill id
+#define SKR_AA_RUN 7       // a delayed running activation exists for this record
+#define SKR_AA_UNAPPLIED 8 // activations queued for this record's next turn
+#define SKR_GREEN 9        // this (runner, skill id) counted in the green set
+#define SKR_RESERVED 10    // the random-skill reservation picked this record
+#define SKR_AA_COUNT 11    // per-effect-slot delivered counts, SKR_AA_COUNT + e
+#define SKR_WISFAIL 19     // the ordinary lottery failed; only reservations fire
 
 // Double layout of one record's dynamic block (SKD_STRIDE doubles). The
 // effect timers are indexed by effect slot; an effect fires at most once per
@@ -440,6 +452,13 @@ static void sk_init_triggers(__global const uint* sk, __global uint* sks,
             sks[SKR_STRIDE * rec + SKR_USED] = 0u;
             sks[SKR_STRIDE * rec + SKR_AWIN0] = 0u;
             sks[SKR_STRIDE * rec + SKR_AWIN1] = 0u;
+            sks[SKR_STRIDE * rec + SKR_AA_RUN] = 0u;
+            sks[SKR_STRIDE * rec + SKR_AA_UNAPPLIED] = 0u;
+            sks[SKR_STRIDE * rec + SKR_GREEN] = 0u;
+            sks[SKR_STRIDE * rec + SKR_RESERVED] = 0u;
+            for (int w = SKR_AA_COUNT; w < SKR_STRIDE; w++) {
+                sks[SKR_STRIDE * rec + w] = 0u;
+            }
             const uint dead = (rd[2] & SK_FLAG_DEAD) ? 1u : 0u;
             int mcount = 0;
             if (dead) {
@@ -608,6 +627,10 @@ static void sk_init_wisdom(__global const uint* sk, __global uint* sks,
             }
             if (!enabled && sks[SKR_STRIDE * rec + SKR_STATE] == (uint)SK_S_READY) {
                 sks[SKR_STRIDE * rec + SKR_STATE] = (uint)SK_S_DISABLED;
+                // A retained primary stays pending for a reservation fire;
+                // the extra condition of the ordinary path never holds again
+                // (race_solver_builder.rs:1002-1035).
+                sks[SKR_STRIDE * rec + SKR_WISFAIL] = 1u;
             }
             if (enabled) mult *= as_float(rd[17]);
         }

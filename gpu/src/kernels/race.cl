@@ -482,11 +482,11 @@ static int race_tick(__global uint* scr, __global uint* si, __global float* sf,
     // expiry and cooldown start, then the priority passes with their
     // fire gate, then the live Horse rows the sample below reads.
     if (sk_on) {
-        skills_advance(skt, sks, skd, scr, sd, dt, n, dist_f);
+        skills_advance(skt, sks, skd, scr, si, sd, st, dt, n, dist_f, bank, paired);
         skills_scan(skt, sks, skd, scr, si, sd, shl, rs, pd, sf,
-            course_distance, 1, n, dist_f, 0, ev, st);
+            course_distance, 1, n, dist_f, 0, ev, st, bank, paired);
         skills_scan(skt, sks, skd, scr, si, sd, shl, rs, pd, sf,
-            course_distance, 0, n, dist_f, 0, ev, st);
+            course_distance, 0, n, dist_f, 0, ev, st, bank, paired);
         sk_columns(skt, scr, sd, n);
     }
     // blocking_sample over the post-skill rows, which skills left alone.
@@ -917,6 +917,20 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         si[SI_SPOT_TOKEN + r] = 0u;
         si[SI_DUEL_TOKEN + r] = 0u;
         si[SI_CPFLAGS + r] = 0u;
+        // The ordered additional-activation walk, its pending overtake queue,
+        // the late-corner and green tallies, and the random-skill requests.
+        si[SI_LCO + r] = 0u;
+        si[SI_PENDN + r] = 0u;
+        si[SI_GREEN + r] = 0u;
+        si[SI_AANU + r] = 0u;
+        si[SI_AARET + r] = 0u;
+        si[SI_RESRV + r] = 0u;
+        sd[SD_AFLOOR + r] = -1e300;
+        sd[SD_RGOLD + r] = 0.0;
+        sd[SD_RANY + r] = 0.0;
+        for (int w = 0; w <= SK_RUNN; w++) {
+            scr[SK_RUN + r * (1 + SK_RUNN) + w] = 0u;
+        }
         sd[SD_SPOT_TIMER + r] = 0.0;
         sd[SD_CP_GAUGE + r] = 0.0;
         sd[SD_CP_PREVRATE + r] = 0.0;
@@ -1059,6 +1073,12 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         sd[SD_SECMOD + 24 * RACE_MAXR + r] = 0.0;
         sd[SD_PKCOEF + r] = 1.0;
     }
+    if (sk_on) {
+        // The additional-activation token pool starts empty.
+        for (int p = 0; p < SK_AAPN; p++) {
+            scr[SK_AAP + p * SK_AAPW] = 0u;
+        }
+    }
 
     // RaceField::new runs update() once: at zero positions that publishes
     // rank i+1, order 0..n, prev rank 0 and the min-style leader as section
@@ -1082,9 +1102,9 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
     // first pass run every effect duration one tick long.
     if (sk_on) {
         skills_scan(skt, sks, skd, scr, si, sd, shl, rs, pd, sf,
-            course_distance, 1, n, dist_f, 1, ev, st);
+            course_distance, 1, n, dist_f, 1, ev, st, bank, paired);
         skills_scan(skt, sks, skd, scr, si, sd, shl, rs, pd, sf,
-            course_distance, 0, n, dist_f, 1, ev, st);
+            course_distance, 0, n, dist_f, 1, ev, st, bank, paired);
         sk_columns(skt, scr, sd, n);
     }
 

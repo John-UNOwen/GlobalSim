@@ -67,6 +67,12 @@ pub const SK_FLAG_DEAD: u32 = 8;
 pub const SK_FLAG_ANYACT: u32 = 16;
 pub const SK_FLAG_WISDOM_FOLLOW: u32 = 32;
 pub const SK_FLAG_INIT_DEFER: u32 = 64;
+pub const SK_FLAG_GREEN: u32 = 128;
+pub const SK_FLAG_PRIMARY: u32 = 256;
+pub const SK_FLAG_RSELIG: u32 = 512;
+pub const SK_FLAG_RANGOLD: u32 = 1024;
+pub const SK_FLAG_RANWHITE: u32 = 2048;
+pub const SK_FLAG_GENERAL: u32 = 4096;
 
 pub const SK_TERM_ALL_CORNER: u32 = 0;
 pub const SK_TERM_STRAIGHT: u32 = 1;
@@ -174,6 +180,7 @@ pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
         neff: 0,
         nterm: 0,
         narm: 0,
+        team_stats: Vec::new(),
     };
     let skill_data = match root.get("skillData") {
         Some(v) => v,
@@ -188,6 +195,7 @@ pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
         return c.finish();
     }
     let entries: Vec<&Value> = horses.as_array().map(|a| a.iter().collect()).unwrap_or_default();
+    c.pack_team_stats(horses);
     for (r, horse) in entries.iter().enumerate() {
         let skills = match horse.get("skills") {
             Some(v) => v,
@@ -264,6 +272,9 @@ struct Compiler {
     neff: usize,
     nterm: usize,
     narm: usize,
+    // The engine's per-runner team stat totals (lib.rs PreparedRoster::new,
+    // the retail_runtime branch), read by the value_usage 3 to 7 tier fold.
+    team_stats: Vec<[f64; 5]>,
 }
 
 fn f64_words(v: f64) -> [u32; 2] {
@@ -507,6 +518,14 @@ impl Compiler {
             // The engine keeps a primary white/gold/evolution record alive after
             // its trigger ends, which the kernel mirrors as a retained record.
             let retain = alt_index == 0 && matches!(rarity, 1 | 2 | 6);
+            // The green tag marks the id for the activated_green_skills set,
+            // and the master flag gates random re-activation (lib.rs:187-193).
+            let green = def
+                .get("tags")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_f64).any(|t| (601.0..=615.0).contains(&t)))
+                .unwrap_or(false);
+            let general = def.get("isGeneralSkill").and_then(Value::as_bool).unwrap_or(true);
 
             let condition = alt.get("condition").and_then(Value::as_str).unwrap_or("");
             let terms = match parse_terms(condition) {
@@ -912,10 +931,14 @@ impl Compiler {
                 && groups.len() <= 1
                 && pre_text.is_empty()
                 && leaves.iter().all(|l| matches!(l, Leaf::True));
+            // The random-activation candidate filter keeps a record only when
+            // every effect has a non-negative duration and a type past
+            // WisdomUp that is not AllStatusUp (race_solver.rs:2710-2711).
+            let mut selig = true;
             for ef in effect_list {
                 let kind = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
                 if !matches!(kind, 1 | 4 | 5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 14
-                    | 21 | 22 | 27 | 28 | 29 | 31 | 35 | 38)
+                    | 21 | 22 | 27 | 28 | 29 | 31 | 35 | 36 | 37 | 38)
                 {
                     let reason = match kind {
                         32 => "all-stat bump is a mid-race stat write with no kernel consumer"
@@ -923,9 +946,6 @@ impl Compiler {
                         33 | 34 => {
                             "has no SkillType variant (retail builder errors, no-ffi degrades to Noop)"
                         }
-                            .to_string(),
-                        36 | 37 => "random skill activation re-activates another skill via an \
-                                   activation-time draw"
                             .to_string(),
                         other => format!("type {other} is not ported"),
                     };
@@ -936,6 +956,14 @@ impl Compiler {
                 if !(matches!(target, 1 | 4 | 9 | 10) || (target == 21 && kind == 13)) {
                     self.unsupported(format!(
                         "skill {sid} effect target {target} is not ported"
+                    ));
+                    return;
+                }
+                // The random-activation request is a self-side effect only;
+                // delivery to another runner has no reservation owner.
+                if matches!(kind, 36 | 37) && target != 1 {
+                    self.unsupported(format!(
+                        "skill {sid} random-activation effect targeting another runner is not ported"
                     ));
                     return;
                 }
@@ -951,18 +979,17 @@ impl Compiler {
                 }
                 // The extra activation is enqueued into running_skills and
                 // applied on the running skill's own turn (race_solver.rs:1841).
-                if ef.get("additionalActivate").and_then(Value::as_i64).unwrap_or(0) != 0 {
+                // Only the token-registering self kinds carry a follow-up
+                // application path in the kernel.
+                let aa = ef.get("additionalActivate").and_then(Value::as_i64).unwrap_or(0);
+                if aa != 0 && !(target == 1 && matches!(kind, 27 | 28 | 31)) {
                     self.unsupported(format!(
-                        "skill {sid} additionalActivate defers the extra activation to the \
-                         running skill's own turn, not the firing scan pass"
+                        "skill {sid} additionalActivate {aa} on type {kind} target {target} is not ported"
                     ));
                     return;
                 }
                 let value_usage = ef.get("valueUsage").and_then(Value::as_i64).unwrap_or(1) as i32;
-                // Usages 3 to 7, 10 and 12 13 fold from roster stats, wins, fans
-                // and the displayed-stat tier once the roster read reaches the
-                // table. 8, 9, 11 and 14 need a draw or runtime counter instead.
-                if matches!(value_usage, 3..=14) {
+                if !(1..=14).contains(&value_usage) {
                     self.unsupported(format!(
                         "skill {sid} effect value_usage {value_usage} is not ported"
                     ));
@@ -977,7 +1004,7 @@ impl Compiler {
                     Some(Some(m)) => m,
                     _ => level_multiplier(kind, level),
                 };
-                let modifier = retail_skill_value(raw, multiplier);
+                let modifier = self.value_fold(runner, horse, value_usage, retail_skill_value(raw, multiplier));
                 // The mid-race stat bump has no kernel consumer and moves live
                 // engine state the kernel caches, so only construction-time
                 // fires of these kinds are portable.
@@ -993,12 +1020,16 @@ impl Compiler {
                 let target_value =
                     ef.get("targetValue").and_then(Value::as_f64).unwrap_or(0.).max(0.0);
                 let target_value = target_value.min(SK_RMAX as f64) as u32;
+                if !(base_duration >= 0.0 && kind > 5 && kind != 32) {
+                    selig = false;
+                }
                 let at = SK_EFFECTS + SK_ESTRIDE * self.neff;
                 self.words[at] = kind as u32;
                 self.words[at + 1] = target as u32;
                 self.words[at + 2] = value_usage as u32;
                 self.words[at + 3] = duration_usage as u32;
                 self.words[at + 4] = target_value;
+                self.words[at + 5] = aa as u32;
                 let w = f64_words(modifier);
                 self.words[at + 6] = w[0];
                 self.words[at + 7] = w[1];
@@ -1034,7 +1065,13 @@ impl Compiler {
                 | (if sampled_count == 1 && !dead { SK_FLAG_SAMPLED } else { 0 })
                 | (if dead { SK_FLAG_DEAD } else { 0 })
                 | (if anyact { SK_FLAG_ANYACT } else { 0 })
-                | (if init_defer { SK_FLAG_INIT_DEFER } else { 0 });
+                | (if init_defer { SK_FLAG_INIT_DEFER } else { 0 })
+                | (if green { SK_FLAG_GREEN } else { 0 })
+                | (if alt_index == 0 { SK_FLAG_PRIMARY } else { 0 })
+                | (if selig { SK_FLAG_RSELIG } else { 0 })
+                | (if matches!(rarity, 2 | 6) { SK_FLAG_RANGOLD } else { 0 })
+                | (if rarity == 1 { SK_FLAG_RANWHITE } else { 0 })
+                | (if general { SK_FLAG_GENERAL } else { 0 });
             self.words[at + 3] = priority as u32;
             self.words[at + 4] = rarity;
             self.words[at + 5] = (self.neff - eff_base) as u32;
@@ -1081,6 +1118,99 @@ impl Compiler {
         }
         (list.len(), base)
     }
+
+    fn pack_team_stats(&mut self, horses: &Value) {
+        let mut totals: std::collections::BTreeMap<i64, [f64; 5]> =
+            std::collections::BTreeMap::new();
+        let mut teams: Vec<i64> = Vec::new();
+        for h in horses.as_array().map(|a| a.iter()).unwrap_or_default() {
+            let mood = horse_mood(h);
+            let rank = horse_team_rank(h);
+            let team = h.get("teamId").and_then(Value::as_f64).unwrap_or(0.0) as i64;
+            let mut own = [0.0f64; 5];
+            {
+                let total = if team == 0 {
+                    &mut own
+                } else {
+                    totals.entry(team).or_insert([0.0; 5])
+                };
+                for i in 0..5 {
+                    total[i] = (total[i] as f32 + ref_ranked_base_stat(horse_raw_stat(h, i), mood, rank))
+                        as f64;
+                }
+            }
+            teams.push(team);
+            self.team_stats.push(own);
+        }
+        for (i, team) in teams.iter().enumerate() {
+            if *team != 0 {
+                self.team_stats[i] = totals[team];
+            }
+        }
+    }
+
+    /// `prepare()`'s value_usage tiers (race_solver_builder.rs:908-939),
+    /// folded into the level-resolved modifier. Every compiled race runs with
+    /// runtime_phase true (the host flags the rest), so the f32 round trip and
+    /// the sentinel factors apply. Usages outside the fold tiers pass through
+    /// for the kernel's runtime branches.
+    fn value_fold(&self, runner: usize, horse: &Value, value_usage: i32, modifier: f64) -> f64 {
+        if value_usage == 13 {
+            let raw_max = (0..5).fold(0.0f64, |acc, i| acc.max(horse_raw_stat(horse, i)));
+            let coef = if raw_max < 600.0 {
+                0.800000011920929
+            } else if raw_max < 800.0 {
+                0.8999999761581421
+            } else if raw_max < 1000.0 {
+                1.0
+            } else if raw_max < 1100.0 {
+                1.100000023841858
+            } else {
+                1.2000000476837158
+            };
+            return (modifier * coef) as f32 as f64;
+        }
+        if !matches!(value_usage, 3..=7 | 10 | 12) {
+            return modifier;
+        }
+        let (value, bounds) = match value_usage {
+            3..=7 => {
+                let own = || {
+                    let mood = horse_mood(horse);
+                    let rank = horse_team_rank(horse);
+                    let mut stats = [0.0f64; 5];
+                    for (i, stat) in stats.iter_mut().enumerate() {
+                        *stat = ref_ranked_base_stat(horse_raw_stat(horse, i), mood, rank) as f64;
+                    }
+                    stats
+                };
+                let stats = self.team_stats.get(runner).copied().unwrap_or_else(own);
+                (stats[(value_usage - 3) as usize], [1200.0, 1800.0, 2600.0, 3600.0])
+            }
+            10 => (
+                horse.get("careerWins").and_then(Value::as_f64).unwrap_or(0.0).max(0.0),
+                [6.0, 14.0, 18.0, 25.0],
+            ),
+            _ => (
+                horse.get("fans").and_then(Value::as_f64).unwrap_or(0.0).max(0.0),
+                [20000.0, 50000.0, 100000.0, 160000.0],
+            ),
+        };
+        let tier = bounds.iter().filter(|b| **b <= value).count();
+        let mut factor = match tier {
+            0 => 0.8,
+            1 => 0.9,
+            2 => 1.0,
+            3 => 1.1,
+            _ => 1.2,
+        };
+        if (matches!(value_usage, 3..=7) && value >= 99999.0)
+            || (value_usage == 12 && value >= 99999999.0)
+        {
+            factor = 1.0;
+        }
+        (modifier * factor) as f32 as f64
+    }
 }
 
 /// Retail `retail_skill_value` from the builder: master coefficient /10000
@@ -1094,6 +1224,50 @@ fn retail_skill_value(raw: f64, multiplier: f64) -> f64 {
         multiplier as f32
     };
     ((raw as f32 * 0.0001_f32) * coefficient) as f64
+}
+
+// Source-pinned mirrors of the vendored stat chain the team totals and the
+// tier fallback read: race_solver_builder.rs adjust_overcap and
+// team_rank_bonus, retail_initialization.rs initial_base_wisdom.
+const STAT_KEYS: [&str; 5] = ["speed", "stamina", "power", "guts", "wisdom"];
+
+fn horse_raw_stat(horse: &Value, i: usize) -> f64 {
+    horse.get(STAT_KEYS[i]).and_then(Value::as_f64).unwrap_or(0.0)
+}
+
+fn horse_mood(horse: &Value) -> i32 {
+    horse.get("mood").and_then(Value::as_f64).map(|n| n as i32).unwrap_or(0)
+}
+
+fn horse_team_rank(horse: &Value) -> i32 {
+    horse.get("teamRank").and_then(Value::as_f64).unwrap_or(0.0) as i32
+}
+
+fn ref_adjust_overcap(stat: f64) -> f64 {
+    if stat > 1200.0 {
+        1200.0 + (stat - 1200.0) / 2.0
+    } else {
+        stat
+    }
+}
+
+fn ref_team_rank_bonus(rank: i32) -> f32 {
+    if rank <= 0 {
+        return 0.0;
+    }
+    for (threshold, bonus) in [(6, 50.0f32), (11, 30.0), (16, 20.0), (21, 10.0), (26, 0.0), (99999, 0.0)]
+    {
+        if rank < threshold {
+            return bonus;
+        }
+    }
+    0.0
+}
+
+fn ref_ranked_base_stat(raw: f64, mood: i32, rank: i32) -> f32 {
+    let base = ref_adjust_overcap(raw) as f32 + ref_team_rank_bonus(rank);
+    let coefficient = (10000 + 200 * mood.clamp(-2, 2)) as f32 * 0.0001_f32;
+    (base * coefficient).clamp(1.0, 2000.0)
 }
 
 fn level_multiplier(kind: i32, level: i64) -> f64 {
