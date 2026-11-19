@@ -142,7 +142,6 @@ const SRL_HP_OUT_L: usize = SRL_HP_IN_L + 24 * 48;
 
 // Fallback codes the kernel reports, mirrors of race.cl FB_*.
 pub const FB_N: u32 = 1;
-pub const FB_STARTUP: u32 = 3;
 pub const FB_HOST: u32 = 4;
 pub const FB_INIT: u32 = 5;
 pub const FB_GEOMETRY: u32 = 6;
@@ -556,9 +555,16 @@ fn prepare(
     if horses.is_empty() || horses.len() > RACE_MAXR {
         return flagged("roster size outside the kernel's range");
     }
-    if root.get("experimentalRetailStartup").and_then(Value::as_bool) == Some(true) {
-        return flagged("startup mode");
-    }
+    // The engine enables the startup pass when the flag is true and the
+    // runtime is retail (lib.rs:1507-1513); the kernel replays it as one dt=0
+    // tick ahead of the frame-0 capture. A non-boolean flag errors the CPU.
+    let startup = match root.get("experimentalRetailStartup") {
+        None => false,
+        Some(value) => match value.as_bool() {
+            Some(b) => b,
+            None => return flagged("experimentalRetailStartup must be a boolean"),
+        },
+    };
     // The engine enables grid mode whenever the key is present, 21 to 120
     // horses. The kernel has no grid start, so any presence flags the race.
     if root.get("experimentalGrid").is_some() {
@@ -610,6 +616,7 @@ fn prepare(
     ri[RI_SURFACE] = surface as u32;
     ri[RI_PAIRED] =
         (root.get("pairedRandomStreams").and_then(Value::as_bool) == Some(true)) as u32;
+    ri[RI_STARTUP] = startup as u32;
     ri[RI_NSLOPES] = nslopes as u32;
     let temptation = group(group(globals, "parameters")?, "Temptation")?;
     ri[RI_LOT_MIN] = temptation.get_i64("TemptationLotSectionMin")? as u32;
@@ -1399,7 +1406,6 @@ fn read_f64(st: &[u32], word: usize) -> Option<f64> {
 fn kernel_fallback(flag: u32, arg: u32) -> Option<String> {
     (flag != 0).then(|| match (flag, arg) {
         (FB_N, _) => "roster size the kernel rejects".into(),
-        (FB_STARTUP, _) => "startup reached the kernel".into(),
         (FB_HOST, code) => format!("kernel host flag {code}"),
         (FB_INIT, _) => "the initialization chain flagged".into(),
         (FB_GEOMETRY, _) => "geometry rejected a query".into(),

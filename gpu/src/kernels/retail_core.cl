@@ -37,7 +37,7 @@
 #define RI_GROUND 3          // 1..4
 #define RI_SURFACE 4         // 1..2
 #define RI_PAIRED 5          // 1 = pairedRandomStreams (per-runner RUN banks)
-#define RI_STARTUP 6         // 1 = experimentalRetailStartup (fallback)
+#define RI_STARTUP 6         // 1 = experimentalRetailStartup (dt=0 startup tick)
 #define RI_GEOM_ON 7         // 1 = experimentalRetailGeometry
 #define RI_HOST_FLAG 8       // nonzero: the host already knows this race needs
                              // a fallback (skills, startup, no geometry)

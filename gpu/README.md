@@ -56,6 +56,7 @@ Suites:
 | `zero_skill_gate` (gpu + initialization + geometry + race) | See "Zero-skill mixed-style fields" below |
 | `skills_gate` (gpu + initialization + geometry + race) | See "Skills port" below |
 | `app_preset_gate` (gpu + initialization + geometry + race) | Real app mob-preset jobs: zero-fallback compile gate and frame identity both green (see "App mob-preset payloads") |
+| `startup_gate` (gpu + initialization + geometry + race) | Startup pass: the app mob-preset jobs flagged `experimentalRetailStartup: true`, both courses, seeds 1..3: zero fallback, frame identity, and per-race start values against the in-process engine's `retail_initialization::initialize` (see "Startup pass") |
 | `wave1_folds` | Compile-time gates for the request-static condition folds and the multi-alternative rules, both fold directions plus the still-refused names (see "Wave-1 fallback-histogram constructs") |
 | `wave1_gate` (gpu + initialization + geometry + race) | The six Phase A chart variant jobs, course 10504 seeds 1..3: zero fallback and frame identity, plus a v77-roster race firing the any-skill, shadowed-alternative, wisdom-carrier and out-band constructs bit-exact (see "Wave-1 fallback-histogram constructs") |
 | `wave2_folds` | Compile-time gates for the wave-2 dynamic leaves and the roster style-count folds: each live leaf stays live, the sampled and folded shapes, and the still-refused value_usage refusals |
@@ -443,8 +444,8 @@ All comparisons run on the gated B580, and every value is compared through
   pinned only for stream parity. The six stage counters would catch any stream
   shift if skills joined later.
 - Request-level handling stays host-side: the `gate_perm` entry permutation
-  (`src/api.rs`) and the experimental `startup_pass` (`src/lib.rs:828`, a tick,
-  not initialization). The v77 request uses neither.
+  (`src/api.rs`). The experimental `startup_pass` is ported in the race loop,
+  not in this slice (see "Startup pass" below). The v77 request uses neither.
 - The gate pins only the reply fields listed above. Everything a tick writes
   belongs to the loop slice (handoff step 6, remaining).
 
@@ -478,12 +479,14 @@ returns frames plus finish data. `GpuRace` implements `race::RaceRunner`. The
 tick loop runs the runners sequentially in roster order inside one work item,
 so the shared race dice are consumed in the same order the engine's field
 moves them. Paired mode gives every runner its own stream instead (see
-"Paired mode" below). Domain gates run before any launch: the startup pass,
+"Paired mode" below). Domain gates run before any launch: grid mode,
 non-retail runtime and a roster outside the kernel's 1..24 range each return
 the race flagged with its reason instead of launching wrong numbers, and
 skill-bearing fields are gated by the skill compiler (see "Skills port"). A
 field of up to `RACE_MAXR` (24) runners launches unflagged when it has no
-skills or only skills the compiler accepts.
+skills or only skills the compiler accepts. The experimental startup pass is
+ported: `RI_STARTUP` runs one dt=0 tick ahead of the frame-0 capture (see
+"Startup pass" below).
 
 The race's dice stream is the manager RNG cloned at `lib.rs:773`, which is
 after `initialize()` and `initialize_sections_and_rushing()` have consumed
@@ -599,7 +602,51 @@ the engine and the kernel.
   fired on the GPU and the CPU's final-straight duel target bump had no GPU
   match. Set them from the course's straights and corners.
 
-## Skills port (handoff step 7)
+## Startup pass (`experimentalRetailStartup`)
+
+Engine authority: `run_race` takes the `startup_pass` argument (`src/lib.rs:577`,
+parsed as a boolean next to the retail-runtime requirement at `src/api.rs:61-67`),
+and consumes it in exactly one branch (`src/lib.rs:831-833`): one extra
+`field.step_all(0., all)` call between `RaceField::new` and the frame-0 capture.
+At dt=0 `advance_start_delay` (`src/retail_physics.rs:109-121`) returns without
+moving anyone, so the pass publishes only the pre-movement field state: duel
+and lane collect, `prepare_retail_tick`, the two `process_skill_priority` scans
+with live field columns (the loop-pass shape, `src/race_solver.rs:1946`), the
+skill-effect flush and the front-blocker sample.
+
+Kernel side: the loop body moved into `static int race_tick(...)`
+(`gpu/src/kernels/race.cl:381`), parameterized by `dt`, `snap` and `tick`. The
+frame loop calls it with `dt = 0.0666f` and the debug window (`race.cl:1106`).
+when `RI_STARTUP` is set the kernel calls the same function once with
+`dt = 0.0f`, `snap = 0` and `tick = -1`, after the constructor scan and before
+the frame-0 capture (`race.cl:1075`). The frame-0 blocker column reads the live
+sample (`race.cl:1090`), which is the one column the pass can put on the wire.
+The host parses the flag in `prepare` (`race_exec.rs:561`, a non-boolean flags
+the race like the engine errors it) and uploads it as `ri[RI_STARTUP]`
+(`race_exec.rs:619`). `facade::gate_reasons` no longer refuses the flag.
+
+What the gates say (`gpu/tests/startup_gate.rs`): the app's case (b) shape, the
+mob-preset jobs of courses 10504 and 10604 flagged
+`"experimentalRetailStartup": true`, seeds 1..3, twelve races, zero fallback,
+all six replay columns identical through `to_bits()` against the CPU engine,
+`finishTimeRaw` bit-exact. The stage gate pins the kernel's exported start
+delays bit-exact against the in-process engine's own
+`retail_initialization::initialize` (vendored at `gpu/src/lib.rs:43-44`) and
+against the reply's `startDelayTime`: the mob rosters draw 220 to 234 trigger
+draws before the delay stage, which adds exactly one draw per runner, and the
+flag moves nothing in that chain.
+
+The engine fact worth knowing: the flag is output-inert on every shape probed,
+the twelve flagged mob presets and sixteen v77 and solo cases, engine replies
+byte-identical with and without it. The extra dt=0 pass re-evaluates the state
+tick 1 evaluates, with dt=0 timers, and consumes nothing the tick-1 pass does
+not consume anyway, so the stream stays aligned. The port reproduces the
+mechanism, not the outcome: the identity gate covers the flagged engine
+races, the plain gate covers the unflagged ones, and `RI_STARTUP` selects the
+extra call, so both outcomes are pinned wherever the engine ever makes them
+differ.
+
+
 
 Skills ride the same race kernel, and the kernel does not change with the
 skill set. The host compiles every skill of a race into one flat numeric table
@@ -1064,7 +1111,7 @@ offset 32 equal the returned `meta` string exactly (frame rows start at
 `32 + meta_len`). Frame `k` carries time `loop_end(k)`, the engine's f32
 time sum.
 
-A race a gate rejects (startup, grid, non-retail runtime, a roster outside
+A race a gate rejects (grid, non-retail runtime, a roster outside
 1..24, a skill construct the compiler refuses, an event log past `EV_MAX`
 512, or a request that fails to parse) comes back as `fallback` with meta
 and packet None, and the batch's other races run unaffected.
@@ -1138,22 +1185,23 @@ Verified 2026-11-18 on the gated B580 (`single_fp_config 0xbf`,
   equal frame and horse counts, and frame bytes equal to the engine
   `into_binary` packet's (timestamps included), and the meta string equals
   the packet's embedded meta bytes.
-- `a_startup_request_falls_back_and_its_siblings_stay_whole`: a startup
-  request between two runnable siblings answers `fallback` naming the
-  domain, carries no meta or packet, and its siblings keep theirs.
+- `a_startup_request_runs_on_gpu_and_its_siblings_stay_whole`: a startup
+  request between two runnable siblings now runs on the GPU (meta and packet)
+  with no fallback, and its siblings keep theirs.
 - `gate_reasons_names_every_refusal`: every refusal string against
   synthetic device facts (fp64, single and double fp-config bits, and the
-  no-device case), then grid, startup, runtime and roster refusals for the
+  no-device case), then grid, runtime and roster refusals for the
   request. No device is opened.
 - `run_repeated_matches_run_batch_over_64_seeds`: the v77 line-1 request
   (course 10504, 9 runners) with seeds 1..64 through `run_batch` on the
   request repeated and through `run_repeated`: every meta string, packet
   byte and fallback identical.
 - `run_repeated_matches_a_mixed_two_course_batch`: courses 10504 and 10604
-  (9 runners each, so launchable in one batch) plus a startup and an
+  (9 runners each, so launchable in one batch) plus a startup-flagged and an
   unparseable request, `run_batch` on the mixed batch against
-  `run_repeated` per request: all four groups byte-identical, the flagged
-  and unparseable groups carrying the fallback arms.
+  `run_repeated` per request: all four groups byte-identical, the startup
+  group now running on the GPU and only the unparseable group carrying the
+  fallback arm.
 - `injected_geometry_outranks_the_file_copy`: the v77 line-1 race against a
   geometry file whose nearest kind-0 corner event distance is shifted by
   +30 m. The kernel's answer to the injected copy differs from the
@@ -1193,12 +1241,98 @@ and gate:
   other constructs named
   in the `SKILLS_DESIGN.md` matrix. Each
   flags its race with the construct named
-- The experimental startup pass (flagged, gated)
 - Grid mode (`experimentalGrid`): not ported, host-gated. The engine enables
-  it whenever the key is present (21 to 120 horses), so `prepare` flags any
-  request carrying the key
-- Ground and terrain lookups beyond the slope and corner geometry events
+  it when the key is an object with exactly `columns: 20.0` and
+  `rowSpacing: 3.0` and the roster is 21 to 120 horses (`src/lib.rs:262-272`),
+  starting the field on rows 3 m behind the line (`src/lib.rs:274-279`,
+  applied at `src/lib.rs:605-611`). Every kernel scratch stride is sized for
+  24, so `prepare` flags any request carrying the key. The capacity work a
+  port needs is in "Grid capacity plan" below
+- Ground and terrain lookups beyond the slope and corner geometry events.
+  The verified tick loop reads terrain only through the slope regions
+  (`race_solver_retail.rs:833`, ported), the corner events (ported) and the
+  `groundCondition` enum (initialization tables and folded skill leaves), and
+  no course-data field is left outside that set. Any ground channel the
+  non-compact telemetry would want stays unprobed and gated with this entry
 - Full (non-compact) replies: the version keys, `finishTime`, `gutsOrder`,
   `wizOrder`, `runningStyle`, `positioningPhases`, the `actualLastSpurt*`
   pair and the other telemetry channels the compact contract does not read.
   Those races stay on the CPU lanes (see "Batch API").
+
+## Grid capacity plan
+
+The grid port is a capacity job, not a logic job. The kernel's field logic
+is roster-agnostic (every per-runner loop runs `0..n`), and the grid start is
+two more numbers per runner, so the work is sizing every scratch region for
+21 to 120 runners and capping launches by bytes. The table is computed from
+the live `.cl` layout (the calculator reproduces the pinned 24-runner values
+58,588 and 30,424 exactly).
+
+Per race, u32 scratch words / f64 scratch words / frames:
+
+| roster | `SCR_U_WORDS` | `SRL_WORDS` | SD doubles | frames |
+| --- | --- | --- | --- | --- |
+| 24 (today) | 58,588 (pin) | 30,424 (pin) | 2,568 | 6.8 MB |
+| 120, `SK_RMAX` kept | 199,772 | 79,864 | 35,880 | 33.8 MB |
+| 120, `SK_RMAX` 960 | 367,772 | 198,264 | 35,880 | 33.8 MB |
+
+A 64-race launch of 120-runner races: 187 MB of scratch and 2.16 GB of
+frame buffer, about 2.36 GB total. Scratch growth is affordable; the frame
+buffer (`m * RACE_MAX_TICKS * n * 6` f64, `race_exec.rs:1118`) is the wall
+and needs a byte-based launch split (today `run_prepared_mode` only checks
+uniform `n`, `race_exec.rs:958`).
+
+What must change, in order:
+
+1. `retail_core.cl` stride macros: `SD_SLOT`/`SI_SLOT`/`SF_SLOT` are
+   `(n) * 24` and the SD/SI/SF region sizes multiply by a literal 24. The
+   24 is the runner count. Replace with `RACE_MAXR` and raise it to 120.
+   A missed literal silently misplaces a whole bank.
+2. The duel and overtake pair-maps are n²: `SD_DUEL` (`retail_core.cl:433`)
+   and `SD_OVC` (`retail_core.cl:453`) are addressed `slot + other *
+   RACE_MAXR + r`, so each currently occupies 24 columns of the SD region.
+   At 120 they take 120 each and the SD slot map re-derives: `SD_SLOTS`
+   107 to 299, `SD_OVC` from slot 81 to slot 160, `SD_NOUP`/`SD_NODOWN` to
+   280/281. The scratch mirrors in `race_exec.rs:122-141` and the
+   `tests/layout.rs` pins re-pin with it.
+3. `LIST_STRIDE` 48 (`retail_core.cl`, mirror `race_exec.rs:119`) holds the
+   lane target and visible lists, at most n-1 entries: 128 at 120 runners.
+   `CAND_MAX` 101 stays (it sizes the 30 m spurt candidate grid, physics,
+   not roster).
+4. `SK_RMAX` 160 (`skills.cl`, mirror `race_exec.rs:23`) caps skill records
+   per race. A 120-horse field exceeds it, so every grid race with skills
+   would host-flag even after the capacity work. Re-derive from real grid
+   rosters (8 per runner gives 960 and the table above) and keep the
+   compile-time overflow fallback.
+5. `prepare` grid authority (`race_exec.rs:571`, currently a refusal):
+   mirror the engine validation exactly (`src/lib.rs:262-272`, an object of
+   exactly two keys, `columns: 20.0`, `rowSpacing: 3.0`, roster 21 to 120,
+   anything else flagged like the engine errors), then per gate rank compute
+   `lane = (column + (column >= 9 ? 0.6 : 0)) / 18` with `column = rank %
+   20` and `pos = -3 * (rank / 20)` (`src/lib.rs:274-279`), round-trip f32
+   (the engine does, `src/lib.rs:610`), write lane to the existing `pd`
+   slot and the start position to a new `PI_RUNNER0` slot (stride 6 to 7,
+   both sides). The kernel seeds `SD_POS` from it at `race.cl:991` instead
+   of leaving it 0.
+6. `RACE_MAX_TICKS` 6144 stays: the deepest grid start is -15 m (rank 119),
+   under a second of extra running inside the 400 s budget.
+7. The facade adds `experimentalGridVersion: 1` to grid replies (the engine
+   does, `src/lib.rs:1135-1137`).
+8. Gates: grid replays at 21, 24, 40 and 120 runners (synthetic rosters),
+   seeds 1..2, zero fallback, frame identity, tick counts and
+   `finishTimeRaw` against `dep_cpu`, plus the two-start gate: the same
+   21-horse roster without the key runs the normal start (it runs on the
+   GPU today, 21 is inside the current cap) and the two frame-0 lane and
+   position columns must differ, pinning that both starts exist.
+
+Sharp edges to carry into the port:
+- The `column >= 9` grid lane offset applies to the wrapped column, so rows
+  behind the first shift with the first row's inner half. It is a different
+  function of rank than `retail_starting_lane` (track kind and thresholds),
+  and both must stay distinguishable in the frame columns.
+- The grid arm of the two-start gate has negative frame-0 positions; the
+  finish detector and `finishTimeRaw` interpolation read `SD_POS` deltas,
+  so they are sign-safe, but a test asserting non-negative positions would
+  be wrong.
+- Of the 61 literal `24`s in the kernel files, the stride ones all change
+  and a few are genuine constants; each needs triage, not regex.

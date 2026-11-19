@@ -190,10 +190,10 @@ fn compact_meta_and_packet_match_the_engine_lane() {
     }
 }
 
-/// The batch contract's fallback arm: an unsupported request inside a batch
-/// answers with the reason only, and its siblings still get meta and packet.
+/// The startup flag is a ported domain: a flagged request inside a batch
+/// answers with its own meta and packet, and its siblings stay whole.
 #[test]
-fn a_startup_request_falls_back_and_its_siblings_stay_whole() {
+fn a_startup_request_runs_on_gpu_and_its_siblings_stay_whole() {
     let base = v77_line();
     let geometry =
         std::fs::read_to_string(repo_file("data/course_geometry/10504.json")).expect("geometry file");
@@ -213,19 +213,12 @@ fn a_startup_request_falls_back_and_its_siblings_stay_whole() {
     assert_eq!(outcomes.len(), 3);
 
     for (index, outcome) in outcomes.iter().enumerate() {
-        if index == 1 {
-            continue;
-        }
         assert!(
             outcome.meta.is_some() && outcome.packet.is_some() && outcome.fallback.is_none(),
-            "sibling {index} should carry a compact answer, got fallback {:?}",
+            "race {index} should carry a compact answer, got fallback {:?}",
             outcome.fallback
         );
     }
-    let middle = &outcomes[1];
-    let reason = middle.fallback.as_deref().unwrap_or_default();
-    assert!(reason.contains("startup"), "the fallback should name the domain, got {reason:?}");
-    assert!(middle.meta.is_none() && middle.packet.is_none(), "a fallback race carries no meta or packet");
 }
 
 /// `run_repeated` against `run_batch`, the same request and seeds: every
@@ -259,8 +252,9 @@ fn run_repeated_matches_run_batch_over_64_seeds() {
 
 /// The shape `run_batch` supports and `run_repeated` splits: two courses in
 /// one mixed call. Each course answered on its own must byte-equal its slice
-/// of the mixed batch. A flagged and an unparseable request ride along to
-/// pin the fallback arms in both lanes.
+/// of the mixed batch. A startup-flagged request and an unparseable one ride
+/// along: startup now runs, the broken text pins the fallback arm in both
+/// lanes.
 #[test]
 fn run_repeated_matches_a_mixed_two_course_batch() {
     let base = v77_line();
@@ -309,7 +303,10 @@ fn run_repeated_matches_a_mixed_two_course_batch() {
             assert_eq!(&batched.packet, &repeated.packet, "{tag}: packet");
         }
     }
-    assert!(batched[8].fallback.is_some() && batched[8].meta.is_none(), "the startup slice must carry the fallback arm");
+    assert!(
+        batched[8].fallback.is_none() && batched[8].meta.is_some(),
+        "the startup slice must run on the GPU now that startup is ported"
+    );
     assert!(batched[10].fallback.is_some(), "the unparseable slice must carry the fallback arm");
 }
 
@@ -460,8 +457,10 @@ fn gate_reasons_names_every_refusal() {
     );
 
     // Request refusals, in the order the facade's domain gates ask them.
+    // The startup flag is ported, so it no longer refuses; only grid, the
+    // runtime and roster gates stay.
     let startup = r#"{"horses":[{}],"experimentalRetailRuntime":true,"experimentalRetailStartup":true}"#;
-    assert_eq!(facade::gate_reasons(startup, Some(&accepted)).as_deref(), Some("startup mode"));
+    assert_eq!(facade::gate_reasons(startup, Some(&accepted)), None);
     let grid = r#"{"horses":[{}],"experimentalRetailRuntime":true,"experimentalGrid":{}}"#;
     assert_eq!(facade::gate_reasons(grid, Some(&accepted)).as_deref(), Some("grid mode"));
     let legacy = r#"{"horses":[{}]}"#;

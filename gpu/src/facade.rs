@@ -252,9 +252,6 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
     if root.get("experimentalGrid").is_some() {
         return Some("grid mode".into());
     }
-    if root.get("experimentalRetailStartup").and_then(Value::as_bool) == Some(true) {
-        return Some("startup mode".into());
-    }
     if root.get("experimentalRetailRuntime").and_then(Value::as_bool) != Some(true) {
         return Some("non-retail runtime".into());
     }
