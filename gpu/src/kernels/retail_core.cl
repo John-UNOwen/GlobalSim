@@ -170,19 +170,21 @@
 #define PL_OUTER_COEFFICIENT (PL_FRONT_LANE + 11) // laneMoveSpeedOutCoef
 #define PL_ACCELERATION (PL_FRONT_LANE + 12)   // laneMoveAccelMoveSpeedBaseCoef
 // ..: CompeteFight and CompeteTop settings with the per-runner powf
-// precomputes. The duel and spot modifiers are race constants derived from
-// guts, so the host supplies them like PT_POWF (no powf in the kernel).
+// precomputes. With no live GutsUp these stay prepare-baked race constants;
+// with a live one the kernel recomputes the guts-derived words from the
+// field at the same points the engine reads them.
 #define PD_CF_DIST (PL_FRONT_LANE + 16)        // CompeteFight DistanceGap (raw JSON f64)
 #define PD_CF_LANE (PD_CF_DIST + 1)            // CompeteFight LaneGap (raw JSON f64)
 #define PD_CF_SPEED (PD_CF_DIST + 2)           // [3] CompeteFight AddParam1Coef1..3
 #define PD_CF_ACCEL (PD_CF_DIST + 5)           // [3] CompeteFight AddParam2Coef1..3
+#define PD_LIVE_GUTS (PD_CF_DIST + 13)         // 1 when a GutsUp arm can fire mid-race
 #define PD_PM_RANGE (PD_CF_DIST + 8)           // PaseMakerChangeForwardRunningStyleRange
 #define PD_PM_NOTFWD (PD_CF_DIST + 9)          // PaseMakerChangeTopHorseNotMostForwardStyleCount
 #define PD_DTYPE (PD_CF_DIST + 10)             // course distance_type, the asitame coefficient row
 #define PD_FC_HALF0 (PD_CF_DIST + 11)          // final_corner_half start, NaN when the course has none
 #define PD_FC_HALF1 (PD_CF_DIST + 12)          // final_corner_half end
 #define PD_RUN0 (PL_FRONT_LANE + 32)           // per runner, stride PD_RUN_STRIDE
-#define PD_RUN_STRIDE 9
+#define PD_RUN_STRIDE 11
 #define PRD_POWF 0             // per-runner spurt powf bits as the integer value
 #define PRD_DUEL_T 1           // duel target-speed modifier, f64
 #define PRD_DUEL_A 2           // duel accel modifier, f64
@@ -192,6 +194,8 @@
 #define PRD_BOOST_WIS 6        // bumped wisdom field f64, 0 when no bump
 #define PRD_RUSH_BONUS 7       // rushing bonus f32 bits as the integer value
 #define PRD_WIS_ACC 8          // bumped wisdom accumulator f64, NaN when no bump
+#define PRD_GUTS_ACC 9         // bumped guts accumulator f64, NaN when no bump
+#define PRD_SPOT_PROF 10       // strategy proficiency scaling the live spot duration
 
 // ---------------------------------------------------------------------------
 // Per-race scratch bases, u32 words at scratch + SCR_* (the im_* blocks) and
@@ -445,7 +449,7 @@
 // Per-race scratch f64, one RACE_MAXR-wide column per slot (field base +
 // runner index). Array fields keep RACE_MAXR slots per element:
 // base + element * RACE_MAXR + r.
-#define SD_SLOTS (2 * RACE_MAXR + 76)
+#define SD_SLOTS (2 * RACE_MAXR + 81)
 #define SD_STRIDE (SD_SLOTS * RACE_MAXR)
 #define SD_SLOT(n) ((n) * RACE_MAXR)
 #define SD_POS SD_SLOT(0)
@@ -505,6 +509,11 @@
 #define SD_RANY (SD_RGOLD + RACE_MAXR)
 #define SD_HPW (SD_RANY + RACE_MAXR)        // horse.wisdom field, f64
 #define SD_HPW_A (SD_HPW + RACE_MAXR)       // retail_stat_values[4], f64 of an f32 accumulator
+#define SD_HPG (SD_HPW_A + RACE_MAXR)       // horse.guts field, f64
+#define SD_HPG_A (SD_HPG + RACE_MAXR)       // retail_stat_values[3], f64 of an f32 accumulator
+#define SD_SPOT_MOD (SD_HPG_A + RACE_MAXR)  // spot struggle modifier, captured at entry
+#define SD_DUEL_T (SD_SPOT_MOD + RACE_MAXR) // duel target-speed modifier, captured at entry
+#define SD_DUEL_A (SD_DUEL_T + RACE_MAXR)   // duel accel modifier, captured at entry
 #define SRL_RUNNER 0
 #define SRL_HP SD_STRIDE          // hp columns, SH_STRIDE per runner
 #define SH_STRIDE 8
@@ -648,6 +657,32 @@ static float phys_maximum_spurt_speed(__global const double* pd, const float spe
     const double guts_add = (double)as_float((uint)powf_word) * (double)phys_f(pd, PT_SPURT + 4);
     return convert_float_rte(
         ((double)base * (double)phys_f(pd, PT_SPURT + 5) + addition) + guts_add);
+}
+
+// Under PD_LIVE_GUTS these replace the prepare-baked PRD words, evaluated at
+// the points the engine reads its live horse.guts: the spurt plan closure,
+// the duel and spot entry snapshots. Each mirrors the host bake and the
+// engine term for term, and gs_pow and gs_powf are the bit-exact ucrtbase
+// ports gated in gpu/tests/wave8_powf_gate.rs.
+static double sk_powf_word(__global const double* pd, const double field) {
+    const float argument = bounded_stat(convert_float_rte(field)) * phys_f(pd, PT_SPURT + 2);
+    return (double)as_uint(gs_powf(argument, phys_f(pd, PT_SPURT + 3)));
+}
+
+static double sk_duel_modifier(__global const double* pd, const uint cf, const double field) {
+    const float argument = convert_float_rte(fmax(field, 1.0)) * phys_f(pd, cf);
+    const float power = convert_float_rte(gs_pow((double)argument, (double)phys_f(pd, cf + 1)));
+    return (double)(power * phys_f(pd, cf + 2));
+}
+
+static double sk_spot_modifier(const double field) {
+    const float argument = convert_float_rte(fmax(field, 1.0)) * 500.0f;
+    const float power = convert_float_rte(gs_pow((double)argument, (double)0.6f));
+    return (double)(power * 0.0001f);
+}
+
+static double sk_spot_duration(__global const double* pd, const uint base, const double field) {
+    return gs_pow(700.0 * fmax(field, 1.0), 0.5) * 0.012 * pd[base + PRD_SPOT_PROF];
 }
 
 // target_speed_indices from retail_physics.rs.
@@ -2629,17 +2664,22 @@ static void duel_collect(__global uint* si, __global float* sf, __global double*
     }
 }
 
-static void duel_activate(__global uint* si, const int x) {
+static void duel_activate(__global uint* si, __global double* sd, __global const double* pd, const int x) {
     si[SI_DUEL_ACTIVE + x] = 1u;
     si[SI_DUEL_FIGHT + x] += 1u;
     si[SI_DUEL_TOKEN + x] = 1u;
+    if ((int)pd[PD_LIVE_GUTS]) {
+        // activate_retail_duel snapshots both modifiers from the live field.
+        sd[SD_DUEL_T + x] = sk_duel_modifier(pd, PD_CF_SPEED, sd[SD_HPG + x]);
+        sd[SD_DUEL_A + x] = sk_duel_modifier(pd, PD_CF_ACCEL, sd[SD_HPG + x]);
+    }
 }
 
 // update_dueling, the retail path. duel_low_hp uses the plain f64 ratio,
 // eligible_straight uses the preupdate snapshots with the corner state, and
 // the duel draws no RNG.
 static void duel_update(__global uint* si, __global const float* sf,
-    __global const double* sd, __global double* shl, const int r, const int n,
+    __global double* sd, __global double* shl, __global const double* pd, const int r, const int n,
     const double course_distance, const int has_corner_events) {
     if (!has_corner_events) {
         return;
@@ -2717,9 +2757,9 @@ static void duel_update(__global uint* si, __global const float* sf,
         : (own_group >= 0 ? own_group : (r < j ? r : j));
     if (own_group < 0) si[SI_DUEL_GROUP + r] = (uint)group;
     if (peer_group < 0) si[SI_DUEL_GROUP + j] = (uint)group;
-    duel_activate(si, r);
+    duel_activate(si, sd, pd, r);
     if (!(int)si[SI_DUEL_ACTIVE + j] && (int)si[SI_DUEL_FIGHT + j] == 0) {
-        duel_activate(si, j);
+        duel_activate(si, sd, pd, j);
     }
 }
 
@@ -2841,7 +2881,15 @@ static void spot_update(__global uint* scr, __global uint* si, __global double* 
         si[SI_SPOT_ACTIVE + j] = 1u;
         si[SI_SPOT_STARTED + j] = 1u;
         si[SI_SPOT_TOKEN + j] = 1u;
-        sd[SD_SPOT_TIMER + j] = -pd[base + PRD_SPOT_D];
+        if ((int)pd[PD_LIVE_GUTS]) {
+            // start_spot_struggle snapshots the modifier and the timer from
+            // the live field.
+            const double field = sd[SD_HPG + j];
+            sd[SD_SPOT_MOD + j] = sk_spot_modifier(field);
+            sd[SD_SPOT_TIMER + j] = -sk_spot_duration(pd, base, field);
+        } else {
+            sd[SD_SPOT_TIMER + j] = -pd[base + PRD_SPOT_D];
+        }
     }
 }
 
@@ -4172,7 +4220,8 @@ static void sk_stat_refresh(__global const uint* si, __global double* sd,
     }
     // initial_hp and hp_guts_factor rewrite max_hp and SF_HPG with
     // bit-identical values: strategy, distance and their stat inputs are
-    // unchanged, and GutsUp never fires mid-race in this port.
+    // unchanged, and hp_guts_factor is an init-only quantity the engine
+    // never recomputes from the mid-race guts field.
     const double max_hp = shl[r * SH_STRIDE + SH_MAX];
     const double spent = max_hp - shl[r * SH_STRIDE + SH_HP];
     shl[r * SH_STRIDE + SH_HP] = (double)fmin(
@@ -4294,7 +4343,8 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                         // (retail_states.rs:154-158, race_solver.rs:2584-2590).
                         sf[SF_RS_FORCED + j] = fmax(convert_float_rte(modifier), 0.f);
                     }
-                    if (kind == SK_EFF_SPEEDUP || kind == SK_EFF_WISDOMUP) {
+                    if (kind == SK_EFF_SPEEDUP || kind == SK_EFF_WISDOMUP
+                        || kind == SK_EFF_GUTSUP) {
                         // apply_external_effect with the effect rewritten to
                         // the self target (race_field.rs:467-477): the stat
                         // write, then the follow-up path's refresh, per
@@ -4312,12 +4362,32 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                             sf[SF_SPURT_MAX + j] = convert_float_rte(
                                 phys_maximum_spurt_speed(pd, speed, (int)si[SI_STRATEGY + j],
                                     aptitude, dist_f,
-                                    pd[PD_RUN0 + j * PD_RUN_STRIDE + PRD_POWF]));
-                        } else {
+                                    (int)pd[PD_LIVE_GUTS] ? sk_powf_word(pd, sd[SD_HPG + j])
+                                        : pd[PD_RUN0 + j * PD_RUN_STRIDE + PRD_POWF]));
+                        } else if (kind == SK_EFF_WISDOMUP) {
                             const float value =
                                 (float)sd[SD_HPW_A + j] + convert_float_rte(modifier);
                             sd[SD_HPW_A + j] = (double)value;
                             sd[SD_HPW + j] = fmin(fmax((double)value, 1.0), 2000.0);
+                        } else {
+                            const float value =
+                                (float)sd[SD_HPG_A + j] + convert_float_rte(modifier);
+                            sd[SD_HPG_A + j] = (double)value;
+                            sd[SD_HPG + j] = fmin(fmax((double)value, 1.0), 2000.0);
+                            // The step head recomputes minimum and the spurt
+                            // plan's maximum from horse.guts every tick, so
+                            // both captured caches move with the field now.
+                            sf[SF_BMIN_VAL + j] = phys_minimum_speed(pd,
+                                convert_float_rte(sd[SD_HPG + j]), dist_f);
+                            const float speed = convert_float_rte(
+                                fmin(fmax(sd[SD_HPS + j], 1.0), 2000.0));
+                            const int table[8] =
+                                {10500, 10000, 9000, 8000, 6000, 4000, 2000, 1000};
+                            const float aptitude =
+                                convert_float_rte((float)table[(int)si[SI_DISTAPT + j]]) * 0.0001f;
+                            sf[SF_SPURT_MAX + j] = convert_float_rte(
+                                phys_maximum_spurt_speed(pd, speed, (int)si[SI_STRATEGY + j],
+                                    aptitude, dist_f, sk_powf_word(pd, sd[SD_HPG + j])));
                         }
                         sk_stat_refresh(si, sd, shl, sf, distance, j);
                     }
@@ -4371,7 +4441,8 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                 convert_float_rte((float)table[(int)si[SI_DISTAPT + r]]) * 0.0001f;
             sf[SF_SPURT_MAX + r] = convert_float_rte(phys_maximum_spurt_speed(pd, speed,
                 (int)si[SI_STRATEGY + r], aptitude, dist_f,
-                pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_POWF]));
+                (int)pd[PD_LIVE_GUTS] ? sk_powf_word(pd, sd[SD_HPG + r])
+                    : pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_POWF]));
             continue;
         }
         if (kind == SK_EFF_WISDOMUP) {
@@ -4383,6 +4454,27 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                 const float value = (float)sd[SD_HPW_A + r] + convert_float_rte(modifier);
                 sd[SD_HPW_A + r] = (double)value;
                 sd[SD_HPW + r] = fmin(fmax((double)value, 1.0), 2000.0);
+            }
+            continue;
+        }
+        if (kind == SK_EFF_GUTSUP) {
+            // A static fire is already inside the PRD-baked init inputs. A
+            // mid-race fire moves the accumulator and the live field; the
+            // minimum and spurt caches follow it, since the engine's step
+            // head recomputes both from horse.guts every tick.
+            if (init_pass == 0 && (rd[2] & SK_FLAG_BUMPED) == 0) {
+                const float value = (float)sd[SD_HPG_A + r] + convert_float_rte(modifier);
+                sd[SD_HPG_A + r] = (double)value;
+                sd[SD_HPG + r] = fmin(fmax((double)value, 1.0), 2000.0);
+                sf[SF_BMIN_VAL + r] = phys_minimum_speed(pd,
+                    convert_float_rte(sd[SD_HPG + r]), dist_f);
+                const float speed =
+                    convert_float_rte(fmin(fmax(sd[SD_HPS + r], 1.0), 2000.0));
+                const int table[8] = {10500, 10000, 9000, 8000, 6000, 4000, 2000, 1000};
+                const float aptitude =
+                    convert_float_rte((float)table[(int)si[SI_DISTAPT + r]]) * 0.0001f;
+                sf[SF_SPURT_MAX + r] = convert_float_rte(phys_maximum_spurt_speed(pd, speed,
+                    (int)si[SI_STRATEGY + r], aptitude, dist_f, sk_powf_word(pd, sd[SD_HPG + r])));
             }
             continue;
         }
@@ -4868,7 +4960,8 @@ static void sk_column_one(__global const uint* sk, __global const uint* scr,
 // engine's receiver dropped an expired token before this context is built
 // mid-race_step, which is the same instant the flag clears.
 static int sk_has_speed(__global const uint* sk, __global const uint* scr,
-    __global const uint* si, const int r, const __global double* pd) {
+    __global const uint* si, const int r, __global const double* pd,
+    __global const double* sd) {
     float ordinary = 0.f;
     const __global uint* cq = scr + SK_CSEQ + r * SK_SEQN;
     for (int i = 0; i < SK_SEQN; i++) {
@@ -4887,13 +4980,13 @@ static int sk_has_speed(__global const uint* sk, __global const uint* scr,
         }
         if (tok == SK_TOK_SPOT) {
             if ((int)si[SI_SPOT_TOKEN + r]) {
-                target = target + convert_float_rte(
-                    pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_SPOT_M]);
+                target = target + convert_float_rte((int)pd[PD_LIVE_GUTS]
+                    ? sd[SD_SPOT_MOD + r] : pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_SPOT_M]);
             }
         } else if (tok == SK_TOK_DUEL) {
             if ((int)si[SI_DUEL_TOKEN + r]) {
-                target = target + convert_float_rte(
-                    pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_DUEL_T]);
+                target = target + convert_float_rte((int)pd[PD_LIVE_GUTS]
+                    ? sd[SD_DUEL_T + r] : pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_DUEL_T]);
             }
         } else {
             target = target + sk_tok_value(sk, scr, tok, SK_EFF_TARGET);

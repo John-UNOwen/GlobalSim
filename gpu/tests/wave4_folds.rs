@@ -93,13 +93,13 @@ fn start_delay_cross_target_fires_inert() {
 }
 
 #[test]
-fn stat_kinds_still_refuse_cross_targets() {
-    // GutsUp on another runner needs a mid-race guts powf the kernel bakes at
-    // prepare. SpeedUp and WisdomUp refresh in exact f64, so they cross.
-    refused(
-        &one_runner("order>=2", 500000, &[r#"{"type":4,"target":9,"modifier":1000}"#]),
-        "targeting another runner",
-    );
+fn stat_kinds_cross_with_exact_refresh() {
+    // SpeedUp, GutsUp and WisdomUp write the receiver's live accumulator and
+    // field, so all three cross. The wave-8 field path replaced the earlier
+    // GutsUp refusal.
+    let plan = one_runner("order>=2", 500000, &[r#"{"type":4,"target":9,"modifier":1000}"#]);
+    is_live(&plan, "kind 4 cross");
+    assert!(plan.live_guts, "kind 4 cross flags live guts");
     for kind in [1i64, 5] {
         let effect = format!("{{\"type\":{kind},\"target\":9,\"modifier\":1000}}");
         is_live(&one_runner("order>=2", 500000, &[effect.as_str()]), "stat cross");

@@ -20,9 +20,12 @@ pub const INITIALIZATION_KERNEL_SOURCE: &str = concat!(
 );
 pub const GEOMETRY_KERNEL_SOURCE: &str = include_str!("kernels/geometry.cl");
 // The race kernel reuses the RNG, initialization and geometry ports, so its
-// source is those files concatenated ahead of race.cl.
+// source is those files concatenated ahead of race.cl. The powf port comes
+// right after the rng core so every consumer below sees the helpers.
 pub const RACE_KERNEL_SOURCE: &str = concat!(
     include_str!("kernels/rng_core.cl"),
+    "\n",
+    include_str!("kernels/powf_core.cl"),
     "\n",
     include_str!("kernels/skills.cl"),
     "\n",

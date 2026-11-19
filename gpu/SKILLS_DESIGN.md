@@ -199,12 +199,12 @@ tiers, 3 and 7 are the retail HP tiers). Modifier dispatch follows retail
 - `Vision(8)`: a receiver token in the vision order, whose fold
   `fmax(20 + sum, 0)` in f64 with one `convert_float_rte` feeds the lane
   logic's visible distance.
-- `GutsUp(4)` and `ModifyKakariChance(29)`: portable only as
-  construction-time bumps, the host applies them to the init inputs (stats
-  through the `add_stat_modifier` f32 chain, kakari chance folded into the
-  init roll). A mid-race fire of 4 refuses: its live consumers re-read a
-  `powf` of the runtime guts the prepare bakes once (see Mid-race stat
-  fires below).
+- `GutsUp(4)` and `ModifyKakariChance(29)`: a construction-time fire is a
+  bump the host applies to the init inputs (stats through the
+  `add_stat_modifier` f32 chain, kakari chance folded into the init roll).
+  A mid-race or cross fire of 4 moves the live accumulator and field, and
+  the guts-derived `powf` terms recompute from the field at the points the
+  engine reads them (see Mid-race stat fires below).
 - `WisdomUp(5)`: a construction fire is a bump like those two, and the
   record carries `SK_FLAG_BUMPED` so the kernel's init-pass arms skip the
   write the host already folded. A self mid-race fire needs a phase gate
@@ -520,20 +520,18 @@ Not yet ported (fallback-flagged, plan order in the README):
   no-ffi path degrades to Noop). `36` and `37` (random skill activation,
   `race_solver.rs:2677-2737`) are accepted at self target only.
 - effect targets outside 1, 4, 9, 10 and 21, and target `21` only with kind
-  `13` (the rushing strategy-group receiver set), and kind `4`
-  aimed at another runner (the receiver refresh would re-sample the guts
-  `powf` terms the prepare bakes once). `10`
+  `13` (the rushing strategy-group receiver set). `10`
   `MultiplyStartDelay` at another runner fires inert in retail (the receiver
   keeps its init-applied gate) and is accepted. The same-team debuff drop is a
   real delivery gate now, not a roster flag: each runner's fixed team id reaches
   the kernel (`RR_TEAM` into `SI_TEAM`) and `skills_fire` drops same-team
   receivers off the capped receiver list, matching `race_field.rs:458-461`.
   The immunity arm of that filter reads the `SD_IMMUNE` presence cell.
-- a mid-race (non-constructor) fire of `GutsUp(4)`, a self `WisdomUp(5)` whose
-  arms are not all gated false at time zero (an ungated arm short-circuits the
-  field leaves and can fire in the constructor pass, ahead of the init draws
-  the kernel bakes), and more than 8 effects on one record (the per-record
-  token cap the receiver orders index)
+- a self `GutsUp(4)` or `WisdomUp(5)` whose arms are not all gated false at
+  time zero (an ungated arm short-circuits the field leaves and can fire in
+  the constructor pass, ahead of the init draws the kernel bakes), and more
+  than 8 effects on one record (the per-record token cap the receiver orders
+  index)
 - structural: `value_usage` outside 1 to 14 (usages 3 to 7, 10, 12 and 13 fold
   at compile from request-static data, `race_solver_builder.rs:908-939`;
   usages 8 and 9 draw `RetailRandom` at each application and usages 11 and 14
@@ -622,16 +620,26 @@ power, untouched by kinds 1 and 5. `sk_stat_refresh` (`retail_core.cl`)
 mirrors the three live writes. Cross SpeedUp additionally repatches the
 cached spurt maximum from the bumped speed, the value the engine's plan
 closure recomputes from the live field at the next spurt decision.
-GutsUp, self or cross, stays refused at a mid-race fire: the same plan
-closure, the duel entry and the spot entry each read
-`powf(bounded_stat(guts) * spurt[2], spurt[3])` of the runtime guts
-(`retail_physics.rs:362`, `race_solver.rs:2928-2939` and `3194-3207`) and
-the kernel carries that term as one prepare-baked word per runner
-(`PRD_POWF`), so a live guts change would re-roll lotteries the port cannot
-replay. The self WisdomUp phase gate (`skills_compile.rs`, `phase_gated`):
-phase zero is below every accepted gate, so the record cannot fire in the
-engine's constructor pass, where the field move would land ahead of the
-kernel's baked init draws and section rolls. The live field reads are the
+GutsUp, self (behind the same phase gate as WisdomUp) or cross, moves the
+receiver's `SD_HPG_A` accumulator and `SD_HPG` field, seeded by the
+constructor bump through `PRD_GUTS_ACC` exactly like the wisdom pair. Any
+such fire sets the plan's `live_guts` flag, which prepare bakes into the
+race word `PD_LIVE_GUTS`, and the guts-derived `powf` terms then recompute
+from the field at the points the engine reads them: the spurt plan closure
+`powf(bounded_stat(guts) * spurt[2], spurt[3])` (`retail_physics.rs:362`)
+repatches `SF_SPURT_MAX` at each bump, the duel entry (`race_solver.rs:3194-3207`)
+snapshots both modifiers into `SD_DUEL_T` and `SD_DUEL_A`, the spot entry
+(`race_solver.rs:2928-2939`) snapshots its modifier into `SD_SPOT_MOD` and
+its duration into the timer, and the step-head minimum recomputes
+`SF_BMIN_VAL`. Each recomputation uses the bit-exact ucrtbase ports `gs_pow`
+(f64) and `gs_powf` (f32) from `powf_core.cl`, gated against `f64::powf` and
+`f32::powf` at 419.4M pairs with zero bit differences (`wave8_powf_gate.rs`).
+Without any live guts fire the flag stays zero and every term keeps the
+prepare-baked word, so a guts-static race is unchanged. The self WisdomUp
+phase gate (`skills_compile.rs`, `phase_gated`): phase zero is below every
+accepted gate, so the record cannot fire in the engine's constructor pass,
+where the field move would land ahead of the kernel's baked init draws and
+section rolls. The live field reads are the
 pace context and the downhill draw (`race_solver_retail.rs:899` and `1118`
 read `horse.wisdom as f32` per tick, and the kernel reads the `SD_HPW`
 column there), while the plan capture stays on `SF_HPW` until a refresh.

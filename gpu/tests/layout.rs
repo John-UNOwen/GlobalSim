@@ -20,13 +20,16 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     // the scalar block 83 to 89 slots per runner (plus 720 plus alignment),
     // one staged value per effect slot of every record (plus 15360), and the
     // double block gained 6 columns of RACE_MAXR (SRL plus 720).
+    // Wave 8 grew the pd runner block 9 to 11 words (RIL plus 240) and the
+    // double block 5 more guts columns of RACE_MAXR (SRL plus 600).
     assert_eq!(re::SCR_U_WORDS, 479796);
-    assert_eq!(re::SRL_WORDS, 233120);
+    assert_eq!(re::SRL_WORDS, 233720);
     // Input and status strides track RACE_MAXR.
     assert_eq!(re::RI_STRIDE, 1592);
     // Wave 7 grew the pd runner block from 8 to 9 words for the unclamped
-    // wisdom accumulator word (RIL_STRIDE 2072 to 2192).
-    assert_eq!(re::RIL_STRIDE, 2192);
+    // wisdom accumulator word (RIL_STRIDE 2072 to 2192). Wave 8 added the
+    // guts accumulator and the spot proficiency word (2192 to 2432).
+    assert_eq!(re::RIL_STRIDE, 2432);
     assert_eq!(re::ST_STRIDE, 1088);
     // The pd runner block, race scalars and per-runner precompute block stack
     // in that order, each behind the last per the kernel's formulas.

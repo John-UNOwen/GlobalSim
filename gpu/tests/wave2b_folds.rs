@@ -65,16 +65,15 @@ fn cross_runner_targets_compile() {
 
 #[test]
 fn self_only_kinds_refuse_cross_targets() {
-    // GutsUp aimed at another runner needs a mid-race guts powf the kernel
-    // bakes at prepare, so it stays on the record owner. SpeedUp crosses
-    // with an exact refresh, and kind 10 is inert in retail.
+    // GutsUp crossed with the wave-8 live field, joining SpeedUp there.
+    // Kind 10 stays on the record owner because it is inert in retail.
     is_live(
         &one_runner("order>=2", 500000, &["{\"type\":1,\"target\":9,\"modifier\":1000}"]),
         "kind 1 cross is live",
     );
-    refused(
+    is_live(
         &one_runner("always>=0", 0, &["{\"type\":4,\"target\":9,\"modifier\":1000}"]),
-        "targeting another runner",
+        "kind 4 cross is live",
     );
     // MultiplyStartDelay on another runner is inert in retail, so the record
     // fires and cools down without a state write.
@@ -96,14 +95,12 @@ fn new_kinds_compile_for_self() {
 
 #[test]
 fn mid_race_stat_bump_gates() {
-    // GutsUp only lands as a constructor-pass constant into the init inputs
-    // the kernel prepass already writes.
+    // A guts fire whose condition can hold at time zero would land in the
+    // engine's constructor pass ahead of the init draws the kernel bakes.
     refused(
         &one_runner("order>=2", 500000, &["{\"type\":4,\"target\":1,\"modifier\":1000}"]),
-        "construction-time bump",
+        "constructor pass",
     );
-    // A wisdom fire whose condition can hold at time zero would land in the
-    // engine's constructor pass ahead of the init draws the kernel bakes.
     refused(
         &one_runner("order>=2", 500000, &["{\"type\":5,\"target\":1,\"modifier\":1000}"]),
         "constructor pass",
@@ -114,7 +111,10 @@ fn mid_race_stat_bump_gates() {
         "constructor pass",
     );
     // A phase gate keeps the fire out of the constructor pass in both
-    // engines, the shape the kernel ports.
+    // engines, the shape the kernel ports, for guts and wisdom alike.
+    let plan = one_runner("phase>=2", 500000, &["{\"type\":4,\"target\":1,\"modifier\":1000}"]);
+    is_live(&plan, "phase-gated kind 4");
+    assert!(plan.live_guts, "phase-gated kind 4 flags live guts");
     is_live(
         &one_runner("phase>=2", 500000, &["{\"type\":5,\"target\":1,\"modifier\":1000}"]),
         "phase-gated kind 5",

@@ -167,6 +167,10 @@ pub struct SkillsPlan {
     pub words: Vec<u32>,
     pub reason: Option<String>,
     pub bumps: Vec<(usize, i32, f64)>,
+    /// True when some GutsUp arm can fire outside the constructor pass, so
+    /// the kernel must recompute the guts-derived powf terms from the live
+    /// field instead of reading the prepare-baked words.
+    pub live_guts: bool,
 }
 
 pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
@@ -175,6 +179,7 @@ pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
         tags: Vec::new(),
         reason: None,
         bumps: Vec::new(),
+        live_guts: false,
         nrec: 0,
         nprog: 0,
         nreg: 0,
@@ -267,6 +272,7 @@ struct Compiler {
     tags: Vec<u8>,
     reason: Option<String>,
     bumps: Vec<(usize, i32, f64)>,
+    live_guts: bool,
     nrec: usize,
     nprog: usize,
     nreg: usize,
@@ -415,7 +421,8 @@ impl Compiler {
             self.words[SK_TAGS + i] = word;
         }
         let bumps = if self.reason.is_some() { Vec::new() } else { std::mem::take(&mut self.bumps) };
-        SkillsPlan { words: self.words, reason: self.reason, bumps }
+        let live_guts = self.reason.is_none() && self.live_guts;
+        SkillsPlan { words: self.words, reason: self.reason, bumps, live_guts }
     }
 
     fn tag(&mut self, text: &str) -> (usize, usize) {
@@ -980,14 +987,11 @@ impl Compiler {
                     return;
                 }
                 // Cross stats delivery re-runs refresh_stat_effects on the
-                // receiver. SpeedUp and WisdomUp refresh in exact f64; GutsUp
-                // needs live-guts powf terms that prepare bakes. Kind 4 stays.
-                if target != 1 && kind == 4 {
-                    self.unsupported(format!(
-                        "skill {sid} effect type 4 targeting another runner needs a mid-race \
-                         guts powf the kernel bakes at prepare"
-                    ));
-                    return;
+                // receiver. SpeedUp, WisdomUp and GutsUp write the receiver's
+                // live accumulator and field there; GutsUp additionally makes
+                // the guts-derived powf terms live for the whole race.
+                if target != 1 && kind == 4 && !dead {
+                    self.live_guts = true;
                 }
                 // The extra activation is enqueued into running_skills and
                 // applied on the running skill's own turn (race_solver.rs:1841).
@@ -1017,23 +1021,21 @@ impl Compiler {
                     _ => level_multiplier(kind, level),
                 };
                 let modifier = self.value_fold(runner, horse, value_usage, retail_skill_value(raw, multiplier));
-                // The live guts readers take an f32 powf of runtime guts (the
-                // spurt maximum term, the duel and spot entry words), so a
-                // GutsUp bump only ports as a construction-time constant.
-                if kind == 4 && !(static_fire && target == 1) {
-                    self.unsupported(format!(
-                        "skill {sid} effect type 4 only ports as a construction-time bump"
-                    ));
-                    return;
+                // Mid-race guts fires move the live accumulator and field, and
+                // every guts-derived powf term (the spurt maximum, the duel and
+                // spot entry words) then recomputes from the field at read
+                // time. A construction-time self fire stays a baked constant.
+                if kind == 4 && !(static_fire && target == 1) && !dead {
+                    self.live_guts = true;
                 }
-                // A WisdomUp self fire moves the live field the pace and
-                // downhill draws read each tick. Every arm needs a
+                // A GutsUp or WisdomUp self fire moves the live field the
+                // pace and downhill draws read each tick. Every arm needs a
                 // false-at-zero phase gate: one ungated arm short-circuits
                 // the field leaves and fires in the constructor pass, where
                 // the engine moves the field ahead of the baked init draws.
-                if kind == 5 && target == 1 && !static_fire && !dead && !phase_gated {
+                if (kind == 4 || kind == 5) && target == 1 && !static_fire && !dead && !phase_gated {
                     self.unsupported(format!(
-                        "skill {sid} effect type 5 without a phase gate could fire in the \
+                        "skill {sid} effect type {kind} without a phase gate could fire in the \
                          constructor pass ahead of the baked init draws"
                     ));
                     return;

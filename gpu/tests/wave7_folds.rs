@@ -1,7 +1,8 @@
-//! Wave-7 compile gates: mid-race stat fires. SpeedUp and WisdomUp cross to
-//! other runners through an exact f64 refresh, GutsUp refuses because its
-//! consumers take a runtime guts powf the prepare bakes, and a self WisdomUp
-//! needs a phase gate so the constructor pass can never fire it.
+//! Wave-7 compile gates: mid-race stat fires. SpeedUp, GutsUp and WisdomUp
+//! cross to other runners through an exact f64 refresh, and a self GutsUp or
+//! WisdomUp needs a phase gate so the constructor pass can never fire it.
+//! Wave 8 opened the GutsUp cross and mid-race paths, so the guts fires also
+//! set the plan's live_guts flag that switches the kernel to field reads.
 
 use globalsim_gpu::{json, skills_compile};
 
@@ -55,64 +56,64 @@ fn flags(plan: &skills_compile::SkillsPlan) -> u32 {
 
 #[test]
 fn cross_stat_kinds_gate_by_kind() {
-    // SpeedUp and WisdomUp write the receiver through the exact f64 refresh.
-    for kind in [1i64, 5] {
+    // SpeedUp, GutsUp and WisdomUp write the receiver through the exact f64
+    // refresh. The GutsUp receivers' accumulator and field are live, so the
+    // plan carries the live_guts flag.
+    for kind in [1i64, 4, 5] {
         for target in [4i64, 9, 10] {
             let effect = format!("{{\"type\":{kind},\"target\":{target},\"modifier\":1000}}");
-            is_live(
-                &one_runner("order>=2", 500000, &[effect.as_str()]),
-                &format!("kind {kind} target {target}"),
-            );
+            let plan = one_runner("order>=2", 500000, &[effect.as_str()]);
+            is_live(&plan, &format!("kind {kind} target {target}"));
+            assert_eq!(plan.live_guts, kind == 4, "kind {kind} cross live_guts");
         }
     }
-    // GutsUp consumers take powf(runtime guts), which prepare bakes from the
-    // construction-time guts only.
-    let effect = r#"{"type":4,"target":9,"modifier":1000}"#;
-    refused(
-        &one_runner("order>=2", 500000, &[effect]),
-        "guts powf",
-    );
 }
 
 #[test]
-fn wisdom_self_needs_a_phase_gate() {
+fn stat_bump_self_needs_a_phase_gate() {
     // The engine's constructor pass evaluates the same condition with no
-    // field, so anything that can hold at time zero must stay refused.
-    refused(
-        &one_runner("always>=0", 500000, &[r#"{"type":5,"target":1,"modifier":1000}"#]),
-        "constructor pass",
-    );
-    refused(
-        &one_runner("order>=2", 500000, &[r#"{"type":5,"target":1,"modifier":1000}"#]),
-        "constructor pass",
-    );
-    // A phase term the field starts at satisfies, so it gates nothing.
-    refused(
-        &one_runner("phase>=0", 500000, &[r#"{"type":5,"target":1,"modifier":1000}"#]),
-        "constructor pass",
-    );
-    refused(
-        &one_runner("phase>-1", 500000, &[r#"{"type":5,"target":1,"modifier":1000}"#]),
-        "constructor pass",
-    );
-    // One ungated arm can hold at time zero, so the whole record is refused.
-    refused(
-        &one_runner("phase>=2@always>=0", 500000, &[r#"{"type":5,"target":1,"modifier":1000}"#]),
-        "constructor pass",
-    );
-    // Phase gates that read false at phase zero lower live.
-    for cond in ["phase>=1", "phase>=2", "phase>0", "phase>1", "phase>=2&order>=2"] {
-        let plan = one_runner(cond, 500000, &[r#"{"type":5,"target":1,"modifier":1000}"#]);
-        if plan.reason.is_some() {
-            refused(&plan, cond);
+    // field, so a GutsUp or WisdomUp arm that can hold at time zero must
+    // stay refused.
+    for kind in [4i64, 5] {
+        let effect = format!("{{\"type\":{kind},\"target\":1,\"modifier\":1000}}");
+        refused(
+            &one_runner("always>=0", 500000, &[effect.as_str()]),
+            "constructor pass",
+        );
+        refused(
+            &one_runner("order>=2", 500000, &[effect.as_str()]),
+            "constructor pass",
+        );
+        // A phase term the field starts at satisfies, so it gates nothing.
+        refused(
+            &one_runner("phase>=0", 500000, &[effect.as_str()]),
+            "constructor pass",
+        );
+        refused(
+            &one_runner("phase>-1", 500000, &[effect.as_str()]),
+            "constructor pass",
+        );
+        // One ungated arm can hold at time zero, so the whole record is refused.
+        refused(
+            &one_runner("phase>=2@always>=0", 500000, &[effect.as_str()]),
+            "constructor pass",
+        );
+        // Phase gates that read false at phase zero lower live. A mid-race
+        // GutsUp fire moves live guts, so the plan flags it.
+        for cond in ["phase>=1", "phase>=2", "phase>0", "phase>1", "phase>=2&order>=2"] {
+            let plan = one_runner(cond, 500000, &[effect.as_str()]);
+            if plan.reason.is_some() {
+                refused(&plan, cond);
+            }
+            is_live(&plan, cond);
+            assert_eq!(plan.live_guts, kind == 4, "kind {kind} gated live_guts");
         }
-        is_live(&plan, cond);
+        // A gate also covers the cooldown-zero shape: one loop fire, then dead.
+        is_live(
+            &one_runner("phase>=1", 0, &[effect.as_str()]),
+            &format!("gated kind {kind} cooldown zero"),
+        );
     }
-    // A gate also covers the cooldown-zero shape: one loop fire, then dead.
-    is_live(
-        &one_runner("phase>=1", 0, &[r#"{"type":5,"target":1,"modifier":1000}"#]),
-        "gated kind 5 cooldown zero",
-    );
 }
 
 #[test]
@@ -124,6 +125,8 @@ fn bumped_flag_marks_static_stat_bumps() {
         let plan = one_runner("always>=0", 0, &[effect.as_str()]);
         is_live(&plan, "static bump");
         assert_ne!(flags(&plan) & SK_FLAG_BUMPED, 0, "kind {kind} static marks BUMPED");
+        // A constructor-only fire stays a baked constant, live path off.
+        assert!(!plan.live_guts, "kind {kind} static keeps the baked words");
     }
     // A phase-gated fire never reaches the constructor pass, and a static
     // cross fire delivers nothing there, so neither carries the flag.

@@ -150,7 +150,7 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
                 convert_float_rte(sd[SD_POS + pm] - sd[SD_POS + r]), pm == r,
                 (int)rs[RS_STYLE + r] > field_style(strategy),
                 (int)rs[RS_COUNTS + 1], has_behind, behind_gap,
-                sk_has_speed(skt, scr, si, r, pd));
+                sk_has_speed(skt, scr, si, r, pd, sd));
             si[SI_PACEDOWN + r] = ((int)si[SI_PS_MODE + r] == 3) ? 1u : 0u;
             sd[SD_PKCOEF + r] = (double)sf[SF_PS_COEF + r];
         }
@@ -262,9 +262,11 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
         si[SI_SPOT_TOKEN + r] = 0u;
     }
     const float spot_token = (int)si[SI_SPOT_TOKEN + r]
-        ? convert_float_rte(pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_SPOT_M]) : 0.f;
+        ? convert_float_rte((int)pd[PD_LIVE_GUTS] ? sd[SD_SPOT_MOD + r]
+            : pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_SPOT_M]) : 0.f;
     const float duel_t_token = (int)si[SI_DUEL_TOKEN + r]
-        ? convert_float_rte(pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_DUEL_T]) : 0.f;
+        ? convert_float_rte((int)pd[PD_LIVE_GUTS] ? sd[SD_DUEL_T + r]
+            : pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_DUEL_T]) : 0.f;
 
     // Target speed. The SectionIndex walk equals the quotient port.
     const int section_index = phys_section(position_f, dist_f);
@@ -330,7 +332,8 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
         const int nam = sk_mods(skt, scr, r, SK_EFF_ACCEL, amods);
         acceleration = phys_acceleration_from_base(pd, base_accel,
             (int)si[SI_DASH + r], amods, nam,
-            convert_float_rte(pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_DUEL_A]),
+            convert_float_rte((int)pd[PD_LIVE_GUTS] ? sd[SD_DUEL_A + r]
+                : pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_DUEL_A]),
             (int)si[SI_DUEL_TOKEN + r],
             sf[SF_AS_VALUE + r], (int)si[SI_CPFLAGS + r] & CP_ASIT);
     }
@@ -598,7 +601,7 @@ static int race_tick(__global uint* scr, __global uint* si, __global float* sf,
     for (int r = 0; r < n; r++) {
         if (rs[RS_ADV + r] && !(int)si[SI_DUEL_ACTIVE + r]
             && (int)si[SI_DUEL_FIGHT + r] == 0) {
-            duel_update(si, sf, sd, shl, r, n, course_distance,
+            duel_update(si, sf, sd, shl, pd, r, n, course_distance,
                 has_corner_events);
         }
     }
@@ -617,7 +620,7 @@ static int race_tick(__global uint* scr, __global uint* si, __global float* sf,
         }
         near_lane_timers(si, sd, rs, r, n, (double)dt);
         spot_update(scr, si, sd, r, n, pd, section_length);
-        duel_update(si, sf, sd, shl, r, n, course_distance,
+        duel_update(si, sf, sd, shl, pd, r, n, course_distance,
             has_corner_events);
     }
     // The duel and spot receivers catch up with the flag columns after
@@ -1022,6 +1025,12 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         sf[SF_MIN + r] = 3.f;
 
         const float speed = convert_float_rte(as_double(scol[7]));
+        // The guts field and accumulator mirror the wisdom pair. A live
+        // GutsUp reads the field from here, so the setup seeds run first.
+        sd[SD_HPG + r] = as_double(scol[10]);
+        const double ga = pd[PD_RUN0 + PD_RUN_STRIDE * r + PRD_GUTS_ACC];
+        sd[SD_HPG_A + r] = ga != ga
+            ? (double)convert_float_rte(as_double(scol[10])) : ga;
         const float guts = convert_float_rte(as_double(scol[10]));
         const float lane_f = convert_float_rte(pd[PI_RUNNER0 + PI_RUN_STRIDE * r + PI_RUN_LANE]);
         sf[SF_MV_LANE + r] = lane_f;
@@ -1064,7 +1073,9 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         sf[SF_BMIN_VAL + r] = minimum_speed;
         si[SI_BMIN_BITS + r] = as_uint(guts);
         sd[SD_LSS + r] = (double)phys_maximum_spurt_speed(pd, speed, strategy,
-            aptitude, dist_f, pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_POWF]);
+            aptitude, dist_f, (int)pd[PD_LIVE_GUTS]
+                ? sk_powf_word(pd, sd[SD_HPG + r])
+                : pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_POWF]);
         sf[SF_SPURT_MAX + r] = convert_float_rte(sd[SD_LSS + r]);
         // The stat-modifier accumulator starts at the initialized speed,
         // matching the engine's unwrap_or(horse.speed as f32).

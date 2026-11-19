@@ -61,18 +61,21 @@ Suites:
 | `wave1_gate` (gpu + initialization + geometry + race) | The six Phase A chart variant jobs, course 10504 seeds 1..3: zero fallback and frame identity, plus a v77-roster race firing the any-skill, shadowed-alternative, wisdom-carrier and out-band constructs bit-exact (see "Wave-1 fallback-histogram constructs") |
 | `wave2_folds` | Compile-time gates for the wave-2 dynamic leaves and the roster style-count folds: each live leaf stays live, the sampled and folded shapes, and the still-refused names |
 | `wave2_gate` (gpu + initialization + geometry + race) | One real merged skill per ported construct plus a v77-roster race firing each through synthetic defs, seeds 1..3: zero fallback and frame identity, including the constructor-pass defer and the absolute init cooldown (see "Wave-2 condition fields") |
-| `wave2b_folds` | Compile-time gates for the effect side: cross-target records stay live, self-only kinds refuse cross targets, kinds 4 and 5 refuse mid-race fires and record construction-time bumps, the 8-effect cap, the live `value_usage` readers and the live random-activation kinds 36 and 37 at self target |
+| `wave2b_folds` | Compile-time gates for the effect side: cross-target records stay live, self-only kinds refuse cross targets, kinds 4 and 5 refuse ungated self fires and record construction-time bumps, the 8-effect cap, the live `value_usage` readers and the live random-activation kinds 36 and 37 at self target |
 | `wave2b_gate` (gpu + initialization + geometry + race) | Ten real merged skills, one per ported effect family, plus a twelve-skill synthetic battery firing every cross-target and bump path, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-2b effect side") |
 | `wave3_folds` | Compile-time gates for the wave-3 leaves: the in-band cell forms, the activation-history folds including the provably-false self-gate, the roster reads in both fold directions, the opponent-count team gate and the still-refused names |
 | `wave3_gate` (gpu + initialization + geometry + race) | Fourteen real merged rows, one per ported construct with the seats the condition needs, plus a twenty-eight-skill synthetic battery firing every new leaf, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-3 condition tail") |
-| `wave4_folds` | Compile-time gates for the effect tail: cross debuffs compile on any roster, a cross-target start-delay fires inert, and the still-refused effect families (all-stat 32, variantless 33/34, GutsUp cross 4) plus the refused `value_usage` 15 and the cross-target random kinds refuse by name with the reason; lane goals, kakari, immunity, kinds 36/37 at self target and the shared-key alternative pair assert live records (see "Wave-6a lane, rush and cooldown tail") |
+| `wave4_folds` | Compile-time gates for the effect tail: cross debuffs compile on any roster, a cross-target start-delay fires inert, the still-refused effect families (all-stat 32, variantless 33/34) plus the refused `value_usage` 15 and the cross-target random kinds refuse by name with the reason; GutsUp cross compiles live since wave 8; lane goals, kakari, immunity, kinds 36/37 at self target and the shared-key alternative pair assert live records (see "Wave-6a lane, rush and cooldown tail") |
 | `wave4_gate` (gpu + initialization + geometry + race) | The real cross-debuff 910581 on a teamed roster plus a four-skill battery forcing the same-team drop, the different-team delivery and the inert cross start-delay both ways, v77 roster seeds 1..3: zero fallback and frame identity (see "Wave-4 effect tail") |
 | `wave6a_folds` | Compile-time gates for the wave-6a constructs: lane goal and immunity records compile live for self and cross targets, stray target combinations refuse, and the shared-key alternative pair lowers both live alternatives (see "Wave-6a lane, rush and cooldown tail") |
 | `wave6a_gate` (gpu + initialization + geometry + race) | The real shared-cooldown pair 910151, the real SetTargetLane 201261 and the real ExtendKakari 200801 on fitted seats, plus a ten-skill synthetic battery firing kinds 11, 12, 13 (self and group), 35 (self and delivered), 38 and the shared-key pair both ways, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-6a lane, rush and cooldown tail") |
 | `wave6b_folds` | Compile-time gates: the runtime `value_usage` readers (8, 9, 11, 14) and the self-target additionalActivate shapes compile live, and `value_usage` 15 refuses by name (see "Wave-6b activation-time values and turns") |
 | `wave6b_gate` (gpu + initialization + geometry + race) | The real merged ids for value_usage 8/11/14 (202031, 202032, 910341, 100981), additionalActivate (910211, 910351) and kind 37 (910071) on fitted seats, plus a 667xxx battery for kind 36, value_usage 9, the aa 1 cap and the never-fires white candidate, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-6b activation-time values and turns") |
-| `wave7_folds` | Compile-time gates for the mid-race stat fires: cross SpeedUp and WisdomUp compile live on targets 4, 9 and 10, the GutsUp cross and ungated self WisdomUp refuse by name, every phase-gated self WisdomUp shape lowers, and `SK_FLAG_BUMPED` marks exactly the static 4/5/29 bumps (see "Wave-7 mid-race stat fires") |
+| `wave7_folds` | Compile-time gates for the mid-race stat fires: cross SpeedUp, GutsUp and WisdomUp compile live on targets 4, 9 and 10 (kind 4 sets the plan's `live_guts` flag), ungated self GutsUp and WisdomUp refuse by name, every phase-gated self shape lowers, and `SK_FLAG_BUMPED` marks exactly the static 4/5/29 bumps (see "Wave-7 mid-race stat fires") |
 | `wave7_gate` (gpu + initialization + geometry + race) | The real kind-1 loop fire 201641 beside a constructor-pass SpeedUp probe, plus a 668xxx battery for self WisdomUp refire, the static-bump-to-loop-fire accumulator chain, cross SpeedUp and WisdomUp on all three fans, the 10 s refire cycle and the immune and same-team debuff drops, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-7 mid-race stat fires") |
+| `wave8_powf_gate` (gpu) | Bit-exactness gate for the transcribed ucrtbase `pow` and `powf` (`powf_core.cl`): the engine's guts domains plus fuzz bands, `to_bits` equality against Rust `f64::powf` and `f32::powf` at 100%, default 38.7M pairs, env-widened to 419.4M with zero differences |
+| `wave8_folds` | Compile-time gates for live guts: every shipped GutsUp id compiles as a baked constructor bump (three keep their own condition refusals), and the mid-race and cross synthetic shapes set the plan's `live_guts` flag while static-only shapes never do |
+| `wave8_gate` (gpu + initialization + geometry + race) | The 669xxx GutsUp battery: self phase-gated refire and drop, static bump chained into a loop fire, all three cross fans, the immune and same-team debuff drops, the constructor-only static control, and the real static ids 200211, 202181 and 1200051, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-8 live guts") |
 | `grid_gate` (gpu + initialization + geometry + race) | Grid starts at 21, 24, 40 and 120 horses, two courses, seeds 1..2: zero fallback and frame-for-frame `to_bits` identity against the CPU engine, the 21-horse grid-vs-retail control pair differing at frame 0, and invalid grid shapes falling back with the engine's own message (see "Grid mode") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 
@@ -1027,7 +1030,7 @@ authority:
   (initialization already applied the start gate), so the record now fires inert.
   SpeedUp, GutsUp and WisdomUp (1, 4, 5) at another runner stayed refused: they
   write the receiver's stats through a full `refresh_stat_effects`. SpeedUp and
-  WisdomUp landed with wave 7, GutsUp stays refused.
+  WisdomUp landed with wave 7, GutsUp with wave 8.
 - Lane goals 11, 12 (a lane-preference presence flag) and 35 (a last-set
   `lane_target`), read by the passing-lane search (`race_solver.rs:1310-1358`): the
   kernel already threaded a `lane_preference` and `fixed_goal` argument through the
@@ -1249,8 +1252,7 @@ consumer of the aa-1 window is reachable with real ids).
 ### Wave-7 mid-race stat fires
 
 The last skill-family refusals, cross SpeedUp and WisdomUp and the self
-WisdomUp mid-race fire. GutsUp stays refused, self and cross, and the block
-is written up below.
+WisdomUp mid-race fire. GutsUp landed later, self and cross, in wave 8.
 
 - A self fire writes the accumulator and the clamped field only: the
   engine's self path returns without a refresh (`race_solver.rs:2644-2674`).
@@ -1278,13 +1280,13 @@ is written up below.
   any consumer reads them (`race_solver_retail.rs:961` and `:1007-1034`),
   the sole pre-phase-2 spurt-speed reader is the unmodeled staminasyoubu
   hook, and the accel chain recomputes from power.
-- GutsUp stays refused at any mid-race fire: the spurt maximum term, the
-  duel entry and the spot entry read `powf(bounded_stat(guts) * spurt[2],
-  spurt[3])` from the runtime guts at every plan recompute
+- GutsUp stayed refused at any mid-race fire in this wave: the spurt maximum
+  term, the duel entry and the spot entry read `powf(bounded_stat(guts) *
+  spurt[2], spurt[3])` from the runtime guts at every plan recompute
   (`retail_physics.rs:362`, `race_solver.rs:2928-2939` and `:3194-3207`),
-  and the kernel holds that term as the one prepare-baked `PRD_POWF` word
-  per runner, so a live guts change would re-roll lotteries the port cannot
-  replay.
+  and the kernel held that term as the one prepare-baked `PRD_POWF` word
+  per runner. Wave 8 replaced the baked word with bit-exact in-kernel pow
+  ports that recompute at those same reads.
 - Gates: `wave7_folds` compiles each shape alone. `wave7_gate` replays the
   v77 roster seeds 1..3 with zero fallback: self wisdom on a 15 s refire
   and a phase-2 drop (668001/668002), static bump then loop fire on one
@@ -1298,6 +1300,69 @@ is written up below.
   constructor ordering. No merged id fires kinds 1, 4 or 5 mid-race or
   cross, so the battery carries those paths.
 
+### Wave-8 live guts
+
+The final guts refusals: a mid-race self or cross `GutsUp(4)` fire now moves
+the live accumulator and field, and every guts-derived `powf` word recomputes
+from the field at the points the engine reads it.
+
+- The prerequisite was bit-exactness. The engine's terms are Windows UCRT
+  `pow` and `powf` calls, so the kernels needed the same bit results, not a
+  nearby value. `powf_core.cl` carries transcriptions of the live ucrtbase
+  FMA variants: the f64 path (`gs_pow`, the double-double log and 257- and
+  64-entry table pipeline) and the float-tuned f32 path (`gs_powf`, whose
+  result differs from the f32 rounding of `pow` on 8,621 of 99.8M engine
+  pairs, so a dedicated port was required). `wave8_powf_gate` demands
+  `to_bits` equality against Rust `f64::powf` and `f32::powf` over the
+  engine's guts domains (all f32 values in [1, 2000] at stride, clamp bands,
+  log-uniform randoms and the battery's duration, spot and duel shapes):
+  38,675,241 pairs at default settings, 419,395,547 widened (env), zero
+  mismatches on every domain. `cl` `pow`/`powr` miss 2.02M pairs per domain
+  and were replaced, not kept. The kernel side needs `fma()` single-rounding
+  and FP_CONTRACT off, both already in force.
+- The compiler gates the switch. A kind-4 arm that can fire outside the
+  constructor pass (mid-race self, gated, or any live cross) sets the plan's
+  `live_guts` flag; prepare bakes it into the race word `PD_LIVE_GUTS`. A
+  static-only kind-4 catalog (all shipped merged ids are static bumps) keeps
+  the flag zero, and the race reads the prepare-baked words exactly as before,
+  so the guts-static control is the flag-off path itself. The self phase gate
+  rule from wave 7 extends to kind 4: an ungated guts arm could fire in the
+  engine's constructor pass ahead of the baked init draws.
+- The kernel's live reads mirror the engine's read sites. `SD_HPG`/`SD_HPG_A`
+  carry the field and the unclamped f32 accumulator, seeded from the
+  construction bump through `PRD_GUTS_ACC` (NaN seed means none) like the
+  wisdom pair. A self or cross bump writes both, then repatches the two
+  step-head caches: `SF_BMIN_VAL` (minimum is constant in guts while the
+  field holds, so repatching equals the engine's per-tick recompute) and
+  `SF_SPURT_MAX` through `sk_powf_word`. Duel entry snapshots both modifiers
+  into `SD_DUEL_T`/`SD_DUEL_A` (the engine captures at activate), spot entry
+  snapshots the modifier into `SD_SPOT_MOD` and the duration into the timer
+  (proficiency rides `PRD_SPOT_PROF`), and a later guts change never touches
+  an active token. Without the flag every one of those reads the old `PRD`
+  word instead.
+- `PD_RUN_STRIDE` grew 9 to 11 (rows `PRD_GUTS_ACC`, `PRD_SPOT_PROF`,
+  `RIL_STRIDE` 2192 to 2432) and `SD_SLOTS` 76 to 81 (five new
+  `RACE_MAXR` columns: `SD_HPG`, `SD_HPG_A`, `SD_SPOT_MOD`, `SD_DUEL_T`,
+  `SD_DUEL_A`); `SCR_U_WORDS` is unchanged at 479,796 and `SRL_WORDS` moves
+  233,120 to 233,720, repinned in `tests/layout.rs`.
+- Gates: `wave8_powf_gate` above. `wave8_folds` audits the shipped catalog
+  (13 of the 16 GutsUp ids compile as baked bumps; 202441, 202442 and
+  210141 keep their pre-existing `random_lot`/`motivation` condition
+  refusals, never a guts refusal) and the flag matrix. `wave8_gate` replays
+  the v77 roster seeds 1..3 with zero fallback: 669001/669002 self refire
+  and phase-2 drop, 669030/669031 static bump chained into a loop fire,
+  669010/669011/669012 all three cross fans, 669041/669042 the immune and
+  same-team debuff drops on a negative guts fan, 669009 the constructor-only
+  static control, and the real static 200211, 202181 and 1200051. The
+  untouched wave-7 batteries are the other half of the guts-static pin:
+  same binaries, same kernel, same identity.
+- Perf: an ignored `wave8_perf_m96_live_vs_baked_walls` probe times one
+  96-race batch with a live GutsUp carrier in every race against the baked
+  batch: live 1720 and 1713 ms, baked 1702 and 1704 ms (two runs, B580
+  warm), so the live path costs at most about 1%. It costs nothing per tick
+  (the pow ports run only at bump, duel and spot events); the flag adds one
+  branch at each guts-word read.
+
 Sharp edges: the first cross SpeedUp flips the receiver's target base from
 the retail form to the legacy form for the rest of the race, exactly as the
 engine's refresh does (`race_solver.rs:1332`); the refresh count must equal
@@ -1305,7 +1370,8 @@ the delivery count because the HP re-round re-runs per (effect, receiver),
 an idempotent round trip the kernel mirrors one for one; a self WisdomUp
 leaves the spurt-plan capture stale until the next cross delivery refreshes
 it, engine behavior the gates reproduce; the duel and spot `PRD` words stay
-exact only while guts stays immutable, which the GutsUp refusal holds.
+exact while guts holds, which was the wave-7 state, since wave 8 the entry
+snapshots move to `SD` columns when a live guts fire is in the race.
 
 ### Cost
 

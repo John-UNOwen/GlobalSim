@@ -84,8 +84,11 @@ pub const PD_PM_NOTFWD: usize = PD_CF_DIST + 9;
 pub const PD_DTYPE: usize = PD_CF_DIST + 10;
 pub const PD_FC_HALF0: usize = PD_CF_DIST + 11;
 pub const PD_FC_HALF1: usize = PD_CF_DIST + 12;
+// 1 when some GutsUp arm can fire outside the constructor pass: the kernel
+// then recomputes the guts-derived powf words from the live field.
+pub const PD_LIVE_GUTS: usize = PD_CF_DIST + 13;
 pub const PD_RUN0: usize = PL_FRONT_LANE + 32;
-pub const PD_RUN_STRIDE: usize = 9;
+pub const PD_RUN_STRIDE: usize = 11;
 pub const PRD_POWF: usize = 0;
 pub const PRD_DUEL_T: usize = 1;
 pub const PRD_DUEL_A: usize = 2;
@@ -100,6 +103,10 @@ pub const PRD_RUSH_BONUS: usize = 7;
 // The unclamped wisdom accumulator, NaN when no WisdomUp bump chained. The
 // field word above is clamped, so this keeps a later mid-race fire exact.
 pub const PRD_WIS_ACC: usize = 8;
+// The guts accumulator mirror of the wisdom one, and the strategy proficiency
+// the live spot duration scales by.
+pub const PRD_GUTS_ACC: usize = 9;
+pub const PRD_SPOT_PROF: usize = 10;
 pub const PC_LAST_STRAIGHT_START: usize = 184;
 pub const PC_LAST_CORNER_START: usize = 186;
 pub const PC_FIRST_MOVE_POINT: usize = 187;
@@ -158,7 +165,7 @@ const RS_COUNTS: usize = (RS_PM + 8 + 7) & !7;
 const RS_ADV: usize = RS_COUNTS + 8 + 4 * RACE_MAXR;
 const SCR_BANKS: usize = SCR_RACE + RS_ADV + RACE_MAXR; // paired mode: one RUN bank per runner
 const BANK_WORDS: usize = 60;
-const SRL_HP: usize = (2 * RACE_MAXR + 76) * RACE_MAXR;
+const SRL_HP: usize = (2 * RACE_MAXR + 81) * RACE_MAXR;
 const RD_WORDS: usize = 8 * RACE_MAXR + SRL_HP + 32;
 const SRL_STATS_IN_L: usize = RD_WORDS;
 const SRL_INIT_IN_L: usize = SRL_STATS_IN_L + RACE_MAXR * IIL;
@@ -518,6 +525,7 @@ pub struct Prepared {
     seed: i32,
     sk: Vec<u32>,
     bumps: Vec<(usize, i32, f64)>,
+    live_guts: bool,
     debug_scratch: bool,
     grid: bool,
 }
@@ -536,6 +544,7 @@ impl Prepared {
             seed: 0,
             sk: Vec::new(),
             bumps: Vec::new(),
+            live_guts: false,
             debug_scratch: false,
             grid: false,
         }
@@ -581,6 +590,7 @@ fn prepare(
         geometry: None,
         seed: seed_i32,
         sk: Vec::new(),
+        live_guts: false,
         debug_scratch: false,
         grid: false,
     });
@@ -761,7 +771,7 @@ fn prepare(
             css: css.clone(),
         });
     }
-    Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, debug_scratch: false, grid })
+    Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, live_guts: sk_plan.live_guts, debug_scratch: false, grid })
 }
 
 /// Engine rule: an installed skill whose definition carries a type 6 effect
@@ -1031,6 +1041,7 @@ impl RaceContext {
     let mut offset = 0usize;
     for &i in &launched {
         let count = prepared[i].stats.len();
+        prepared[i].pd[PD_LIVE_GUTS] = if prepared[i].live_guts { 1.0 } else { 0.0 };
         let spurt_coef = prepared[i].pd[PT_SPURT + 2] as f32;
         let spurt_pow = prepared[i].pd[PT_SPURT + 3] as f32;
         let duel_speed = [
@@ -1093,6 +1104,7 @@ impl RaceContext {
             let stapt = prepared[i].ri[RI_RUN0 + RI_RUN_STRIDE * r + RR_STAPT] as usize;
             prepared[i].pd[base + PRD_SPOT_D] =
                 (700.0 * guts).powf(0.5) * 0.012 * proficiency[stapt];
+            prepared[i].pd[base + PRD_SPOT_PROF] = proficiency[stapt];
             if bump_guts {
                 prepared[i].pd[base + PRD_BOOST_GUTS] = acc_guts.clamp(1.0, 2000.0) as f64;
             }
@@ -1103,6 +1115,8 @@ impl RaceContext {
             // chain; NaN marks the field seed for runners with no bump.
             prepared[i].pd[base + PRD_WIS_ACC] =
                 if bump_wis { f64::from(acc_wis) } else { f64::NAN };
+            prepared[i].pd[base + PRD_GUTS_ACC] =
+                if bump_guts { f64::from(acc_guts) } else { f64::NAN };
             prepared[i].pd[base + PRD_RUSH_BONUS] =
                 f64::from(((bonus * 100.0) as f32).to_bits());
         }
