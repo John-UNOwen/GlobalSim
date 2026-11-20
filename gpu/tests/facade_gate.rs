@@ -5,7 +5,9 @@
 //! engine's `into_binary` packet. A startup request inside the same batch
 //! must come back as a fallback without disturbing its siblings,
 //! `gate_reasons` is checked as a pure function on synthetic device facts,
-//! and `register_geometry` injection outranks the geometry file copy.
+//! and `register_geometry` injection outranks the geometry file copy. A
+//! non-retail zero-skill request answers from the classic kernel lane, in the
+//! same batch as a retail request.
 
 #![cfg(feature = "race")]
 
@@ -474,8 +476,46 @@ fn gate_reasons_names_every_refusal() {
         vec!["{}"; 21].join(",")
     );
     assert_eq!(facade::gate_reasons(&grid_ok, Some(&accepted)), None);
-    let legacy = r#"{"horses":[{}]}"#;
-    assert_eq!(facade::gate_reasons(legacy, Some(&accepted)).as_deref(), Some("non-retail runtime"));
+    // A request without a retail flag routes to the classic lane, so the old
+    // blanket non-retail refusal is gone. The classic refusals name what the
+    // classic kernel does not port.
+    let classic = r#"{"courseId":10504,"horses":[{}]}"#;
+    assert_eq!(facade::gate_reasons(classic, Some(&accepted)), None);
+    let legacy = r#"{"courseId":10504,"retailRuntime":true,"horses":[{}]}"#;
+    assert_eq!(
+        facade::gate_reasons(legacy, Some(&accepted)).as_deref(),
+        Some("retail runtime belongs to the retail lane")
+    );
+    let classic_skills = r#"{"courseId":10504,"horses":[{"skills":[1]}]}"#;
+    assert_eq!(
+        facade::gate_reasons(classic_skills, Some(&accepted)).as_deref(),
+        Some("skills belong to the retail kernel lane")
+    );
+    let classic_grid = format!(
+        "{{\"courseId\":10504,\"experimentalGrid\":{{\"columns\":20,\"rowSpacing\":3}},\"horses\":[{}]}}",
+        vec!["{}"; 21].join(",")
+    );
+    assert_eq!(
+        facade::gate_reasons(&classic_grid, Some(&accepted)).as_deref(),
+        Some("experimentalGrid belongs to the retail lane")
+    );
+    let classic_trace = r#"{"courseId":10504,"traceConservePower":true,"horses":[{}]}"#;
+    assert_eq!(
+        facade::gate_reasons(classic_trace, Some(&accepted)).as_deref(),
+        Some("conserve-power tracing is not in the classic kernel")
+    );
+    let classic_stamina = r#"{"courseId":10504,"experimentalLaterStaminaMechanics":true,"horses":[{}]}"#;
+    assert_eq!(
+        facade::gate_reasons(classic_stamina, Some(&accepted)).as_deref(),
+        Some("later stamina mechanics are not in the classic kernel")
+    );
+    let classic_single = r#"{"courseId":10504,"singleMode":true,"horses":[{}]}"#;
+    assert_eq!(
+        facade::gate_reasons(classic_single, Some(&accepted)).as_deref(),
+        Some("singleMode's +400 stat bonus is outside the GPU lane")
+    );
+    let flag_off = r#"{"courseId":10504,"experimentalRetailRuntime":false,"horses":[{}]}"#;
+    assert_eq!(facade::gate_reasons(flag_off, Some(&accepted)), None);
     let empty = r#"{"horses":[],"experimentalRetailRuntime":true}"#;
     assert_eq!(
         facade::gate_reasons(empty, Some(&accepted)).as_deref(),
@@ -491,4 +531,146 @@ fn gate_reasons_names_every_refusal() {
     );
     let broken = "not json";
     assert!(facade::gate_reasons(broken, Some(&accepted)).is_some(), "a broken request is refused");
+}
+
+/// The v77 roster with the retail flags off and every skill slot removed, the
+/// zero-skill shape the classic kernel lane answers.
+fn classic_v77() -> String {
+    let mut value = json::parse(&v77_line()).expect("v77 parses");
+    if let json::Value::Object(map) = &mut value {
+        for key in [
+            "experimentalRetailInitialization",
+            "experimentalRetailSections",
+            "experimentalRetailRuntime",
+            "experimentalRetailGeometry",
+            "experimentalRetailStartup",
+        ] {
+            map.insert(key.into(), json::Value::Bool(false));
+        }
+        if let Some(json::Value::Array(horses)) = map.get("horses") {
+            let cleared: Vec<json::Value> = horses
+                .iter()
+                .map(|horse| {
+                    let mut horse = horse.clone();
+                    if let json::Value::Object(fields) = &mut horse {
+                        fields.remove("skills");
+                    }
+                    horse
+                })
+                .collect();
+            map.insert("horses".into(), json::arr(cleared));
+        }
+    }
+    let mut text = String::new();
+    json::to_string_into(&value, &mut text);
+    text
+}
+
+/// The facade's lane flip: a non-retail zero-skill request runs on the classic
+/// kernel lane in the same batch as a retail request, and its compact meta,
+/// packet and full reply match the engine.
+#[test]
+fn a_classic_request_answers_from_the_gpu_lane() {
+    let classic = classic_v77();
+    let retail =
+        race_exec::skills_request(&v77_line(), 10504, 1, 0, &SKILLS, None).expect("skills request");
+    let requests = [classic.clone(), retail];
+    let mut gpu = GpuRaces::new().expect("device gate");
+    let outcomes = gpu.run_batch(&requests, &[1, 1]).expect("batch");
+    assert_eq!(outcomes.len(), requests.len());
+
+    let mut problems: Vec<String> = Vec::new();
+    for (index, request) in requests.iter().enumerate() {
+        let tag = format!("request {index}");
+        let outcome = &outcomes[index];
+        let (Some(meta), Some(packet)) = (&outcome.meta, &outcome.packet) else {
+            problems
+                .push(format!("{tag}: expected a compact answer, got fallback {:?}", outcome.fallback));
+            continue;
+        };
+        let cpu = match dep_cpu::run_cpu_binary(request, 1) {
+            Ok(cpu) => cpu,
+            Err(reason) => {
+                problems.push(format!("{tag}: engine run failed: {reason}"));
+                continue;
+            }
+        };
+        let cpu_reply = json::parse(&cpu.reply).expect("engine reply parses");
+        let gpu_meta = json::parse(meta).expect("facade meta parses");
+        check_num(&mut problems, &tag, "playerHorseIndex", &cpu_reply, &gpu_meta);
+        let cpu_results = cpu_reply.get_array("results").expect("engine results");
+        let gpu_results = gpu_meta.get_array("results").expect("facade results");
+        if cpu_results.len() != gpu_results.len() {
+            problems.push(format!(
+                "{tag}: results len cpu {}, gpu {}",
+                cpu_results.len(),
+                gpu_results.len()
+            ));
+            continue;
+        }
+        for (runner, (cpu_row, gpu_row)) in cpu_results.iter().zip(gpu_results).enumerate() {
+            let tag = format!("{tag} runner {runner}");
+            for field in [
+                "finishOrder",
+                "finishTimeRaw",
+                "rushingStartCount",
+                "rushingPenaltyCount",
+                "lastSpurtStartDistance",
+                "startDelayTime",
+            ] {
+                check_num(&mut problems, &tag, field, cpu_row, gpu_row);
+            }
+            // hpEmptyOnRace is a bool where the retail config ran and null
+            // where it did not (src/lib.rs:994).
+            let hp_matches = match (cpu_row.get("hpEmptyOnRace"), gpu_row.get("hpEmptyOnRace")) {
+                (Some(json::Value::Null), Some(json::Value::Null)) => true,
+                (Some(json::Value::Bool(cpu)), Some(json::Value::Bool(gpu))) => cpu == gpu,
+                _ => false,
+            };
+            if !hp_matches {
+                problems.push(format!(
+                    "{tag} hpEmptyOnRace: cpu {:?}, gpu {:?}",
+                    cpu_row.get("hpEmptyOnRace"),
+                    gpu_row.get("hpEmptyOnRace")
+                ));
+            }
+        }
+        let cpu_events = events_multiset(cpu_reply.get("skillEvents").expect("engine skillEvents"));
+        let gpu_events = events_multiset(gpu_meta.get("skillEvents").expect("facade skillEvents"));
+        if cpu_events != gpu_events {
+            problems.push(format!("{tag}: skillEvents multiset cpu {cpu_events:?}, gpu {gpu_events:?}"));
+        }
+        match (replay_packet::frame_bytes(packet), replay_packet::frame_bytes(&cpu.packet)) {
+            (Some(gpu_frames), Some(cpu_frames)) if gpu_frames == cpu_frames => {}
+            (Some(gpu_frames), Some(cpu_frames)) => problems.push(format!(
+                "{tag}: packet frame bytes differ (gpu {} bytes, engine {} bytes)",
+                gpu_frames.len(),
+                cpu_frames.len()
+            )),
+            _ => problems.push(format!("{tag}: a packet lacks its frame payload")),
+        }
+    }
+
+    let full = gpu.run_batch_full(&[classic.clone()], &[7]).expect("full batch");
+    let cpu = dep_cpu::run_cpu_binary(&classic, 7).expect("engine full run");
+    if full[0].reply.as_deref() != Some(cpu.reply.as_str()) {
+        let gpu_text = full[0]
+            .reply
+            .clone()
+            .unwrap_or_else(|| format!("fallback {:?}", full[0].fallback));
+        let common = gpu_text
+            .as_bytes()
+            .iter()
+            .zip(cpu.reply.as_bytes())
+            .take_while(|(gpu, cpu)| gpu == cpu)
+            .count();
+        let gpu_tail = &gpu_text[common..(common + 80).min(gpu_text.len())];
+        let cpu_tail = &cpu.reply[common..(common + 80).min(cpu.reply.len())];
+        problems.push(format!(
+            "classic full reply differs at byte {common}: gpu {gpu_tail:?}, engine {cpu_tail:?}"
+        ));
+    }
+    if !problems.is_empty() {
+        panic!("{} mismatching races:\n{}", problems.len(), problems.join("\n"));
+    }
 }

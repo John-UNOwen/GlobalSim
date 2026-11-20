@@ -49,11 +49,18 @@ pub mod initialization;
 // shares their not(test) gating (see the notes above).
 #[cfg(all(feature = "race", not(test)))]
 pub mod race_exec;
+#[cfg(all(feature = "race", not(test)))]
+pub mod classic_exec;
 
 // The full-reply assembly reads the kernel reply channels and replays them
 // through the vendored engine json, sort and physics modules above.
 #[cfg(all(feature = "race", not(test)))]
 pub mod full_reply;
+
+// The classic lane's full reply reads the classic kernel's status exports
+// and record channels through the same vendored json module.
+#[cfg(all(feature = "race", not(test)))]
+pub mod classic_reply;
 
 // The batch facade builds the compact meta plus the GSIMRP01 packet the app's
 // run_compact path consumes, so it needs race_exec, the geometry and

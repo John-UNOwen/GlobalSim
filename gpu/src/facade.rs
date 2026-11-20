@@ -7,9 +7,13 @@
 //! reply text for `run_batch_full`. A race the kernel cannot answer
 //! bit-exactly comes back as `fallback`, everything else None, and the
 //! batch's other races are untouched. CPU replays stay on the CPU lanes.
+//!
+//! Two kernel lanes share this facade. A request carrying any retail flag runs
+//! the retail kernel, the rest run the classic kernel, which takes zero-skill
+//! races and refuses skills until wave 12b.
 
 use crate::json::Value;
-use crate::{race_exec, replay_packet};
+use crate::{classic_exec, race_exec, replay_packet};
 
 /// The vendored engine json module, re-exported so callers can build and
 /// parse meta with the same `Value` this facade uses.
@@ -27,13 +31,18 @@ pub struct BatchOutcome {
 
 pub struct GpuRaces {
     ctx: race_exec::RaceContext,
+    classic: Option<classic_exec::ClassicContext>,
 }
 
 impl GpuRaces {
-    /// Runs the exactness gate, loads the engine data and builds the kernel
+    /// Runs the exactness gate, loads the engine data and builds both kernels
     /// once. The instance then stays alive for the app's whole session.
     pub fn new() -> Result<GpuRaces, String> {
-        Ok(GpuRaces { ctx: race_exec::RaceContext::open()? })
+        let ctx = race_exec::RaceContext::open()?;
+        // A classic program that will not build leaves the retail lane running
+        // and sends classic requests back as fallbacks with the reason.
+        let classic = classic_exec::ClassicContext::open().ok();
+        Ok(GpuRaces { ctx, classic })
     }
 
     /// The gated device, for the app to report which GPU took the lane.
@@ -51,11 +60,13 @@ impl GpuRaces {
         self.ctx.register_geometry(course_id, json_text)
     }
 
-    /// Runs one batch in a single launch. The launchable races must share one
-    /// runner count, the same constraint the kernel grid carries, and a mixed
-    /// batch is an error for the caller to split. A request the domain gates
-    /// reject comes back as `fallback`, and a request that fails to parse
-    /// comes back as `fallback` too.
+    /// Runs one batch, retail requests in one retail launch and classic
+    /// requests in one classic launch. The retail launchable races must share
+    /// one runner count, the same constraint the kernel grid carries, and a
+    /// mixed batch is an error for the caller to split. The classic launch
+    /// pads to the batch's largest field. A request the domain gates reject
+    /// comes back as `fallback`, and a request that fails to parse comes back
+    /// as `fallback` too.
     pub fn run_batch(
         &mut self,
         requests: &[String],
@@ -68,16 +79,61 @@ impl GpuRaces {
                 seeds.len()
             ));
         }
-        let mut prepared: Vec<_> = Vec::with_capacity(requests.len());
-        for (request, seed) in requests.iter().zip(seeds) {
-            prepared.push(
-                self.ctx
-                    .prepare(request, *seed as i64)
-                    .unwrap_or_else(|reason| race_exec::Prepared::stub(reason)),
-            );
+        let mut outcomes: Vec<Option<BatchOutcome>> = (0..requests.len()).map(|_| None).collect();
+        let mut retail: Vec<(usize, race_exec::Prepared)> = Vec::new();
+        let mut classic: Vec<(usize, classic_exec::Prepared)> = Vec::new();
+        for (index, (request, seed)) in requests.iter().zip(seeds).enumerate() {
+            if takes_classic_lane(request) {
+                match &mut self.classic {
+                    Some(ctx) => classic.push((
+                        index,
+                        ctx.prepare(request, *seed as i64).unwrap_or_else(classic_exec::stub),
+                    )),
+                    None => outcomes[index] = Some(BatchOutcome {
+                        meta: None,
+                        packet: None,
+                        fallback: Some("the classic lane's kernel did not build".into()),
+                        reply: None,
+                    }),
+                }
+            } else {
+                retail.push((
+                    index,
+                    self.ctx
+                        .prepare(request, *seed as i64)
+                        .unwrap_or_else(|reason| race_exec::Prepared::stub(reason)),
+                ));
+            }
         }
-        let (run, _) = self.ctx.run_prepared(&mut prepared, None)?;
-        Ok(build_outcomes(&run, requests.iter().map(|request| player_horse_index(request))))
+        if !retail.is_empty() {
+            let slots: Vec<usize> = retail.iter().map(|&(index, _)| index).collect();
+            let players: Vec<f64> =
+                slots.iter().map(|&index| player_horse_index(&requests[index])).collect();
+            let mut prepared: Vec<race_exec::Prepared> =
+                retail.drain(..).map(|(_, prepared)| prepared).collect();
+            let (run, _) = self.ctx.run_prepared(&mut prepared, None)?;
+            for (index, outcome) in slots.into_iter().zip(build_outcomes(&run, players.into_iter())) {
+                outcomes[index] = Some(outcome);
+            }
+        }
+        if !classic.is_empty() {
+            let slots: Vec<usize> = classic.iter().map(|&(index, _)| index).collect();
+            let players: Vec<f64> =
+                slots.iter().map(|&index| player_horse_index(&requests[index])).collect();
+            let mut prepared: Vec<classic_exec::Prepared> =
+                classic.drain(..).map(|(_, prepared)| prepared).collect();
+            let run = self
+                .classic
+                .as_ref()
+                .expect("a classic batch means the classic lane opened")
+                .run_prepared(&mut prepared)?;
+            for (index, outcome) in
+                slots.into_iter().zip(build_classic_outcomes(&run, players.into_iter()))
+            {
+                outcomes[index] = Some(outcome);
+            }
+        }
+        Ok(outcomes.into_iter().map(|outcome| outcome.unwrap()).collect())
     }
 
     /// Runs one batch in a single launch and answers each launchable race
@@ -97,44 +153,62 @@ impl GpuRaces {
                 seeds.len()
             ));
         }
-        let mut prepared: Vec<_> = Vec::with_capacity(requests.len());
-        for (request, seed) in requests.iter().zip(seeds) {
-            match self.ctx.prepare(request, *seed as i64) {
-                Ok(mut p) => {
-                    p.set_full();
-                    prepared.push(p);
+        let mut outcomes: Vec<Option<BatchOutcome>> = (0..requests.len()).map(|_| None).collect();
+        let mut retail: Vec<(usize, race_exec::Prepared)> = Vec::new();
+        let mut classic: Vec<(usize, classic_exec::Prepared)> = Vec::new();
+        for (index, (request, seed)) in requests.iter().zip(seeds).enumerate() {
+            if takes_classic_lane(request) {
+                match &mut self.classic {
+                    Some(ctx) => classic.push((
+                        index,
+                        ctx.prepare(request, *seed as i64).unwrap_or_else(classic_exec::stub),
+                    )),
+                    None => outcomes[index] = Some(BatchOutcome {
+                        meta: None,
+                        packet: None,
+                        fallback: Some("the classic lane's kernel did not build".into()),
+                        reply: None,
+                    }),
                 }
-                Err(reason) => prepared.push(race_exec::Prepared::stub(reason)),
+            } else {
+                match self.ctx.prepare(request, *seed as i64) {
+                    Ok(mut prepared) => {
+                        prepared.set_full();
+                        retail.push((index, prepared));
+                    }
+                    Err(reason) => retail.push((index, race_exec::Prepared::stub(reason))),
+                }
             }
         }
-        let (run, _) = self.ctx.run_prepared(&mut prepared, None)?;
-        Ok(run
-            .races
-            .iter()
-            .zip(requests.iter().zip(seeds))
-            .map(|(race, (request, seed))| match &race.fallback {
-                Some(reason) => BatchOutcome {
-                    meta: None,
-                    packet: None,
-                    fallback: Some(reason.clone()),
-                    reply: None,
-                },
-                None => match crate::full_reply::build(request, *seed as i64, race) {
-                    Ok(text) => BatchOutcome {
-                        meta: None,
-                        packet: None,
-                        fallback: None,
-                        reply: Some(text),
-                    },
-                    Err(reason) => BatchOutcome {
-                        meta: None,
-                        packet: None,
-                        fallback: Some(reason),
-                        reply: None,
-                    },
-                },
-            })
-            .collect())
+        if !retail.is_empty() {
+            let slots: Vec<usize> = retail.iter().map(|&(index, _)| index).collect();
+            let mut prepared: Vec<race_exec::Prepared> =
+                retail.drain(..).map(|(_, prepared)| prepared).collect();
+            let (run, _) = self.ctx.run_prepared(&mut prepared, None)?;
+            for (index, outcome) in slots.into_iter().zip(run.races.iter()).map(|(index, race)| {
+                let (request, seed) = (requests[index].as_str(), seeds[index] as i64);
+                (index, full_outcome(race.fallback.as_ref(), || crate::full_reply::build(request, seed, race)))
+            }) {
+                outcomes[index] = Some(outcome);
+            }
+        }
+        if !classic.is_empty() {
+            let slots: Vec<usize> = classic.iter().map(|&(index, _)| index).collect();
+            let mut prepared: Vec<classic_exec::Prepared> =
+                classic.drain(..).map(|(_, prepared)| prepared).collect();
+            let run = self
+                .classic
+                .as_ref()
+                .expect("a classic batch means the classic lane opened")
+                .run_prepared(&mut prepared)?;
+            for (index, outcome) in slots.into_iter().zip(run.races.iter()).map(|(index, race)| {
+                let (request, seed) = (requests[index].as_str(), seeds[index] as i64);
+                (index, full_outcome(race.fallback.as_ref(), || crate::classic_reply::build(request, seed, race)))
+            }) {
+                outcomes[index] = Some(outcome);
+            }
+        }
+        Ok(outcomes.into_iter().map(|outcome| outcome.unwrap()).collect())
     }
 
     /// Runs one request against many seeds in a single launch, preparing it
@@ -147,7 +221,8 @@ impl GpuRaces {
     /// (see `race_exec::Prepared`), so the entries past the first are the
     /// template clone with that one word rewritten. Outputs are byte-identical
     /// to `run_batch` on the same request repeated per seed, fallbacks
-    /// included.
+    /// included. The classic lane's seed also feeds its host-side
+    /// construction, so a classic request prepares once per seed.
     pub fn run_repeated(
         &mut self,
         request: &str,
@@ -155,6 +230,31 @@ impl GpuRaces {
     ) -> Result<Vec<BatchOutcome>, String> {
         if seeds.is_empty() {
             return Ok(Vec::new());
+        }
+        // The one request parses once here, not once per seed: its reply
+        // fields are the only request input the meta path reads.
+        let player = player_horse_index(request);
+        if takes_classic_lane(request) {
+            let ctx = match &mut self.classic {
+                Some(ctx) => ctx,
+                None => {
+                    return Ok(seeds
+                        .iter()
+                        .map(|_| BatchOutcome {
+                            meta: None,
+                            packet: None,
+                            fallback: Some("the classic lane's kernel did not build".into()),
+                            reply: None,
+                        })
+                        .collect())
+                }
+            };
+            let mut prepared: Vec<classic_exec::Prepared> = seeds
+                .iter()
+                .map(|&seed| ctx.prepare(request, seed as i64).unwrap_or_else(classic_exec::stub))
+                .collect();
+            let run = ctx.run_prepared(&mut prepared)?;
+            return Ok(build_classic_outcomes(&run, std::iter::repeat(player).take(seeds.len())));
         }
         let mut prepared: Vec<_> = match self.ctx.prepare(request, seeds[0] as i64) {
             Ok(template) => seeds.iter().map(|&seed| template.with_seed(seed)).collect(),
@@ -166,9 +266,6 @@ impl GpuRaces {
                 .collect(),
         };
         let (run, _) = self.ctx.run_prepared(&mut prepared, None)?;
-        // The one request parses once here, not once per seed: its reply
-        // fields are the only request input the meta path reads.
-        let player = player_horse_index(request);
         Ok(build_outcomes(&run, std::iter::repeat(player).take(seeds.len())))
     }
 }
@@ -209,6 +306,129 @@ fn build_outcomes(
             }
         })
         .collect()
+}
+
+/// Which kernel lane a request belongs to. The engine builds its retail
+/// config when the runtime, sections or initialization flag is set and runs
+/// the classic solver otherwise (src/api.rs:74-77, src/lib.rs:1521-1523).
+/// `experimentalRetailStartup` requires the runtime flag (src/api.rs:66), so
+/// listing it keeps a startup-only request on the path that quotes the
+/// engine's own refusal.
+fn takes_classic_lane(request: &str) -> bool {
+    match json::parse(request) {
+        Ok(root) => root_takes_classic_lane(&root),
+        Err(_) => false,
+    }
+}
+
+fn root_takes_classic_lane(root: &Value) -> bool {
+    let flagged = |key: &str| root.get(key).and_then(Value::as_bool) == Some(true);
+    !(flagged("experimentalRetailRuntime")
+        || flagged("experimentalRetailInitialization")
+        || flagged("experimentalRetailSections")
+        || flagged("experimentalRetailStartup"))
+}
+
+/// A full-reply answer: the assembled text, or the reason the race stayed
+/// on the CPU lane.
+fn full_outcome(
+    fallback: Option<&String>,
+    build: impl FnOnce() -> Result<String, String>,
+) -> BatchOutcome {
+    if let Some(reason) = fallback {
+        return BatchOutcome { meta: None, packet: None, fallback: Some(reason.clone()), reply: None };
+    }
+    match build() {
+        Ok(text) => BatchOutcome { meta: None, packet: None, fallback: None, reply: Some(text) },
+        Err(reason) => BatchOutcome { meta: None, packet: None, fallback: Some(reason), reply: None },
+    }
+}
+
+/// One classic launch's answers, in input order: flagged races carry the
+/// reason, the rest get the compact meta and the GSIMRP01 packet built from
+/// the six replay columns.
+fn build_classic_outcomes(
+    run: &classic_exec::ClassicRun,
+    players: impl Iterator<Item = f64>,
+) -> Vec<BatchOutcome> {
+    run.races
+        .iter()
+        .zip(players)
+        .map(|(race, player)| match &race.fallback {
+            Some(reason) => BatchOutcome {
+                meta: None,
+                packet: None,
+                fallback: Some(reason.clone()),
+                reply: None,
+            },
+            None => {
+                let meta = classic_meta(race, player);
+                let frames: Vec<Vec<[f64; 6]>> = race
+                    .frames
+                    .iter()
+                    .map(|tick| tick.iter().map(|row| [row[0], row[1], row[2], row[3], row[4], row[5]]).collect())
+                    .collect();
+                let (meta_text, packet) = replay_packet::build_classic(&meta, &frames);
+                BatchOutcome {
+                    meta: Some(meta_text),
+                    packet: Some(packet),
+                    fallback: None,
+                    reply: None,
+                }
+            }
+        })
+        .collect()
+}
+
+/// The compact meta of a classic race, same keys and types as `compact_meta`.
+/// The engine leaves hpEmptyOnRace null unless the retail config ran
+/// (src/lib.rs:994), and a zero-skill classic reply's only skillEvents
+/// entries are the completed kakari episodes (src/lib.rs:690-701).
+fn classic_meta(race: &classic_exec::ClassicGpu, player: f64) -> Value {
+    let n = race.finish_raw_all.len();
+    let finished: Vec<f64> = (0..n)
+        .map(|r| race.finish_raw_all[r].unwrap_or(race.loop_end))
+        .collect();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| finished[a].total_cmp(&finished[b]));
+    let mut order_index = vec![0usize; n];
+    for (rank, &horse_i) in order.iter().enumerate() {
+        order_index[horse_i] = rank;
+    }
+    let results = json::arr(
+        (0..n)
+            .map(|r| {
+                json::obj(vec![
+                    ("finishOrder", json::num(order_index[r] as f64)),
+                    ("finishTimeRaw", json::num(finished[r])),
+                    ("hpEmptyOnRace", Value::Null),
+                    (
+                        "lastSpurtStartDistance",
+                        json::num(if race.lsttrans_all[r] > 0. { race.lsttrans_all[r] } else { -1. }),
+                    ),
+                    ("rushingPenaltyCount", json::num(race.rscore_all[r] as f64)),
+                    ("rushingStartCount", json::num(race.tempt_all[r] as f64)),
+                    ("startDelayTime", json::num(race.start_delay_all[r])),
+                ])
+            })
+            .collect(),
+    );
+    let skill_events = json::arr(
+        race.kakari
+            .chunks(5)
+            .map(|record| {
+                json::obj(vec![
+                    ("horseIndex", json::num(record[0] as f64)),
+                    ("skillId", Value::String("kakari".into())),
+                ])
+            })
+            .collect(),
+    );
+    json::obj(vec![
+        ("playerHorseIndex", json::num(player)),
+        ("results", results),
+        ("skillEvents", skill_events),
+    ])
 }
 
 /// The reply object compact_record reads: playerHorseIndex, results in roster
@@ -298,7 +518,11 @@ impl DeviceFacts {
 /// Why the batch would refuse a request, None when it would run. `device`
 /// None models "no GPU passed the exactness gate", Some carries one device's
 /// facts. The device checks come first, then the request checks, so a caller
-/// can pre-filter requests against known facts without a device.
+/// can pre-filter requests against known facts without a device. The checks
+/// follow the lane the request routes to. Two classic gates need the course
+/// table and stay in `classic_exec::prepare`: a course with more than
+/// CLS_MAX_SLOPES slopes, and a runner whose adjusted raw power exceeds 1200,
+/// which arms the injected asitame.
 pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<String> {
     let device = match device {
         None => return Some("no GPU passes the exactness gate".into()),
@@ -342,24 +566,63 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
     if root.get("experimentalRetailStartup").is_some_and(|v| v.as_bool().is_none()) {
         return Some("experimentalRetailStartup must be a boolean".into());
     }
-    if root.get("experimentalRetailRuntime").and_then(Value::as_bool) != Some(true) {
-        return Some("non-retail runtime".into());
-    }
-    // The engine refuses geometry with grid starts (api.rs:68-71).
-    if grid_valid && root.get("experimentalRetailGeometry").and_then(Value::as_bool) == Some(true) {
-        return Some(
-            "World geometry requires the experimental runtime and standard starting grid".into(),
-        );
-    }
-    if root.get("singleMode").and_then(Value::as_bool) == Some(true) {
-        return Some("singleMode is outside the GPU lane".into());
-    }
-    if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) == Some(true) {
-        return Some("experimentalLaterStaminaMechanics is outside the GPU lane".into());
-    }
-    if (1..=race_exec::RACE_MAXR).contains(&horse_count) {
-        None
+    if root_takes_classic_lane(&root) {
+        // The classic lane's refusals, the same texts and order as
+        // classic_exec::prepare's domain gates.
+        if root.get("retailRuntime").and_then(Value::as_bool) == Some(true)
+            || root.get("experimentalRetailGeometry").and_then(Value::as_bool) == Some(true)
+        {
+            return Some("retail runtime belongs to the retail lane".into());
+        }
+        if root.get("experimentalGrid").is_some() {
+            return Some("experimentalGrid belongs to the retail lane".into());
+        }
+        if root.get("singleMode").and_then(Value::as_bool) == Some(true) {
+            return Some("singleMode's +400 stat bonus is outside the GPU lane".into());
+        }
+        if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) == Some(true) {
+            return Some("later stamina mechanics are not in the classic kernel".into());
+        }
+        if root.get("traceConservePower").and_then(Value::as_bool) == Some(true) {
+            return Some("conserve-power tracing is not in the classic kernel".into());
+        }
+        let skilled = root
+            .get("horses")
+            .and_then(Value::as_array)
+            .is_some_and(|horses| {
+                horses.iter().any(|h| {
+                    h.get("skills").and_then(Value::as_array).is_some_and(|s| !s.is_empty())
+                })
+            });
+        if skilled {
+            return Some("skills belong to the retail kernel lane".into());
+        }
+        if (1..=classic_exec::CLS_MAXR).contains(&horse_count) {
+            None
+        } else {
+            Some("roster size outside the kernel's range".into())
+        }
     } else {
-        Some("roster size outside the kernel's range".into())
+        if root.get("experimentalRetailRuntime").and_then(Value::as_bool) != Some(true) {
+            return Some("non-retail runtime".into());
+        }
+        // The engine refuses geometry with grid starts (api.rs:68-71).
+        if grid_valid && root.get("experimentalRetailGeometry").and_then(Value::as_bool) == Some(true)
+        {
+            return Some(
+                "World geometry requires the experimental runtime and standard starting grid".into(),
+            );
+        }
+        if root.get("singleMode").and_then(Value::as_bool) == Some(true) {
+            return Some("singleMode is outside the GPU lane".into());
+        }
+        if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) == Some(true) {
+            return Some("experimentalLaterStaminaMechanics is outside the GPU lane".into());
+        }
+        if (1..=race_exec::RACE_MAXR).contains(&horse_count) {
+            None
+        } else {
+            Some("roster size outside the kernel's range".into())
+        }
     }
 }

@@ -51,3 +51,22 @@ pub fn build(meta: &Value, frames: &[Vec<[f64; 6]>]) -> (String, Vec<u8>) {
     binary_replay::encode(&mut reply, &mut metadata, &mut packet);
     (metadata, packet)
 }
+
+/// The classic lane's packet. Its capture has no pre-loop frame, so frame `k`
+/// carries time `classic_loop_end(k + 1)`, the engine's f64 sum of `1 / 15`
+/// (src/lib.rs:581, :939).
+pub fn build_classic(meta: &Value, frames: &[Vec<[f64; 6]>]) -> (String, Vec<u8>) {
+    let mut reply = meta.clone();
+    let mut stored = ReplayFrames::new(frames.first().map_or(0, |row| row.len()));
+    for (tick, rows) in frames.iter().enumerate() {
+        let t = crate::classic_reply::classic_loop_end(tick + 1);
+        stored.capture(t, |r| rows[r]);
+    }
+    if let Value::Object(map) = &mut reply {
+        map.insert("frames".into(), Value::ReplayFrames(Box::new(stored)));
+    }
+    let mut metadata = String::new();
+    let mut packet = Vec::new();
+    binary_replay::encode(&mut reply, &mut metadata, &mut packet);
+    (metadata, packet)
+}

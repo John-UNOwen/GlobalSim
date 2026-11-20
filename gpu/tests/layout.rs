@@ -97,6 +97,54 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     );
 }
 
+#[cfg(feature = "race")]
+#[test]
+fn classic_scratch_regions_match_the_kernel_mirrors() {
+    use globalsim_gpu::classic_exec as ce;
+    assert_eq!(ce::CLS_MAXR, 120);
+    assert_eq!(ce::CLS_MAX_TICKS, 6144);
+    // Frame rows carry the six replay columns plus eight debug columns
+    // (target speed, lane target, pos-keep coef and mode, spot, duel,
+    // active slope, downhill mode).
+    assert_eq!(ce::CLS_FRAME_COLS, 14);
+    // Input and status strides stack exactly.
+    assert_eq!(ce::CLS_RI_STRIDE, ce::CLS_RI_RUN0 + 48 * ce::CLS_MAXR);
+    assert_eq!(ce::CLS_RI_STRIDE, 5776);
+    assert_eq!(ce::CLS_RD_STRIDE, ce::CLS_RD_SLOPES + 3 * ce::CLS_MAX_SLOPES);
+    assert_eq!(ce::CLS_RD_STRIDE, 7744);
+    assert_eq!(ce::CLS_ST_STRIDE, ce::CLS_ST_RUN0 + ce::CLS_ST_RUN_STRIDE * ce::CLS_MAXR);
+    assert_eq!(ce::CLS_ST_STRIDE, 16 + 17 * ce::CLS_MAXR);
+    assert_eq!(ce::CLS_ST_STRIDE, 2056);
+    assert_eq!(ce::CLS_SU_STRIDE, 24400);
+    assert_eq!(ce::CLS_SD_STRIDE, 54784);
+    // uint scratch stacking per classic_core.cl: header words 0..512, runner
+    // blocks (72 words each, the reply-mirror slots included), target map
+    // 120x120, blocker words, target list, owner map, tick-rank snapshot and
+    // the style-leader scan.
+    assert_eq!(512 + 72 * ce::CLS_MAXR, 9152);
+    assert!(9152 <= 9168);
+    assert_eq!(9168 + ce::CLS_MAXR * ce::CLS_MAXR, 23568);
+    assert_eq!(23568 + 128, 23696);
+    assert_eq!(23696 + 128, 23824);
+    assert!(23824 + ce::CLS_MAXR <= 23952);
+    assert!(23952 + ce::CLS_MAXR <= 24080);
+    assert!(24080 + 6 <= ce::CLS_SU_STRIDE);
+    // Reply record channels: header, competition triples, phase pairs, and
+    // five-word kakari skillEvents records.
+    assert_eq!(ce::CLS_RP_STRIDE, ce::CLS_RP_SK0 + ce::CLS_RP_SK_CAP);
+    assert_eq!(ce::CLS_RP_STRIDE, 3848);
+    assert_eq!(ce::S_LSTTRANS + 2, ce::S_SPURTT);
+    assert_eq!(ce::S_SPURTT + 2, ce::S_SPURTD);
+    assert!(ce::S_SPURTTICK + 2 < ce::CLS_ST_RUN_STRIDE);
+    // double scratch stacking: field tables below the runner block (duel park
+    // and proximity mirrors each span 120*120), runner blocks, slack.
+    assert_eq!(14912 + ce::CLS_MAXR * ce::CLS_MAXR, 29312);
+    assert_eq!(41216 + 112 * ce::CLS_MAXR, 54656);
+    assert!(54656 <= ce::CLS_SD_STRIDE);
+    // The per-race frame buffer matches the kernel capture row stride.
+    assert_eq!(ce::CLS_SD_STRIDE, 41216 + 112 * ce::CLS_MAXR + 128);
+}
+
 #[test]
 fn kernel_structs_have_the_c_layout() {
     // repr(C) of plain f32/i32 fields has no padding on x86, so each struct's

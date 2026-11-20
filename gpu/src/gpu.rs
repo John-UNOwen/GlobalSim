@@ -38,6 +38,19 @@ pub const RACE_KERNEL_SOURCE: &str = concat!(
     include_str!("kernels/race.cl")
 );
 pub const BUILD_OPTIONS: &str = "-cl-fp32-correctly-rounded-divide-sqrt";
+// The classic lane's kernel runs no powf or log10 (construction is host
+// side), so this program carries the rng and initialization helpers only.
+pub const CLASSIC_KERNEL_SOURCE: &str = concat!(
+    include_str!("kernels/rng_core.cl"),
+    "\n",
+    include_str!("kernels/skills.cl"),
+    "\n",
+    include_str!("kernels/initialization.cl"),
+    "\n",
+    include_str!("kernels/classic_core.cl"),
+    "\n",
+    include_str!("kernels/race_classic.cl")
+);
 
 // cl.h values, as raw ids through Device::info_raw.
 const CL_DEVICE_NAME: u32 = 0x102B;

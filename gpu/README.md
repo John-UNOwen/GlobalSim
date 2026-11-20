@@ -1586,14 +1586,18 @@ JSON without frames, restricted to the fields that path reads:
 the framing matches the engine byte for byte and the meta bytes embedded at
 offset 32 equal the returned `meta` string exactly (frame rows start at
 `32 + meta_len`). Frame `k` carries time `loop_end(k)`, the engine's f32
-time sum.
+time sum. A classic-lane packet goes through `build_classic` instead, whose
+frame `k` carries `classic_loop_end(k + 1)`, the engine's f64 sum of `1 / 15`
+with no pre-loop frame (`src/lib.rs:581`, `:939`).
 
 A race a gate rejects (an invalid `experimentalGrid` shape, which names the
 engine's own message, grid combined with the geometry flag, non-retail
 runtime, a roster outside 1..120, a skill construct the compiler refuses, an
 event log past `EV_MAX`
 512, or a request that fails to parse) comes back as `fallback` with meta
-and packet None, and the batch's other races run unaffected. A valid grid
+and packet None, and the batch's other races run unaffected. A classic-lane
+request the classic gates reject comes back the same way, naming the classic
+refusal. A valid grid
 race runs on the GPU and its meta carries `experimentalGridVersion: 1`, like
 the engine's reply (`src/lib.rs:1135-1138`).
 `gate_reasons(request, device)` answers the same refusals as a pure
@@ -1835,6 +1839,46 @@ after ordinary events at equal time, carrying the `repeat` flag while the
 engine marks them by ordinal (`lib.rs:1030-1033`), and kakari events carry no
 ordinal, ordering after every ordinal event.
 
+## Classic lane (wave 12a)
+
+A request carrying no retail flag runs the engine's classic solver:
+`step_forward` in f64, `dt = 1.0 / 15.0` (`src/lib.rs:66`,
+`race_solver.rs:1176-1223`). The retail kernel does not implement it.
+`classic_exec.rs` prepares the race, `kernels/classic_core.cl` and
+`kernels/race_classic.cl` run it, `classic_reply.rs` assembles the full reply,
+and `facade::run_batch` splits a batch by lane and launches each side once.
+
+Construction runs host side in Rust, in the engine's own float types: the stats
+chain with the mood and rank adjustments, the per-runner seeding chain, the
+course sections, and the duel, spot and position-keep constants. The host builds
+it with the vendored engine code (`initialization::stats_reference`,
+`Rule30CARng`) and mirrors the pieces that stay private, so the kernel carries
+only the tick loop and the draws the engine makes inside it: the kakari
+`uniform(100)`, the extra lane-move `random()`, the position-keep wisdom
+`random()`, the hill `random()`, and the HP stream's spurt accept loop. With the
+construction on the host the classic kernel contains no `powf` or `log10` call
+at all.
+
+Every runner keeps its own `Rule30CARng`, seeded `(seed + i * 7919,
+race_seed_hi(seed))` like the engine (`src/lib.rs:505-509`,
+`race_solver_builder.rs:866-867`). The host replays the engine's draw order
+before the loop: the builder int32 pair, the hp seed, the `gorosi` and
+`pace_effect` int32s (`race_solver.rs:770-771`, which `initialization.cl`'s
+`im_r30` does not draw), the gate roll, the random lot, the start delay, the
+per-slope hill seeds (plus the extra draw when the first slope starts at 0),
+the kakari style draw, the skip check, the kakari duration draws, and the 24
+section modifiers. The retail lane never consumes
+this stream, so the retail substream schedule is untouched.
+
+Gates: `tests/wave12a_classic_gate.rs` compares every frame column with
+`to_bits` and `finishTimeRaw` against `dep_cpu::run_cpu_race`, over solo
+styles, the v77 field, and 8 and 18 horse app rosters on courses 10504 and
+10508 with seeds 1 to 3. `tests/wave12a_full_gate.rs` compares the whole reply
+text against `PreparedRace::run().write_json` on the same scenes.
+`facade_gate::a_classic_request_answers_from_the_gpu_lane` checks the facade
+path, meta and packet bytes and full reply, beside a retail race in the same
+batch. Scratch sizes are pinned in `tests/layout.rs` under `CLS_*`.
+
 ## Not covered
 
 What the GPU lane still refuses, each named at the race or at compile time.
@@ -1866,9 +1910,18 @@ The skill-side lists live in `SKILLS_DESIGN.md`.
   true` are refused on both lanes by the run gate, and the `false` or
   absent forms, which the engine runs identically to the ported retail mode,
   answer normally
-- Non-retail runtime requests ("non-retail runtime"). Wave 11 scoped the
-  delta: it is a second solver, not a flag swap, so the port is deferred to a
-  dedicated wave (see `SKILLS_DESIGN.md`, "Non-retail runtime physics")
+- Non-retail (classic) requests the classic kernel does not port, each refused
+  by name in `classic_exec::prepare` and in `facade::gate_reasons`: any
+  non-empty `skills` ("skills belong to the retail kernel lane", classic skills
+  land in wave 12b), `experimentalGrid` starts, `singleMode`,
+  `experimentalLaterStaminaMechanics`, `traceConservePower`, the legacy
+  `retailRuntime` key, `experimentalRetailGeometry`, a roster beyond
+  `CLS_MAXR` (120), a course with more than `CLS_MAX_SLOPES` (16) slopes, and a
+  runner whose adjusted raw power exceeds 1200, which arms the injected
+  asitame (`race_solver_builder.rs:802`). Zero-skill classic races run on the
+  GPU lane. The classic refusals that need the course table (slope count,
+  adjusted raw power) run at prepare time, so `gate_reasons` alone does not
+  name them
 
 
 ## Grid mode
