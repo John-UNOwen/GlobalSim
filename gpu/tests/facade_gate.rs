@@ -534,6 +534,31 @@ fn gate_reasons_names_every_refusal() {
         facade::gate_reasons(&oversized, Some(&accepted)).as_deref(),
         Some("roster size outside the kernel's range")
     );
+    // Wave 15's band gate: the classic lane refuses non-grid fields above
+    // the band by name, and the band's edge keeps passing.
+    assert_eq!(
+        facade::gate_reasons(
+            &format!(
+                "{{\"courseId\":10504,\"horses\":[{}]}}",
+                vec!["{}"; race_exec::NON_GRID_MAX_RUNNERS + 1].join(",")
+            ),
+            Some(&accepted)
+        )
+        .as_deref(),
+        Some(race_exec::NON_GRID_BAND_REFUSAL),
+        "a classic field of 25 refuses with the band reason"
+    );
+    assert_eq!(
+        facade::gate_reasons(
+            &format!(
+                "{{\"courseId\":10504,\"horses\":[{}]}}",
+                vec!["{}"; race_exec::NON_GRID_MAX_RUNNERS].join(",")
+            ),
+            Some(&accepted)
+        ),
+        None,
+        "24 classic runners stay inside the band"
+    );
     let broken = "not json";
     assert!(facade::gate_reasons(broken, Some(&accepted)).is_some(), "a broken request is refused");
 }

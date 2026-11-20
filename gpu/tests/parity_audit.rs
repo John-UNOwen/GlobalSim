@@ -614,6 +614,11 @@ fn gate_reasons_enumerates_exactly_the_documented_fallbacks() {
             format!(r#"{{"courseId":10504,"experimentalRetailRuntime":true,"horses":[{}]}}"#, vec!["{}"; 145].join(",")),
             Some(accepted()),
         ),
+        (
+            "classic non-grid field past the band",
+            format!(r#"{{"courseId":10504,"horses":[{}]}}"#, vec!["{}"; 25].join(",")),
+            Some(accepted()),
+        ),
     ];
     let documented: BTreeSet<String> = [
         "no GPU passes the exactness gate",
@@ -627,6 +632,7 @@ fn gate_reasons_enumerates_exactly_the_documented_fallbacks() {
         "staminasyoubu, injected above 2100 m, stays outside the classic kernel",
         "skillData has no entry for skill 999999999",
         "roster size outside the kernel's range",
+        "non-grid fields above 24 runners are outside the validated lane band",
         "non-retail runtime",
         "World geometry requires the experimental runtime and standard starting grid",
         "experimentalLaterStaminaMechanics draws from a live solver stream the retail kernel resolves host-side",

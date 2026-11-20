@@ -7,9 +7,9 @@
 // no fast math, and every f64-to-f32 store is a single-rounding
 // convert_float_rte matching the Rust `as f32`.
 
-// Runners per initialization case (the race kernel's roster cap, mirrored by
-// the host's MAX_RUNNERS), hills per course, section count.
-#define MAXR 144
+// Runners per initialization case (the grid-mode roster cap, src/lib.rs:267),
+// hills per course, section count.
+#define MAXR 120
 #define MAXH 8
 #define SEC 24
 
@@ -18,9 +18,8 @@
 #define IM_INIT 2
 #define IM_HP 3
 
-// Input u32 slots, stride IIU (sized to the IM_INIT per-runner block:
-// US_R0 + IIS_STRIDE * MAXR).
-#define IIU 448
+// Input u32 slots, stride IIU (sized to the IM_INIT per-runner block).
+#define IIU 384
 #define US_MODE 0
 #define US_A 1
 #define US_B 2
@@ -41,8 +40,8 @@
 #define US_WISB 1
 #define US_BONUS 2
 
-// Input f64 slots (raw bits), stride IIL (IL_PARAMS + 10 parameters).
-#define IIL 168
+// Input f64 slots (raw bits), stride IIL.
+#define IIL 144
 // IM_STATS: 0..4 = raw speed, stamina, power, guts, wisdom.
 // IM_R30: 0 = first slope start, 1 = first slope value, 2 = adjusted wisdom,
 //         3 = course distance.
@@ -66,11 +65,10 @@
 //        5..9 hp_style[0..4], 10..12 course speed c0, c1, c2,
 //        13..14 hp_drain[3] (HpGutsCoefSqrt), hp_drain[4] (HpGutsCoef).
 
-// Output u32 slots, stride OOU (the per-runner block, its continuation
-// bank, and tail margin). 0..59 is the RetailRandom bank, 60..119 the
+// Output u32 slots, stride OOU. 0..59 is the RetailRandom bank, 60..119 the
 // per-runner RUSH bank (paired mode). Slot 120 is the fallback flag:
 // 0 ok, 1 a capped uniform() ran out, 2 an item input exceeded a layout bound.
-#define OOU 4608
+#define OOU 3840
 #define OS_BANK 0
 #define OS_RUSHBANK 60
 #define OS_FLAG 120
@@ -114,8 +112,8 @@
 #define OH_GUTS 170
 #define OH_WISDOM 171
 
-// Output f64 slots (raw bits), stride OOL (MAXR continuation plus margin).
-#define OOL 168
+// Output f64 slots (raw bits), stride OOL.
+#define OOL 144
 // IM_HP: out_l 0 ground_modifier, 1 base_speed, 2 max_hp (all raw f64).
 // IM_STATS: 0..4 base stats, 5 raw_stamina, 6 raw_power, 7..11 adjusted.
 // IM_R30: 0 start-delay random, 1 kakari check random, 2..4 r1..r3,

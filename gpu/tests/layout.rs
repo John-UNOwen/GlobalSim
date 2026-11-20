@@ -14,7 +14,7 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     // The full scratch mirrors: stat rows, race state, banks, then the skill
     // state block, five token orders, the substream bank, the staging, the
     // additional-activation token pool and the per-runner running lists.
-    // Sized to the race kernel's roster cap RACE_MAXR 144 and SK_RMAX 960.
+    // Sized to the grid-mode roster cap RACE_MAXR 120 and SK_RMAX 960.
     // Wave 6b grew the record state 8 to 20 words per record (plus 11520),
     // the token pool 128 x 6 (plus 768) and the running lists (plus 1080),
     // the scalar block 83 to 89 slots per runner (plus 720 plus alignment),
@@ -28,28 +28,23 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     // The fan hunt journal adds 16384 words plus the tick mirror (plus 16385).
     // Wave 10 adds the reply channel block plus the shifts from the record
     // state 24 to 26 words and the scalar block 89 to 90 slots (plus 102978).
-    // Wave 13b raises the race roster cap 120 to 144 (SCR plus 89272,
-    // SRL plus 35640).
-    assert_eq!(re::SCR_U_WORDS, 692271);
-    assert_eq!(re::SRL_WORDS, 392480);
+    assert_eq!(re::SCR_U_WORDS, 602999);
+    assert_eq!(re::SRL_WORDS, 356840);
     // Input and status strides track RACE_MAXR.
-    // Wave 13b: 120 to 144 runners grows the input row (1592 to 1904).
-    assert_eq!(re::RI_STRIDE, 1904);
+    assert_eq!(re::RI_STRIDE, 1592);
     // Wave 7 grew the pd runner block from 8 to 9 words for the unclamped
     // wisdom accumulator word (RIL_STRIDE 2072 to 2192). Wave 8 added the
-    // guts accumulator and the spot proficiency word (2192 to 2432). Wave 13b
-    // grew it with the roster cap (2432 to 2864).
-    assert_eq!(re::RIL_STRIDE, 2864);
+    // guts accumulator and the spot proficiency word (2192 to 2432).
+    assert_eq!(re::RIL_STRIDE, 2432);
     // Wave 10 adds the snapshot, spurt and first-spurt columns (1080 words).
-    // Wave 13b grew it with the roster cap (2168 to 2600).
-    assert_eq!(re::ST_STRIDE, 2600);
+    assert_eq!(re::ST_STRIDE, 2168);
     // The pd runner block, race scalars and per-runner precompute block stack
     // in that order, each behind the last per the kernel's formulas.
     assert_eq!(re::PL_FRONT_LANE, re::PI_RUNNER0 + re::PI_RUN_STRIDE * re::RACE_MAXR);
     assert_eq!(re::PD_CF_DIST, re::PL_FRONT_LANE + 16);
     assert_eq!(re::PD_RUN0, re::PL_FRONT_LANE + 32);
     assert_eq!(re::RIL_STRIDE, re::PD_RUN0 + re::PD_RUN_STRIDE * re::RACE_MAXR);
-    // The init program's per-case strides fit the 144-runner IM_INIT block.
+    // The init program's per-case strides fit the 120-runner IM_INIT block.
     assert!(globalsim_gpu::initialization::OS_RUN0
         + globalsim_gpu::initialization::IRS_STRIDE
             * globalsim_gpu::initialization::MAX_RUNNERS

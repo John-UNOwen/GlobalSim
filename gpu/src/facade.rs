@@ -541,8 +541,10 @@ impl DeviceFacts {
 /// can pre-filter requests against known facts without a device. The checks
 /// follow the lane the request routes to. One classic gate needs the course
 /// table and stays in `classic_exec::prepare`: a course with more than
-/// CLS_MAX_SLOPES slopes. A runner above the 1200 adjusted raw power is not a
-/// gate: `prepare` injects the asitame record like the engine does.
+/// CLS_MAX_SLOPES slopes. Rosters past a lane's cap refuse by size, and
+/// non-grid fields above `race_exec::NON_GRID_MAX_RUNNERS` refuse by band.
+/// A runner above the 1200 adjusted raw power is not a gate: `prepare`
+/// injects the asitame record like the engine does.
 pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<String> {
     let device = match device {
         None => return Some("no GPU passes the exactness gate".into()),
@@ -618,10 +620,12 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
                 return Some(reason);
             }
         }
-        if (1..=classic_exec::CLS_MAXR).contains(&horse_count) {
-            None
-        } else {
+        if !(1..=classic_exec::CLS_MAXR).contains(&horse_count) {
             Some("roster size outside the kernel's range".into())
+        } else if !grid_valid && horse_count > race_exec::NON_GRID_MAX_RUNNERS {
+            Some(race_exec::NON_GRID_BAND_REFUSAL.into())
+        } else {
+            None
         }
     } else {
         if root.get("experimentalRetailRuntime").and_then(Value::as_bool) != Some(true) {
@@ -640,10 +644,12 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
                  the retail kernel resolves host-side".into(),
             );
         }
-        if (1..=race_exec::RACE_MAXR).contains(&horse_count) {
-            None
-        } else {
+        if !(1..=race_exec::RACE_MAXR).contains(&horse_count) {
             Some("roster size outside the kernel's range".into())
+        } else if !grid_valid && horse_count > race_exec::NON_GRID_MAX_RUNNERS {
+            Some(race_exec::NON_GRID_BAND_REFUSAL.into())
+        } else {
+            None
         }
     }
 }

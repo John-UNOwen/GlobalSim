@@ -106,11 +106,9 @@ pub const CLS_ST_RUN_STRIDE: usize = 20;
 pub const CLS_SU_STRIDE: usize = 24400 + crate::skills_compile::SK_STRIDE + 26664;
 pub const CLS_SD_STRIDE: usize = 118336;
 
-// The compiled skill table rides the SU channel after the dynamic region the
-// kernel owns, and the classic skill runtime state follows the table. The
-// pending map keeps one word triple per (runner, skill slot): the stored
-// ordinal and the sid plus a unique flag, mirroring the engine's
-// pending_skills entries (lib.rs:676-678, :708-720).
+// The compiled skill table rides the SU channel after the kernel's dynamic
+// region, then the classic skill runtime state. The pending map mirrors
+// pending_skills (lib.rs:676-678, :708-720), one word triple per runner slot.
 pub const CLS_SK_TABLE: usize = 24400;
 pub const CLS_SKD: usize = 24400 + crate::skills_compile::SK_STRIDE;
 pub const CLS_SKD_ORD: usize = CLS_SKD;
@@ -440,10 +438,10 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
     {
         return Ok(flagged(n, "retail runtime belongs to the retail lane".into()));
     }
-    // Engine errors first, in the order the engine raises them: the grid
-    // shape check runs inside parse_race_spec (lib.rs:262-272, :1502) and the
-    // classic trace check follows at lib.rs:1504-1506. A valid grid is an
-    // engine-supported mode on both lanes (lib.rs:603-609, :747-749).
+    // Engine errors first, in the order the engine raises them (the grid
+    // shape check in parse_race_spec at lib.rs:262-272, :1502, then the
+    // classic trace check at lib.rs:1504-1506). A valid grid is engine-
+    // supported on both lanes (lib.rs:603-609, :747-749).
     let grid = match root.get("experimentalGrid") {
         None => false,
         Some(grid) => {
@@ -469,7 +467,7 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool).unwrap_or(false);
     if later_stamina && course.distance > 2100.0 {
         // The engine injects the synthetic staminasyoubu skill above 2100 m
-        // (race_solver_builder.rs:819); the classic kernel models the three
+        // (race_solver_builder.rs:819). The classic kernel models the three
         // timed systems but not that construction hook.
         return Ok(flagged(n, LATER_STAMINA_ABOVE_2100.into()));
     }
@@ -479,6 +477,12 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
     let single_mode = root.get("singleMode").and_then(Value::as_bool).unwrap_or(false);
     if n == 0 || n > CLS_MAXR {
         return Ok(flagged(n, "roster size outside the kernel's range".into()));
+    }
+    // The classic lane shares the retail lane's band refusal: it was only
+    // ever validated to 18 runners, and the gate band is uniform (README
+    // "Wave 15: the non-grid band refusal and the cap back at 120").
+    if !grid && n > crate::race_exec::NON_GRID_MAX_RUNNERS {
+        return Ok(flagged(n, crate::race_exec::NON_GRID_BAND_REFUSAL.into()));
     }
     if course.slopes.len() > CLS_MAX_SLOPES {
         return Ok(flagged(n, "more slopes than the classic kernel carries".into()));
@@ -502,8 +506,7 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
 
     // The asitame injection arms on the adjusted raw power, which only the
     // stats authority knows (race_solver_builder.rs:802, :295), so the plan
-    // needs one stats pass before the compiler runs. The main loop re-runs
-    // the same deterministic reference per runner.
+    // runs one stats pass first. The main loop re-runs it per runner.
     let mut extras = crate::skills_compile::ClassicExtras { raw_power: Vec::new(), strategy: Vec::new() };
     for (r, horse) in horses.iter().enumerate() {
         let strategy = strategy_id(horse.get_str("strategy")?)?;
@@ -650,10 +653,8 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         let _random_lot = solver.uniform(100.0);
         let start_delay = 0.1 * solver.random();
         // The constructor skill pass (race_solver.rs:1008) lands its static
-        // fires between the start-delay draw and everything that reads the
-        // stats, so the compiler-listed bumps move the fields here. The stat
-        // writes carry the engine's max(1.0) clamp per field
-        // (race_solver.rs:695-709), the kakari bonus runs in f64.
+        // fires after the start-delay draw, before the stats readers, with
+        // the engine's max(1.0) clamp per field (race_solver.rs:695-709).
         for (b, kind, modifier) in bumps
             .iter()
             .filter(|(b, _, _)| *b == r)

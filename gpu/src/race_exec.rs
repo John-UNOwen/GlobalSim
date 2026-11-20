@@ -13,10 +13,19 @@ use crate::race::{FallbackReason, RaceOutcome, RaceRunner};
 use crate::retail_geometry;
 use ocl::{Buffer, Queue, flags};
 
-// Grid mode stops at 120 (src/lib.rs:262-272) but the engine answers larger
-// non-grid rosters, so the kernel carries 144, mirrored by the kernel's
-// RACE_MAXR and the initialization program's MAXR.
-pub const RACE_MAXR: usize = 144;
+// Grid mode stops at 120 (src/lib.rs:262-272), and above the non-grid band
+// the host refuses before the kernel, so 120 is the binding layout bound.
+pub const RACE_MAXR: usize = 120;
+
+/// Non-grid fields above this runner count are outside the validated lane
+/// band on both lanes. Grid mode keeps the engine's 21 to 120 (README
+/// "Wave 15: the non-grid band refusal and the cap back at 120").
+pub const NON_GRID_MAX_RUNNERS: usize = 24;
+/// The band refusal's text, the single source for prepare, the classic
+/// prepare and facade::gate_reasons.
+pub const NON_GRID_BAND_REFUSAL: &str =
+    "non-grid fields above 24 runners are outside the validated lane band";
+
 pub const RACE_MAX_TICKS: usize = 6144;
 pub const RACE_MAX_SLOPES: usize = 16;
 pub const RI_STRIDE: usize = RI_DEBUG_TICK + 16;
@@ -708,6 +717,12 @@ fn prepare(
     };
     if horses.is_empty() || horses.len() > RACE_MAXR {
         return flagged("roster size outside the kernel's range");
+    }
+    // Dense non-grid fields above 24 stack at the lane rail, where the
+    // kernel's resolve_overlaps parks runners at rail+0.4/18 while the
+    // engine settles at the rail. The band refusal keeps them on the host.
+    if !grid && horses.len() > NON_GRID_MAX_RUNNERS {
+        return flagged(NON_GRID_BAND_REFUSAL);
     }
     // The engine rejects non-boolean values for the two experimental keys at
     // parse time, ahead of every runtime check (lib.rs:343-349). Quoting its

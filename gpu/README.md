@@ -1628,9 +1628,8 @@ per seed (pinned by the two gate tests below), fallbacks included. A
 rejected: it would keep every request alive indefinitely and make
 `run_batch`'s cost depend on call history.
 
-Measured on the B580 after the grid capacity port (scratch was 3.65 MB per
-race slot at every roster then, 5.91 MB at the wave-13b cap), v77 line 1
-through `multi_request`
+Measured on the B580 after the grid capacity port (scratch is 5.27 MB per
+race slot at every roster), v77 line 1 through `multi_request`
 (course 10504, 9 runners, one course per batch; `--bin batch_profile`
 prints the tables):
 
@@ -1779,7 +1778,8 @@ Request shapes the engine itself errors on now get its text byte-equal from
 `traceConservePower` (`lib.rs:343-349`), and every invalid `experimentalGrid`
 key. A 121-horse roster without a grid key is not an engine error: the engine
 runs it, the kernel refuses on its own capacity (`roster size outside the
-kernel's range`).
+kernel's range`), and a smaller non-grid crowd above 24 refuses by the wave-15
+band (`non-grid fields above 24 runners are outside the validated lane band`).
 
 The four wave-10 named refusals, each classified against the engine:
 
@@ -1909,7 +1909,8 @@ and proves every one of them is reachable, nothing else is (`gate_reasons_enumer
 | `staminasyoubu, injected above 2100 m, stays outside the classic kernel` | the engine injects the synthetic skill, `race_solver_builder.rs:819` | classic lane, `classic_exec::later_stamina_refusal`, distance-gated |
 | `experimentalLaterStaminaMechanics draws from a live solver stream the retail kernel resolves host-side` | the three systems draw live (`race_solver.rs:2751-2756`) | retail lane, `race_exec::prepare` |
 | `traceConservePower is outside the full GPU lane` | the mode only adds reply keys (`lib.rs:1115-1123`) | `full_reply::build`, the compact lane answers |
-| `roster size outside the kernel's range` | the engine answers any roster it is given | capacity refusal past `RACE_MAXR` (144 retail) or `CLS_MAXR` (120 classic) |
+| `roster size outside the kernel's range` | the engine answers any roster it is given | capacity refusal past `RACE_MAXR` (120 retail) or `CLS_MAXR` (120 classic) |
+| `non-grid fields above 24 runners are outside the validated lane band` | the engine answers dense crowds at any size | band refusal past `NON_GRID_MAX_RUNNERS` (24) without a valid `experimentalGrid`, both lanes, `prepare` and `gate_reasons` (see "Wave 15: the non-grid band refusal and the cap back at 120") |
 | `more slopes than the classic kernel carries` | the engine's course table carries any count | classic lane, past `CLS_MAX_SLOPES` (16). `gate_reasons` alone cannot name it: the check needs the course table, it runs at prepare |
 | `the initialization reference flagged` | the engine answers | the host's `initialization::stats_reference` reports a fallback word for the roster, and the classic lane refuses instead of guessing adjusted stats |
 | skill-compiler refusals | the engine's retail and classic builders reject or accept | `skills_compile`, each reason names the construct. The retail set is 17 families and the classic set 54, enumerated and pinned in `parity_audit` (see "Engine parity audit") |
@@ -2059,11 +2060,11 @@ roster ranks", "experimentalGrid belongs to the retail lane",
 
 The non-grid roster cap rose 120 to 144. The engine answers 121 through 145
 (`lib.rs` has no roster cap; the grid shape check still stops at 120), so the
-kernel carries what it measured: `RACE_MAXR` 144 with the init/IO strides
-raised to match (`IIU` 448, `IIL` 168, `OOU` 4608, `OOL` 168), and
-`equivalence_gate::rosters_beyond_the_grid_cap_run_and_only_the_kernel_cap_refuses`
-pins that the engine and the GPU lane both accept 121, 128 and 144 while
-roster 145 falls back by name from the run gate and `gate_reasons` alike.
+kernel carried what it measured: `RACE_MAXR` 144 with the init/IO strides
+raised to match (`IIU` 448, `IIL` 168, `OOU` 4608, `OOL` 168). Wave 15
+reverted that: non-grid fields above 24 runners now refuse by the band on
+both lanes, so the capacity and the strides are back at the grid's 120
+(see "Wave 15: the non-grid band refusal and the cap back at 120").
 
 Engine parity audit. `tests/parity_audit.rs` sweeps the whole app surface
 instead of one scene per capability: the app's own comparison traffic (the
@@ -2085,13 +2086,56 @@ pre-existing crowd physics gap. Dense non-grid rosters answer bit-exact
 through 24 horses (their starting lanes stay under the lane rail) and start
 diverging at 28 to 128 in the first crowded ticks, one `0.4/18` resolve-overlaps
 push around the lane rail, reproduced value-for-value at HEAD 2f8f4b8 before
-this wave's changes. `equivalence_gate::non_grid_crowds_above_twenty_four_diverge_from_the_engine`
-pins the first divergent tick, runner and both values for 28, 40 and 128 so
-a future port fix turns the pin into a failure signal. Grid mode is
-unaffected at every size it admits because the staggered starts keep every
-lane under the rail.
+this wave's changes. The mechanism is recorded with the band that replaced
+the pin, in "Wave 15: the non-grid band refusal and the cap back at 120".
+Grid mode is unaffected at every size it admits because the staggered
+starts keep every lane under the rail.
 
+## Wave 15: the non-grid band refusal and the cap back at 120
 
+User decision of 2026-11-20: the GPU lane stops promising non-grid fields
+above 24 runners. Both lanes refuse them, retail and classic, with
+`non-grid fields above 24 runners are outside the validated lane band`,
+flagged before any launch so the host answers the race. The game caps
+fields at 18 and the app's presets cap at 18; grid mode keeps the
+engine's 21 to 120 unchanged, and grid rosters up to 120 still run and
+answer full.
+
+Why the band is 24: the engine's `resolve_overlaps` (`race_solver.rs:652-664`)
+parks runners at `rail + 0.4/18` unclamped when the starting lanes of
+gates 22 and up sit above the inside rail of course 10504 (rail 1.2, one
+overlap push of 0.4/18 away), while the kernel's
+(`retail_core.cl:1444-1487`) settles them at the rail. At 28 horses the
+first disagreement is tick 44 runner 21 column 0 (engine
+47.20182800292969, kernel 47.224327087402344). The gap predates the
+capacity work, value-for-value at 2f8f4b8. The wave-14 experiment made
+25 to 144 byte-exact; the user took the decision to keep these fields
+out of scope instead, and the band refusal stands where the fix was.
+
+Classic measurement, taken before the band landed (scratch probe at
+f86a15d, seed 1, dense zero-skill fields, course 10504): the classic
+lane stays bit-exact at 25, 26 and 28 runners (all 1,462 ticks, equal
+tick counts). The band applies on classic too, for a uniform contract:
+classic was only ever validated to 18 runners.
+
+`equivalence_gate::non_grid_crowds_above_24_refuse_the_kernel_band` pins
+the band: 22, 23 and 24 stay byte-exact, 25 and up fall back by name
+from the run gate, `gate_reasons`, `run_batch` and `run_batch_full`
+alike with the engine answering each one, retail and classic.
+`equivalence_gate::rosters_beyond_the_kernel_cap_refuse_by_size` pins
+the restored cap: `RACE_MAXR` and `CLS_MAXR` are 120, and the
+non-grid rosters 121, 128, 144 and 145 fall back by name from both
+gates (capacity, not band: they are past what the kernel layout can
+carry) while the engine answers all four.
+
+The capacity overhead is given back: `RACE_MAXR` 120, kernel `MAXR` 120,
+`IIU` / `IIL` back to 384 / 144, `OOU` / `OOL` back to 3,840 / 144,
+`RI_STRIDE` 1,592, `RIL_STRIDE` 2,432, `ST_STRIDE` 2,168, `SCR_U_WORDS`
+602,999 and `SRL_WORDS` 356,840, together 5.27 MB of scratch per race
+slot. The band and its text have a single source,
+`race_exec::NON_GRID_MAX_RUNNERS` and `race_exec::NON_GRID_BAND_REFUSAL`,
+shared by `race_exec::prepare`, `classic_exec::prepare` and
+`facade::gate_reasons`.
 ## Grid mode
 
 `experimentalGrid` puts the field in 20-lane rows behind the line: rank 119
@@ -2147,32 +2191,31 @@ kernel `#define` chains were checked line by line against them):
 The plan's estimate "120, `SK_RMAX` 960: 367,772 / 198,264" undershot
 because the per-runner stats and hp scratch columns ride the init strides
 (384 / 144), not the old 96 / 48. Scratch is sized once, so a 24-horse race
-now uploads 3.65 MB of scratch against 0.48 MB before (7.6x), frames aside.
+now uploads 5.27 MB of scratch against 0.48 MB before (11x), frames aside.
 Slope packing gained a real bound too: `pack_course_scalars` now stops at
 `RACE_MAX_SLOPES` (16, the kernel's `RACE_MAX_SLOPES`) instead of whatever
 fitted the buffer, keeping the pc block clear of the moved PL block.
 
-Wave 13b raises the race roster cap from the grid's 120 to 144, measured
-from the engine answering 121 to 145 non-grid rosters. The values above are
-the grid-port history; the shipped values now are: `RACE_MAXR` 144 (grid
-validation stays 21 to 120, the engine's own shape check), `RI_STRIDE`
-1,904, `RIL_STRIDE` 2,864, `ST_STRIDE` 2,600, `IIU` / `IIL` 448 / 168,
-`OOU` / `OOL` 4,608 / 168, `SCR_U_WORDS` 692,271 and `SRL_WORDS` 392,480,
-together 5.91 MB of scratch per race slot, plus 3.14 MB of f64 in the double
-block. `SK_RMAX` stays 960, the record cap the grid was sized for: a
-non-grid roster past 120 that needs more than 960 skill records is refused
-by name at compile. All pinned in `tests/layout.rs`.
+The values above are the grid-port history; the shipped values now are:
+`RACE_MAXR` 120 (grid validation stays 21 to 120, the engine's own shape
+check), `RI_STRIDE` 1,592, `RIL_STRIDE` 2,432, `ST_STRIDE` 2,168,
+`IIU` / `IIL` 384 / 144, `OOU` / `OOL` 3,840 / 144, `SCR_U_WORDS` 602,999
+and `SRL_WORDS` 356,840, together 5.27 MB of scratch per race slot, plus
+2.85 MB of f64 in the double block. That is the 120-era capacity back after
+wave 13b's raise to 144, given back by wave 15's band refusal (see
+"Wave 15: the non-grid band refusal and the cap back at 120"). `SK_RMAX`
+stays 960, the record cap the grid was sized for. All pinned in
+`tests/layout.rs`.
 
 ### Launch budget
 
 `run_prepared_mode` splits a batch by frame bytes: a `FRAME_BYTES_BUDGET` of
 `512 << 20` divided by one race's frames (`RACE_MAX_TICKS * n * 6 * 8`),
-minimum 1 race per launch. A race at the 144 cap writes about 42.5 MB of
-frames, so 12 races launch per chunk at the cap; at 120 the same formula
-gives 15. Every existing suite (up to 96 races at 9 runners, 2.65 MB frames)
-stays a single launch. Buffers exist per chunk and
-are released before the next one, which keeps the driver's resident set
-bounded when scratch is 5.91 MB per race slot.
+minimum 1 race per launch. A 120-horse race writes 33.75 MB of frames, so
+15 races launch per chunk at the cap. Every existing suite (up to 96 races
+at 9 runners, 2.65 MB frames) stays a single launch. Buffers exist per chunk
+and are released before the next one, which keeps the driver's resident set
+bounded when scratch is 5.27 MB per race slot.
 
 ### Triage of the literal 24s
 
@@ -2218,26 +2261,26 @@ as non-vacuity) and `wave12c_modes::classic_grid_starts_answer_bit_exact`
 
 `cargo run --features race --release --bin grid_perf` (B580, course 10504,
 grid roster 120, `run_repeated` path, one timed run per size on a warm
-context, ms; re-measured on wave 13b's build, whose per-slot scratch is 5.91
-MB at the 144 cap rather than the 5.27 MB of the 120-era tables):
+context, ms; the m 128 row was measured on wave 13b's 144-cap build, the
+rest on the 120 capacity):
 
 | m | upload | launch | readback | decode | total | ms per seed |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 18.6 | 39,932.1 | 11.0 | 3.1 | 39,981.8 | 39,983.4 |
-| 2 | 33.5 | 51,946.7 | 20.7 | 7.4 | 52,016.2 | 26,009.8 |
-| 4 | 64.1 | 69,179.1 | 40.6 | 14.2 | 69,307.0 | 17,328.4 |
-| 8 | 133.0 | 96,059.4 | 129.8 | 36.1 | 96,376.9 | 12,049.5 |
-| 16 | 298.1 | 162,292.7 | 167.1 | 66.9 | 162,856.2 | 10,180.4 |
-| 32 | 538.3 | 291,927.7 | 339.7 | 136.3 | 292,994.4 | 9,157.9 |
+| 1 | 17.5 | 39,430.5 | 11.5 | 3.0 | 39,479.3 | 39,480.8 |
+| 2 | 32.7 | 51,206.7 | 20.7 | 7.0 | 51,271.4 | 25,637.4 |
+| 4 | 61.8 | 68,229.0 | 41.3 | 13.7 | 68,353.0 | 17,090.8 |
+| 8 | 124.1 | 94,231.6 | 81.9 | 28.2 | 94,478.1 | 11,811.5 |
+| 16 | 251.2 | 158,622.5 | 169.7 | 65.6 | 159,133.5 | 9,947.8 |
+| 32 | 531.5 | 285,002.6 | 335.7 | 131.4 | 286,046.7 | 8,941.2 |
 | 128 | 2,170.8 | 1,071,959.6 | 1,327.9 | 1,263.3 | 1,076,922.5 | 8,415.4 |
 
-One race fills one core, so a single 120-horse grid race costs about 40 s.
-The marginal cost per added seed falls from 12.0 s at m 2 to about 8.1 s at
-m 16 and stays there through m 128 (the per-tick field work is n², and each
-extra launch inside the 512 MiB budget adds its own sync). m 16, m 32 and
-m 128 cross the budget (15 races per launch at n 120, so m 128 spans nine
-launches): the binary checks that a chunked batch decodes bit-identical to
-single-race launches, on the first slot of launch 1 and the last of launch 2.
+One race fills one core, so a single 120-horse grid race costs about 39 s.
+The marginal cost per added seed falls from 11.7 s at m 2 to 6.5 to 8.0 s
+across m 32 (the per-tick field work is n², and each extra launch inside the
+512 MiB budget adds its own sync). m 16, m 32 and m 128 cross the budget
+(15 races per launch at n 120, so m 128 spans nine launches): the binary
+checks that a chunked batch decodes bit-identical to single-race launches,
+on the first slot of launch 1 and the last of launch 2.
 
 ### Sharp edges carried
 
@@ -2248,8 +2291,8 @@ single-race launches, on the first slot of launch 1 and the last of launch 2.
 - `SD_DUEL` and `SD_OVC` address as `slot + other * RACE_MAXR + r`: n²
   addressing, and the pair maps are the SD region's biggest consumer at the
   cap.
-- Scratch is one fixed 5.91 MB per race slot whatever the roster (692,271 u32
-  plus 392,480 f64 words, pinned in `tests/layout.rs`), and launch
+- Scratch is one fixed 5.27 MB per race slot whatever the roster (602,999 u32
+  plus 356,840 f64 words, pinned in `tests/layout.rs`), and launch
   chunks re-allocate it each time. The OpenCL driver's buffer release lags
   process exit, which showed up once as a locked `.exe` right after a run.
 - Grid frame-0 positions are negative (rows behind the line). The finish
