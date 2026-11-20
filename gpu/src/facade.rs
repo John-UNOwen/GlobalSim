@@ -439,11 +439,16 @@ fn classic_meta(race: &classic_exec::ClassicGpu, player: f64) -> Value {
         }
     }
     let skill_events = json::arr(skill_events);
-    json::obj(vec![
+    let mut fields = vec![
         ("playerHorseIndex", json::num(player)),
         ("results", results),
         ("skillEvents", skill_events),
-    ])
+    ];
+    // The engine tags grid replies on every lane (src/lib.rs:1135-1138).
+    if race.grid {
+        fields.push(("experimentalGridVersion", json::num(1.0)));
+    }
+    json::obj(fields)
 }
 
 /// The reply object compact_record reads: playerHorseIndex, results in roster
@@ -594,9 +599,6 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
         // invalid-grid shape is already quoted by the prefilter above.
         if root.get("traceConservePower").and_then(Value::as_bool) == Some(true) {
             return Some("traceConservePower requires experimentalRetailRuntime".into());
-        }
-        if root.get("experimentalGrid").is_some() {
-            return Some("experimentalGrid belongs to the retail lane".into());
         }
         // The three flag-only systems are ported; only the >2100 m
         // staminasyoubu injection still falls back.

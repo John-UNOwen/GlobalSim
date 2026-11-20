@@ -84,6 +84,7 @@ Suites:
 | `wave10_gate` (gpu + initialization + geometry + race) | The full (non-compact) reply lane, seeds 1..3: the retail lane, the zero-skill control, the fan and `duration_usage` 4 battery, the startup pass, paired streams with a data signature, world geometry, retain-all frames and the competition-reorder roster each come out of `run_batch_full` and `full_reply::build` whole and byte-for-byte equal to the engine's own reply text, frames included (see "Wave-10 full replies") |
 | `wave10_folds` (gpu + initialization + geometry + race) | Full-reply provenance folds: mutating one kernel channel moves exactly the arrays decoded from it, every channel carries live records in a gated scenario (pending and immediate activations, rush edges, fan and cross-target selections, the asitame release, kinds 4 and 5, the style-leader and non-leader phase records, snapshot ranks and the spurt columns), and the requests outside the full lane stay refused (see "Wave-10 full replies") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
+| `parity_audit` (gpu + initialization + geometry + race) | Engine parity audit: the app comparison traffic on both lanes compact bit-exact and full byte-equal, all 751 merged skill ids through both compilers against pinned refusal-family lists, and the `gate_reasons` fallback set pinned exactly (see "Engine parity audit" under "Wave 13b") |
 
 ### What the gate proves
 
@@ -1627,8 +1628,9 @@ per seed (pinned by the two gate tests below), fallbacks included. A
 rejected: it would keep every request alive indefinitely and make
 `run_batch`'s cost depend on call history.
 
-Measured on the B580 after the grid capacity port (scratch is 3.65 MB per
-race slot at every roster), v77 line 1 through `multi_request`
+Measured on the B580 after the grid capacity port (scratch was 3.65 MB per
+race slot at every roster then, 5.91 MB at the wave-13b cap), v77 line 1
+through `multi_request`
 (course 10504, 9 runners, one course per batch; `--bin batch_profile`
 prints the tables):
 
@@ -1753,11 +1755,12 @@ as flat word streams, one header word per channel.
 | `runningStyle`, `rushingStartCount`, `rushingPenaltyCount`, `hpEmptyOnRace`, `startDelayTime`, `lastSpurtStartDistance`, `finishTime`, `finishTimeRaw`, `finishOrder`, frames, version keys | unchanged | the compact exports, replay capture and static keys |
 
 The full lane refuses, by name at `full_reply::build` and by gate before the
-run: `singleMode`, `traceConservePower`, `experimentalLaterStaminaMechanics`
-and grid-mode races (the staggered roster ranks the snapshots read are
-grid-aware and stay compact-only; wave 11 moved the `singleMode` and
-`experimentalLaterStaminaMechanics` refusals onto both lanes and ported the
-compact `traceConservePower` ignore, see "Wave-11 equivalence closures").
+run: `singleMode`, `traceConservePower` and `experimentalLaterStaminaMechanics`
+(wave 11 moved the `singleMode` and `experimentalLaterStaminaMechanics`
+refusals onto both lanes and ported the compact `traceConservePower` ignore,
+see "Wave-11 equivalence closures"). Grid races answer full too: wave 13b
+rebuilt the staggered roster ranks from the grid starts, see "Wave 13b"
+below.
 
 ## Wave-11 equivalence closures
 
@@ -1808,11 +1811,10 @@ The four wave-10 named refusals, each classified against the engine:
   and keeps the retail refusal, see "Wave 13a" in the wave history above.
 - Grid mode is engine-supported end to end: a 21-horse grid request runs and
   the engine answers full, with `experimentalGridVersion` (`lib.rs:1137`).
-  The kernel runs grid compact bit-exactly and refuses only the full reply,
-  naming the staggered snapshot ranks. On the classic lane a valid grid is a
-  named host fallback ("experimentalGrid belongs to the retail lane") and an
-  invalid grid shape quotes the engine's parse error (`lib.rs:262-272`),
-  which outranks the classic trace error.
+  Wave 11 ran grid compact bit-exactly and refused only the full reply,
+  naming the staggered snapshot ranks. Wave 13b ports both closes: the full
+  reply rebuilds the grid-aware ranks, and the classic lane runs grid starts
+  itself. See "Wave 13b" below.
 
 `gpu/SKILLS_DESIGN.md` gained "Non-retail runtime physics: wave-11 port-scope
 survey": a system-by-system diff of the engine's `step_all` classic path
@@ -1889,57 +1891,34 @@ batch. Scratch sizes are pinned in `tests/layout.rs` under `CLS_*`.
 
 ## Not covered
 
-What the GPU lane still refuses, each named at the race or at compile time.
-The skill-side lists live in `SKILLS_DESIGN.md`.
+The remaining fallbacks, each named at the race, at the reply lane or at
+compile time, with what the engine does at the same point and why the GPU
+lane does not answer. `tests/parity_audit.rs` enumerates the app-facing set
+and proves every one of them is reachable, nothing else is (`gate_reasons_enumerates_exactly_the_documented_fallbacks`). The skill-side lists live in `SKILLS_DESIGN.md`.
 
-- Skills outside the ported subset: the names with no engine registry entry
-  (`behind_time`, `near_time`, `infront_time`),
-  `is_other_character_activate_advantage_skill` (the field's team-filtered
-  previous-tick advantage pair set, `race_field.rs:373-398`), the sibling
-  base-stat reads `base_speed`, `base_stamina`, `base_guts` and `base_wiz`,
-  `course_distance`, `furlong`, the all-stat 32 and the variantless 33 and 34,
-  and the other constructs named
-  in the `SKILLS_DESIGN.md` matrix. Each
-  flags its race with the construct named
-- Grid-mode races answer compact only. The frames, the finish exports and the
-  staggered roster ranks the engine snapshots each tick are grid-aware, and
-  `full_reply::build` refuses them by name; see "Grid mode" below for the
-  frame-exact grid port itself
-- Ground and terrain lookups beyond the slope and corner geometry events.
-  The verified tick loop reads terrain only through the slope regions
-  (`race_solver_retail.rs:833`, ported), the corner events (ported) and the
-  `groundCondition` enum (initialization tables and folded skill leaves).
-  Settled by wave 10: the engine's whole non-compact reply carries no ground
-  channel beyond that set, and the reply lane matches it byte for byte
-- Requests outside the full-reply lane, refused by name in
-  `full_reply::build`: `traceConservePower` (the engine mode only adds reply
-  diagnostics, so the compact lane accepts it, see "Wave-11 equivalence
-  closures"). `experimentalLaterStaminaMechanics: true` is refused on the
-  retail lane by the run gate (the draws need a live solver stream, see wave
-  13a), the classic lane answers it up to 2100 m, and the `false` or absent
-  forms, which the engine runs identically to the ported modes, answer
-  normally. `singleMode`
-  is ported on both lanes (wave 13a): the +400 fold lands inside the
-  adjusted-stats clamps (`race_solver_builder.rs:304-321`), in the host
-  `stats_reference` chain on the classic side and in the kernel's `im_stats`
-  pre-pass on the retail side, and a true flag tags the full reply with
-  `singleModeVersion` like the engine (`lib.rs:1125-1129`). Gated in
-  `wave12c_modes` (frames bit-exact, replies byte-equal, the fold proven to
-  move the physics) and `equivalence_gate` (retail reply with the tag, the
-  ignored non-boolean form byte-equal)
-- Non-retail (classic) requests the classic kernel does not port, each refused
-  by name in `classic_exec::prepare` and in `facade::gate_reasons`:
-  `experimentalGrid` starts,
-  `experimentalLaterStaminaMechanics` above 2100 m (the staminasyoubu
-  injection, `race_solver_builder.rs:819`; at most 2100 m it answers, wave
-  13a), `traceConservePower`, the legacy
-  `retailRuntime` key, `experimentalRetailGeometry`, a roster beyond
-  `CLS_MAXR` (120), and a course with more than `CLS_MAX_SLOPES` (16) slopes.
-  `singleMode` answers: the +400 fold runs in the host stats chain (wave 12c,
-  gated in `wave12c_modes::classic_single_mode_answers_bit_exact`).
-  Skills now run on the GPU lane (Wave-12b). The slope-count refusal needs the
-  course table, so it runs at prepare time and `gate_reasons` alone does not
-  name it
+| fallback text | engine side | GPU side |
+| --- | --- | --- |
+| `no GPU passes the exactness gate` | n/a | `facade::gate_reasons` with no device that passed `gpu::fp_gate_rejections` |
+| `missing cl_khr_fp64, missing CL_FP_DENORM in single_fp_config, missing CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT, missing CL_FP_DENORM in double_fp_config` | n/a | `gpu::fp_gate_rejections`, joined |
+| `experimentalGrid requires 21 through 120 horses, columns=20 and rowSpacing=3.0.` | engine parse error, `lib.rs:262-272` | quoted verbatim by `prepare` and the gate, retail and classic |
+| `World geometry requires the experimental runtime and standard starting grid` | engine error, `api.rs:68-71` | quoted verbatim |
+| `traceConservePower requires experimentalRetailRuntime` | engine error, `lib.rs:1504-1506` | quoted verbatim on the classic lane |
+| `experimentalLaterStaminaMechanics must be a boolean.`, `traceConservePower must be a boolean`, `experimentalRetailStartup must be a boolean` | engine parse errors, `lib.rs:343-349` | quoted verbatim |
+| `non-retail runtime` | the engine answers on its classic solver | the retail kernel is a retail-runtime port, it refuses rather than approximate, `race_exec::prepare` |
+| `retail runtime belongs to the retail lane` | the retail config switches the solver (`lib.rs:1514-1523`) | the classic kernel is a classic-runtime port, `classic_exec::prepare` |
+| `staminasyoubu, injected above 2100 m, stays outside the classic kernel` | the engine injects the synthetic skill, `race_solver_builder.rs:819` | classic lane, `classic_exec::later_stamina_refusal`, distance-gated |
+| `experimentalLaterStaminaMechanics draws from a live solver stream the retail kernel resolves host-side` | the three systems draw live (`race_solver.rs:2751-2756`) | retail lane, `race_exec::prepare` |
+| `traceConservePower is outside the full GPU lane` | the mode only adds reply keys (`lib.rs:1115-1123`) | `full_reply::build`, the compact lane answers |
+| `roster size outside the kernel's range` | the engine answers any roster it is given | capacity refusal past `RACE_MAXR` (144 retail) or `CLS_MAXR` (120 classic) |
+| `more slopes than the classic kernel carries` | the engine's course table carries any count | classic lane, past `CLS_MAX_SLOPES` (16). `gate_reasons` alone cannot name it: the check needs the course table, it runs at prepare |
+| `the initialization reference flagged` | the engine answers | the host's `initialization::stats_reference` reports a fallback word for the roster, and the classic lane refuses instead of guessing adjusted stats |
+| skill-compiler refusals | the engine's retail and classic builders reject or accept | `skills_compile`, each reason names the construct. The retail set is 17 families and the classic set 54, enumerated and pinned in `parity_audit` (see "Engine parity audit") |
+| kernel `FB_*` fallbacks | n/a, kernel-internal | `race_exec::kernel_fallback`, capacity or geometry words the host missed |
+
+Wave 13b removed three rows from this table: "grid mode needs the engine's
+staggered roster ranks" (full replies now ported), and "experimentalGrid
+belongs to the retail lane" plus "experimentalGrid is outside the classic
+lane" (classic grid starts ported).
 
 Wave 12b landed the classic skill runtime end to end. The compiler profile
 (`skills_compile::plan_classic`) compiles the classic effect-value chain
@@ -2055,6 +2034,63 @@ flag-off controls keep zero counters; the battery totals are keep 62, compete
 named-fallback row to the 2400 m course 10108, and `facade_gate` accepts the
 flag at 2000 m and quotes the fallback at 2400 m.
 
+## Wave 13b: grid full replies, classic grid starts, the 144-horse cap
+
+Grid races answer full. The staggered roster ranks the competition reorder
+sorts by (`race_field.rs:118-125`) are rebuilt from the grid starts, and the
+reply carries the engine's `experimentalGridVersion: 1` (`lib.rs:1135-1138`).
+`equivalence_gate::grid_full_replies_are_byte_equal_to_the_engine` pins the
+whole reply byte-equal to the engine on 21-horse and 120-horse grids, seeds
+1 to 3, and proves non-vacuity by counting the kind-4 competition events.
+
+Grid starts run on the classic lane. The classic geometry is the engine's
+pure-f64 grid (`lib.rs:274-279` without the retail f32 narrowing, which is
+retail-only at `lib.rs:610`): column `rank % 20`, lane
+`(column + (column >= 9 ? 0.6 : 0)) / 18`, position `-3 * (rank / 20)`, all
+computed host-side in `classic_exec::prepare` and seeded through the new
+`DF_POS` runner column (`F_POS0` slot 62). The grid tag rides the classic
+compact meta and the full reply. `wave12c_modes::classic_grid_starts_answer_bit_exact`
+gates frames bit-exact and replies byte-equal on 21-horse classic grids,
+seeds 1 to 3, with a non-vacuity probe on the second row's lane and position,
+and `facade_gate` runs the classic grid through the mixed-lane batch and full
+lane. The three former grid refusals ("grid mode needs the engine's staggered
+roster ranks", "experimentalGrid belongs to the retail lane",
+"experimentalGrid is outside the classic lane") are gone.
+
+The non-grid roster cap rose 120 to 144. The engine answers 121 through 145
+(`lib.rs` has no roster cap; the grid shape check still stops at 120), so the
+kernel carries what it measured: `RACE_MAXR` 144 with the init/IO strides
+raised to match (`IIU` 448, `IIL` 168, `OOU` 4608, `OOL` 168), and
+`equivalence_gate::rosters_beyond_the_grid_cap_run_and_only_the_kernel_cap_refuses`
+pins that the engine and the GPU lane both accept 121, 128 and 144 while
+roster 145 falls back by name from the run gate and `gate_reasons` alike.
+
+Engine parity audit. `tests/parity_audit.rs` sweeps the whole app surface
+instead of one scene per capability: the app's own comparison traffic (the
+`testdata/app_preset_jobs_10504/10604` mob payloads with their uma skill sets
+on the retail lane, the v77, mob8 and mob18 rosters on the classic lane, both
+courses, seeds 1 to 3) answers with zero fallbacks, compact frames bit-exact
+and full replies byte-equal in one mixed-lane batch; every one of the 751
+merged-table skill ids compiles or refuses through both compilers, retail
+with 17 documented refusal families and classic with 54, pinned family lists
+in the test; and `gate_reasons_enumerates_exactly_the_documented_fallbacks`
+proves the app-facing fallback set equals the "Not covered" table exactly,
+nothing reachable is undocumented and nothing documented is unreachable.
+`classic_prepare_only_fallbacks_stay_reachable` keeps the course-table-only
+refusal ("more slopes than the classic kernel carries") provable through the
+injected course text.
+
+Sharp edge, pinned: non-grid fields wider than the grid's stagger bite a
+pre-existing crowd physics gap. Dense non-grid rosters answer bit-exact
+through 24 horses (their starting lanes stay under the lane rail) and start
+diverging at 28 to 128 in the first crowded ticks, one `0.4/18` resolve-overlaps
+push around the lane rail, reproduced value-for-value at HEAD 2f8f4b8 before
+this wave's changes. `equivalence_gate::non_grid_crowds_above_twenty_four_diverge_from_the_engine`
+pins the first divergent tick, runner and both values for 28, 40 and 128 so
+a future port fix turns the pin into a failure signal. Grid mode is
+unaffected at every size it admits because the staggered starts keep every
+lane under the rail.
+
 
 ## Grid mode
 
@@ -2116,15 +2152,27 @@ Slope packing gained a real bound too: `pack_course_scalars` now stops at
 `RACE_MAX_SLOPES` (16, the kernel's `RACE_MAX_SLOPES`) instead of whatever
 fitted the buffer, keeping the pc block clear of the moved PL block.
 
+Wave 13b raises the race roster cap from the grid's 120 to 144, measured
+from the engine answering 121 to 145 non-grid rosters. The values above are
+the grid-port history; the shipped values now are: `RACE_MAXR` 144 (grid
+validation stays 21 to 120, the engine's own shape check), `RI_STRIDE`
+1,904, `RIL_STRIDE` 2,864, `ST_STRIDE` 2,600, `IIU` / `IIL` 448 / 168,
+`OOU` / `OOL` 4,608 / 168, `SCR_U_WORDS` 692,271 and `SRL_WORDS` 392,480,
+together 5.91 MB of scratch per race slot, plus 3.14 MB of f64 in the double
+block. `SK_RMAX` stays 960, the record cap the grid was sized for: a
+non-grid roster past 120 that needs more than 960 skill records is refused
+by name at compile. All pinned in `tests/layout.rs`.
+
 ### Launch budget
 
 `run_prepared_mode` splits a batch by frame bytes: a `FRAME_BYTES_BUDGET` of
 `512 << 20` divided by one race's frames (`RACE_MAX_TICKS * n * 6 * 8`),
-minimum 1 race per launch. A 120-horse race writes 33.75 MB of frames, so 15
-races launch per chunk at the cap. Every existing suite (up to 96 races at 9
-runners, 2.65 MB frames) stays a single launch. Buffers exist per chunk and
+minimum 1 race per launch. A race at the 144 cap writes about 42.5 MB of
+frames, so 12 races launch per chunk at the cap; at 120 the same formula
+gives 15. Every existing suite (up to 96 races at 9 runners, 2.65 MB frames)
+stays a single launch. Buffers exist per chunk and
 are released before the next one, which keeps the driver's resident set
-bounded when scratch is 3.65 MB per race slot.
+bounded when scratch is 5.91 MB per race slot.
 
 ### Triage of the literal 24s
 
@@ -2158,30 +2206,38 @@ checked site by site:
   falls back naming the engine's refusal, GPU and CPU alike.
 
 `facade_gate` expects the engine message for an invalid grid and accepts a
-valid 21-horse grid, and `layout` pins the new strides.
+valid 21-horse grid in a mixed-lane batch (classic grid included), and
+`layout` pins the strides. Wave 13b adds:
+`equivalence_gate::grid_full_replies_are_byte_equal_to_the_engine` (full
+replies byte-equal at 21 and 120 horses, seeds 1 to 3, kind-4 event count
+as non-vacuity) and `wave12c_modes::classic_grid_starts_answer_bit_exact`
+(classic 21-horse grids bit-exact frames and byte-equal replies, seeds 1 to
+3, non-vacuity on the second row's lane and position).
 
 ### Cost at 120 runners
 
 `cargo run --features race --release --bin grid_perf` (B580, course 10504,
 grid roster 120, `run_repeated` path, one timed run per size on a warm
-context, ms):
+context, ms; re-measured on wave 13b's build, whose per-slot scratch is 5.91
+MB at the 144 cap rather than the 5.27 MB of the 120-era tables):
 
 | m | upload | launch | readback | decode | total | ms per seed |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 17.5 | 39,430.5 | 11.5 | 3.0 | 39,479.3 | 39,480.8 |
-| 2 | 32.7 | 51,206.7 | 20.7 | 7.0 | 51,271.4 | 25,637.4 |
-| 4 | 61.8 | 68,229.0 | 41.3 | 13.7 | 68,353.0 | 17,090.8 |
-| 8 | 124.1 | 94,231.6 | 81.9 | 28.2 | 94,478.1 | 11,811.5 |
-| 16 | 251.2 | 158,622.5 | 169.7 | 65.6 | 159,133.5 | 9,947.8 |
-| 32 | 531.5 | 285,002.6 | 335.7 | 131.4 | 286,046.7 | 8,941.2 |
+| 1 | 18.6 | 39,932.1 | 11.0 | 3.1 | 39,981.8 | 39,983.4 |
+| 2 | 33.5 | 51,946.7 | 20.7 | 7.4 | 52,016.2 | 26,009.8 |
+| 4 | 64.1 | 69,179.1 | 40.6 | 14.2 | 69,307.0 | 17,328.4 |
+| 8 | 133.0 | 96,059.4 | 129.8 | 36.1 | 96,376.9 | 12,049.5 |
+| 16 | 298.1 | 162,292.7 | 167.1 | 66.9 | 162,856.2 | 10,180.4 |
+| 32 | 538.3 | 291,927.7 | 339.7 | 136.3 | 292,994.4 | 9,157.9 |
+| 128 | 2,170.8 | 1,071,959.6 | 1,327.9 | 1,263.3 | 1,076,922.5 | 8,415.4 |
 
-One race fills one core, so a single 120-horse grid race costs about 39 s.
-The marginal cost per added seed falls from 11.7 s at m 2 to 6.5 to 8.0 s
-across m 32 (the per-tick field work is n², and each extra launch inside the
-512 MiB budget adds its own sync). m 16 and m 32 cross the budget (15 races
-per launch at n 120): the binary checks that a chunked batch decodes
-bit-identical to single-race launches, on the first slot of launch 1 and the
-last of launch 2.
+One race fills one core, so a single 120-horse grid race costs about 40 s.
+The marginal cost per added seed falls from 12.0 s at m 2 to about 8.1 s at
+m 16 and stays there through m 128 (the per-tick field work is n², and each
+extra launch inside the 512 MiB budget adds its own sync). m 16, m 32 and
+m 128 cross the budget (15 races per launch at n 120, so m 128 spans nine
+launches): the binary checks that a chunked batch decodes bit-identical to
+single-race launches, on the first slot of launch 1 and the last of launch 2.
 
 ### Sharp edges carried
 
@@ -2192,7 +2248,8 @@ last of launch 2.
 - `SD_DUEL` and `SD_OVC` address as `slot + other * RACE_MAXR + r`: n²
   addressing, and the pair maps are the SD region's biggest consumer at the
   cap.
-- Scratch is one fixed 3.65 MB per race slot whatever the roster, and launch
+- Scratch is one fixed 5.91 MB per race slot whatever the roster (692,271 u32
+  plus 392,480 f64 words, pinned in `tests/layout.rs`), and launch
   chunks re-allocate it each time. The OpenCL driver's buffer release lags
   process exit, which showed up once as a locked `.exe` right after a run.
 - Grid frame-0 positions are negative (rows behind the line). The finish

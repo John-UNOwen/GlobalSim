@@ -586,6 +586,21 @@ Not yet ported (fallback-flagged, plan order in the README):
   rarity outside 1..6 (3, 4 and 5 all fold to 3), priority outside {0,1}, the
   legacy non-retail wisdom path
 
+Enumerated (wave 13b). `gpu/tests/parity_audit.rs` runs all 751 ids of the
+merged app table through both compilers with a fitted roster. The retail
+compiler compiles 688 and refuses 63 ids across 17 refusal families (per-id
+"has no alternatives", the `PowerUp` effect, unported leaves like
+`'lastspurt'==2`, `'random_lot'==15/30/50`, `'is_basis_distance'`,
+`'straight_front_type'==2`, `'is_badstart'==0`, condition arm-count, effect
+targets 18 to 20, and the advantage-pair field above). The classic compiler
+compiles 445 and refuses 306 ids across 54 families: retail's share plus the
+live-runtime condition leaves the classic kernel has no reader for (`order`,
+`distance_diff_rate`, `blocked_front`, the `activate_count_*` and
+`temptation_*` counters and the rest), `value_usage` 8 and 14 live draws,
+effect target 18 and type 37. The exact family lists are the pinned constants
+`RETAIL_REFUSALS` and `CLASSIC_REFUSALS` in that test; an id refusing with a
+reason outside its lane's list fails the audit.
+
 Multi-alternative skills compile one record per alternative. An alternative
 whose region chain folds empty (a false precondition or condition) stays as a
 draw-only dead record: the engine samples every alternative's random terms and

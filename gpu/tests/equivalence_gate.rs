@@ -1,13 +1,14 @@
 //! Wave-11 equivalence gates: every construct the GPU lane refuses comes
 //! with a quote of what the CPU engine does on the same request. Effect kinds
 //! the engine has no SkillType variant for, request shapes the engine itself
-//! errors on, the kernel-capacity roster, and the four wave-10 named full-lane
-//! refusals each get their engine behavior pinned here, error text verbatim.
+//! errors on, the kernel-capacity rosters past the grid cap, and the four
+//! wave-10 named full-lane refusals each get their engine behavior pinned
+//! here, error text verbatim.
 
 #![cfg(feature = "race")]
 
 use globalsim_gpu::facade::{self, DeviceFacts, GpuRaces};
-use globalsim_gpu::{full_reply, json, race_exec};
+use globalsim_gpu::{dep_cpu, full_reply, json, race_exec};
 use json::Value;
 
 fn repo_file(rel: &str) -> std::path::PathBuf {
@@ -204,21 +205,146 @@ fn engine_rejected_request_shapes_quote_their_error_texts() {
     shape_quotes_the_engine("grid with a 121 roster", &[("experimentalGrid", grid(20.0, 3.0))], Some(121));
 }
 
-/// Roster size 121 with no grid key is NOT an engine error: the engine runs
-/// it, the kernel refuses on its own capacity (RACE_MAXR 120).
+/// Wave 13b: rosters past the grid-mode 120 are engine territory. The engine
+/// answers 121 through 144 non-grid races and the GPU lane runs them with no
+/// fallback, compact and full alike, on seeds 1 through 3. Roster 145 is NOT
+/// an engine error either: the engine runs it, the kernel refuses on its own
+/// capacity (RACE_MAXR 144), compact and full alike. Byte-equality at these
+/// sizes carries its own pinned gate,
+/// `non_grid_crowds_above_twenty_four_diverge_from_the_engine`.
 #[test]
-fn roster_121_is_a_kernel_capacity_refusal_not_an_engine_error() {
+fn rosters_beyond_the_grid_cap_run_and_only_the_kernel_cap_refuses() {
     register_geometry(10504);
-    let request = patched(&[], Some(121), 1);
-    let mut prepared = globalsim::PreparedRace::new(&request).expect("the engine accepts roster 121");
-    let simulation = prepared.run(1).expect("the engine runs roster 121");
-    let mut reply = String::new();
-    simulation.write_json(&mut reply);
-    let results = json::parse(&reply).expect("reply").get_array("results").expect("results").clone();
-    assert_eq!(results.len(), 121, "the engine answers all 121 runners");
+    assert_eq!(race_exec::RACE_MAXR, 144, "the kernel's roster cap");
+    for horse_count in [121usize, 128, 144] {
+        for seed in [1i64, 2, 3] {
+            let request = text_of(&large_roster(seed, horse_count));
+            let engine = engine_reply(&request, seed);
+            let parsed = json::parse(&engine).expect("reply");
+            let results = parsed.get_array("results").expect("results");
+            assert_eq!(results.len(), horse_count, "the engine answers all {horse_count} runners");
+            let facts = DeviceFacts {
+                extensions: "cl_khr_fp64".into(),
+                single_fp_config: 0x81,
+                double_fp_config: 0x81,
+            };
+            assert_eq!(
+                facade::gate_reasons(&request, Some(&facts)),
+                None,
+                "the gate accepts n={horse_count} seed {seed}"
+            );
+            let run = race_exec::run_full(&[(request.clone(), seed)]).expect("kernel run");
+            let race = &run.races[0];
+            assert!(race.fallback.is_none(), "n={horse_count} seed {seed}: {:?}", race.fallback);
+            let cpu = dep_cpu::run_cpu_race(&request, seed).expect("cpu race");
+            assert!(race.frames.len() > 1400, "n={horse_count} seed {seed}: the 2000 m race runs to completion");
+            assert!(cpu.frames.len() > 1400, "n={horse_count} seed {seed}: the engine race runs to completion");
+        }
+    }
+    let request = text_of(&large_roster(1, 145));
+    let engine = engine_reply(&request, 1);
+    let parsed = json::parse(&engine).expect("reply");
+    let results = parsed.get_array("results").expect("results");
+    assert_eq!(results.len(), 145, "the engine answers roster 145 too");
     let (kernel, gate) = kernel_refusals(&request);
-    assert_eq!(kernel, "roster size outside the kernel's range");
-    assert_eq!(gate.as_deref(), Some("roster size outside the kernel's range"));
+    assert_eq!(kernel, "roster size outside the kernel's range", "the kernel refuses past its cap of 144");
+    assert_eq!(gate.as_deref(), Some("roster size outside the kernel's range"), "gate_reasons matches");
+}
+
+/// The measured boundary of the non-grid crowd port: dense 2000 m rosters of
+/// the same course answer bit-exact through 24 runners and start diverging
+/// from the engine at 28, at the lane rail the starting lanes of gates 22+
+/// sit above (laneMax 12000, rail 1.2, one 0.4/18 overlap push away). Grid
+/// mode is unaffected at any size it admits because the staggered starts keep
+/// every lane under the rail. This reproduces value-for-value at HEAD
+/// 2f8f4b8, so the divergence predates the wave-13b capacity work. The pins
+/// below flip to a failure the day the crowd physics port improves, which is
+/// the point.
+#[test]
+fn non_grid_crowds_above_twenty_four_diverge_from_the_engine() {
+    register_geometry(10504);
+    // 22 through 24 stay bit-exact end to end.
+    for horse_count in [22usize, 23, 24] {
+        let request = text_of(&large_roster(1, horse_count));
+        let run = race_exec::run_full(&[(request.clone(), 1i64)]).expect("kernel run");
+        let race = &run.races[0];
+        assert!(race.fallback.is_none(), "n={horse_count}: {:?}", race.fallback);
+        let cpu = dep_cpu::run_cpu_race(&request, 1).expect("cpu race");
+        assert_eq!(cpu.frames.len(), race.frames.len(), "n={horse_count}: tick count");
+        for (tick, (cpu_frame, gpu_frame)) in cpu.frames.iter().zip(race.frames.iter()).enumerate() {
+            for (runner, (cpu_row, gpu_row)) in cpu_frame.iter().zip(gpu_frame.iter()).enumerate() {
+                for (column, (cpu, gpu)) in cpu_row.iter().zip(gpu_row.iter()).enumerate() {
+                    assert_eq!(
+                        cpu.to_bits(),
+                        gpu.to_bits(),
+                        "n={horse_count}: tick {tick} runner {runner} column {column}"
+                    );
+                }
+            }
+        }
+    }
+    // 28, 40 and 128 diverge at the pinned first spot.
+    for (horse_count, want) in [
+        (28usize, (44usize, 21usize, 0usize, 47.20182800292969f64, 47.224327087402344f64)),
+        (40, (14, 30, 3, 1.2222222089767456, 1.1999999284744263)),
+        (128, (10, 54, 3, 1.2222222089767456, 1.1999999284744263)),
+    ] {
+        let request = text_of(&large_roster(1, horse_count));
+        let run = race_exec::run_full(&[(request.clone(), 1i64)]).expect("kernel run");
+        let race = &run.races[0];
+        assert!(race.fallback.is_none(), "n={horse_count}: {:?}", race.fallback);
+        let cpu = dep_cpu::run_cpu_race(&request, 1).expect("cpu race");
+        let common = cpu.frames.len().min(race.frames.len());
+        let first = (0..common)
+            .flat_map(|tick| (0..horse_count).flat_map(move |runner| (0..6).map(move |column| (tick, runner, column))))
+            .find(|&(tick, runner, column)| {
+                cpu.frames[tick][runner][column].to_bits() != race.frames[tick][runner][column].to_bits()
+            });
+        let (tick, runner, column) = first.expect("the pinned divergence appears");
+        assert_eq!(
+            (tick, runner, column),
+            (want.0, want.1, want.2),
+            "n={horse_count}: the pinned first divergence moved"
+        );
+        assert_eq!(cpu.frames[tick][runner][column], want.3, "n={horse_count}: engine value at the pin");
+        assert_eq!(race.frames[tick][runner][column], want.4, "n={horse_count}: kernel value at the pin");
+    }
+}
+
+/// v77 grown to the given size with dense gate indices and a deterministic
+/// spread of stats and strategies so no two runners shadow each other, the
+/// shape a real app roster has. The clones carry no skills, so a 144-horse
+/// roster stays inside the 960-record skill table the compiler enforces.
+fn large_roster(seed: i64, horse_count: usize) -> Value {
+    let mut value = value_patched(&[], Some(horse_count), seed);
+    {
+        let Value::Object(map) = &mut value else { unreachable!() };
+        let Value::Array(entries) = map.get_mut("horses").expect("horses") else { unreachable!() };
+        let styles = ["Nige", "Nige", "Senkou", "Senkou", "Sasi", "Sasi", "Oikomi", "Oonige"];
+        for (index, entry) in entries.iter_mut().enumerate() {
+            let Value::Object(horse) = entry else { unreachable!() };
+            horse.insert("gateIndex".into(), Value::Number(index as f64));
+            horse.insert("strategy".into(), Value::String(styles[index % styles.len()].into()));
+            let mix = |offset: u64| -> f64 {
+                let mut x = (index as u64 + 1)
+                    .wrapping_mul(2654435761)
+                    .wrapping_add(offset * 40503)
+                    & 0xFFFF_FFFF;
+                x ^= x >> 15;
+                x = x.wrapping_mul(2246822519);
+                780.0 + (x % 420) as f64
+            };
+            horse.insert("speed".into(), Value::Number(mix(1)));
+            horse.insert("stamina".into(), Value::Number(mix(2)));
+            horse.insert("power".into(), Value::Number(mix(3)));
+            horse.insert("guts".into(), Value::Number(mix(4)));
+            horse.insert("wisdom".into(), Value::Number(mix(5)));
+            if index >= 9 {
+                horse.remove("skills");
+            }
+        }
+    }
+    value
 }
 
 /// singleMode is a real engine mode: the adjusted stats gain +400
@@ -345,14 +471,47 @@ fn later_stamina_mechanics_is_an_engine_mode_refused_by_name() {
     assert_eq!(run.races[0].fallback.as_deref(), Some(want));
 }
 
-/// Grid mode is a fully engine-supported race shape (it even answers full,
-/// with experimentalGridVersion). The GPU lane runs grid compact bit-exactly
-/// and refuses only the full reply, naming the staggered snapshot ranks.
+/// Grid mode is a fully engine-supported race shape. The GPU lane runs grid
+/// compact bit-exactly (gpu/tests/grid_gate.rs) and answers the full reply
+/// byte-equal too: the staggered roster ranks the engine's competition
+/// reorder sorts by are rebuilt from the grid starts (src/race_field.rs:118-125)
+/// and the reply carries the engine's experimentalGridVersion tag
+/// (src/lib.rs:1135-1138).
 #[test]
-fn grid_mode_full_reply_refusal_names_the_snapshot_reason() {
+fn grid_full_replies_are_byte_equal_to_the_engine() {
     register_geometry(10504);
-    // v77 carries experimentalRetailGeometry, and the engine refuses geometry
-    // with grid starts (api.rs:68-71), so the grid variant clears the flag.
+    let mut kind4_total = 0usize;
+    for horse_count in [21usize, 120] {
+        for seed in [1i64, 2, 3] {
+            let request = text_of(&grid_value(seed, horse_count));
+            let engine = engine_reply(&request, seed);
+            let reply = json::parse(&engine).expect("engine reply");
+            assert_eq!(
+                reply.get_f64("experimentalGridVersion"),
+                Ok(1.0),
+                "the engine tags the grid reply, n={horse_count} seed {seed}"
+            );
+            kind4_total += reply
+                .get_array("competitionEvents")
+                .expect("competitionEvents")
+                .iter()
+                .filter(|event| event.get_f64("type") == Ok(4.0))
+                .count();
+            let run = race_exec::run_full(&[(request.clone(), seed)]).expect("kernel run");
+            let race = &run.races[0];
+            assert!(race.fallback.is_none(), "n={horse_count} seed {seed}: the kernel runs grid full");
+            let gpu = full_reply::build(&request, seed, race).expect("grid full reply");
+            assert_eq!(gpu, engine, "n={horse_count} seed {seed}: grid full reply is byte-equal");
+        }
+    }
+    assert!(kind4_total >= 2, "the grid replies must carry kind-4 competition events, the reordered ones, found {kind4_total}");
+}
+
+/// The grid variant of the patched v77 request: geometry off (the engine
+/// refuses geometry with grid starts, api.rs:68-71), a valid columns/rowSpacing
+/// shape, dense gate indices 0..n-1, and cycled styles so the recording set
+/// (Nige and Oonige) spans grid rows, the case the staggered ranks decide.
+fn grid_value(seed: i64, horse_count: usize) -> Value {
     let mut value = value_patched(
         &[
             ("experimentalRetailGeometry", Value::Bool(false)),
@@ -362,29 +521,18 @@ fn grid_mode_full_reply_refusal_names_the_snapshot_reason() {
                     .collect(),
             )),
         ],
-        Some(21),
-        1,
+        Some(horse_count),
+        seed,
     );
     {
         let Value::Object(map) = &mut value else { unreachable!() };
         let Value::Array(entries) = map.get_mut("horses").expect("horses") else { unreachable!() };
+        let styles = ["Nige", "Nige", "Senkou", "Senkou", "Sasi", "Sasi", "Oikomi", "Oonige"];
         for (index, entry) in entries.iter_mut().enumerate() {
             let Value::Object(horse) = entry else { unreachable!() };
             horse.insert("gateIndex".into(), Value::Number(index as f64));
+            horse.insert("strategy".into(), Value::String(styles[index % styles.len()].into()));
         }
     }
-    let request = text_of(&value);
-
-    let reply = json::parse(&engine_reply(&request, 1)).expect("reply");
-    assert_eq!(reply.get_f64("experimentalGridVersion").expect("experimentalGridVersion"), 1.0);
-    assert_eq!(reply.get_array("results").expect("results").len(), 21, "the engine answers grid full");
-
-    let run = race_exec::run(&[(request.clone(), 1i64)]).expect("kernel run");
-    assert!(run.races[0].fallback.is_none(), "grid runs bit-exactly on the compact lane");
-
-    let run = race_exec::run_full(&[(request.clone(), 1i64)]).expect("kernel run");
-    let race = &run.races[0];
-    assert!(race.fallback.is_none(), "the kernel runs the race, only the reply lane refuses");
-    let reason = full_reply::build(&request, 1, race).expect_err("the full lane refuses grid mode");
-    assert_eq!(reason, "grid mode needs the engine's staggered roster ranks");
+    value
 }

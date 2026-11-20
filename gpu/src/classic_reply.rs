@@ -223,10 +223,11 @@ fn encode_frames(mut result: Value, mut frames: ReplayFrames, retain_all: bool) 
 /// (src/lib.rs:1096-1106). `skillEvents` keeps the hook push order: the
 /// classic path skips the retail sort (src/lib.rs:1021-1031), and the
 /// detail and target arrays are collected runner-major (src/lib.rs:1078-1094).
-/// `conservePowerDiagnosticVersion` and `experimentalGridVersion` belong to
-/// refused flags (src/lib.rs:1115-1139). singleMode is ported: it tags the
-/// reply with `singleModeVersion` (src/lib.rs:1125-1129) and its +400 lands
-/// in the adjusted stats (src/race_solver_builder.rs:304-321).
+/// `conservePowerDiagnosticVersion` belongs to a refused flag
+/// (src/lib.rs:1115-1123). Grid mode is ported: the reply carries the
+/// engine's `experimentalGridVersion` tag (src/lib.rs:1135-1139). singleMode
+/// is ported: it tags the reply with `singleModeVersion` (src/lib.rs:1125-1129)
+/// and its +400 lands in the adjusted stats (src/race_solver_builder.rs:304-321).
 pub fn build(request: &str, seed: i64, race: &ClassicGpu) -> Result<String, String> {
     let root = json::parse(request)?;
     let n = race.frames.first().map_or(0, |f| f.len());
@@ -246,9 +247,6 @@ pub fn build(request: &str, seed: i64, race: &ClassicGpu) -> Result<String, Stri
         .any(|key| root.get(*key).and_then(Value::as_bool).unwrap_or(false))
     {
         return Err("retail runtime belongs to the retail lane".to_string());
-    }
-    if root.get("experimentalGrid").is_some() {
-        return Err("experimentalGrid is outside the classic lane".to_string());
     }
     // A classic trace is an engine error (lib.rs:1504-1506), quoted verbatim.
     if root.get("traceConservePower").and_then(Value::as_bool) == Some(true) {
@@ -421,6 +419,11 @@ pub fn build(request: &str, seed: i64, race: &ClassicGpu) -> Result<String, Stri
         }
         if root.get("pairedRandomStreams").and_then(Value::as_bool) == Some(true) {
             map.insert("pairedRandomStreams".into(), Value::Bool(true));
+        }
+        // The engine tags grid replies on every lane (lib.rs:1135-1139); a
+        // valid shape already passed prepare, so presence is the test.
+        if root.get("experimentalGrid").is_some() {
+            map.insert("experimentalGridVersion".into(), json::num(1.0));
         }
         if let Some(signature) = root.get("dataSignature") {
             map.insert("dataSignature".to_string(), signature.clone());

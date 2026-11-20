@@ -2,7 +2,7 @@
 //! channels. The result JSON is built with the vendored engine's own json
 //! module, so key order (BTreeMap sort) and number formatting are byte-equal
 //! to the engine's reply by construction. `build` covers the exact key set
-//! the engine's retail lane emits; the facade refuses every shape it cannot
+//! the engine's retail lane emits, and the facade refuses every shape it cannot
 //! answer.
 //!
 //! Engine anchors: the reply object at src/lib.rs:1038-1149, the activate
@@ -363,16 +363,24 @@ fn ability_targets(list: &[Option<Vec<usize>>]) -> Value {
 /// (src/race_field.rs:181-201) within one drain batch. The kernel writes
 /// startup-pass records with the pre-tick marker word, and the engine drains
 /// them together with tick 0, so the marker joins the tick 0 batch.
-fn order_competition(comp: &[u32], strategies: &[i64], n: usize) -> Result<Vec<(i64, f64, usize)>, String> {
+fn order_competition(
+    comp: &[u32],
+    strategies: &[i64],
+    n: usize,
+    grid_pos: &[f64],
+) -> Result<Vec<(i64, f64, usize)>, String> {
     if comp.len() % 3 != 0 {
         return Err("competition stream is ragged".to_string());
     }
-    // Field-construction positions are all zero outside grid mode, which
-    // never reaches this lane. Every pair compares Equal, so the engine's
+    // The engine ranks its recording set by construction-time position
+    // (src/race_field.rs:118-125): grid mode staggers them by row, non-grid
+    // leaves them all zero, where every pair compares Equal and the engine's
     // introsort leaves the roster filter order untouched.
     let roster = {
-        let recording: Vec<usize> =
+        let pos = |i: usize| if grid_pos.is_empty() { 0.0 } else { grid_pos[i] };
+        let mut recording: Vec<usize> =
             (0..n).filter(|&i| strategies[i] == 1 || strategies[i] == 5).collect();
+        comparison_sort(&mut recording, |&a, &b| pos(b).total_cmp(&pos(a)));
         let mut ranks = vec![0usize; n];
         for (rank, i) in recording.iter().copied().enumerate() {
             ranks[i] = rank;
@@ -519,9 +527,6 @@ pub fn build(request: &str, seed: i64, race: &RaceGpu) -> Result<String, String>
     if n == 0 {
         return Err("the race has no runners".to_string());
     }
-    if race.grid {
-        return Err("grid mode needs the engine's staggered roster ranks".to_string());
-    }
     if root.get("traceConservePower").and_then(Value::as_bool) == Some(true) {
         return Err("traceConservePower is outside the full GPU lane".to_string());
     }
@@ -624,7 +629,7 @@ pub fn build(request: &str, seed: i64, race: &RaceGpu) -> Result<String, String>
         ]));
     }
 
-    let competition_events: Vec<Value> = order_competition(&raw.comp, &strategies, n)?
+    let competition_events: Vec<Value> = order_competition(&raw.comp, &strategies, n, &race.grid_pos)?
         .into_iter()
         .map(|(kind, t, i)| {
             json::obj(vec![
@@ -727,6 +732,11 @@ pub fn build(request: &str, seed: i64, race: &RaceGpu) -> Result<String, String>
         // non-boolean flag is ignored, so only a true form tags.
         if root.get("singleMode").and_then(Value::as_bool) == Some(true) {
             map.insert("singleModeVersion".to_string(), json::num(1.0));
+        }
+        // The engine tags a grid reply (lib.rs:1135-1138) and nothing else
+        // about grid mode.
+        if race.grid {
+            map.insert("experimentalGridVersion".to_string(), json::num(1.0));
         }
         if let Some(signature) = root.get("dataSignature") {
             map.insert("dataSignature".to_string(), signature.clone());

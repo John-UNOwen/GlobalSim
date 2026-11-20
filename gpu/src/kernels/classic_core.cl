@@ -91,6 +91,7 @@
 #define F_STYLECNT 59
 #define F_NIGECNT 60
 #define F_SPOTP 61
+#define F_POS0 62
 
 // Status words, one block per race: fallback, ticks, loop end, per runner
 // finish times as raw f64 bits.
@@ -2179,7 +2180,7 @@ static void cc_prepare(Cc* c, __global const unsigned int* ri) {
         u[UR_STARTCNT] =
             (unsigned int)(nh - ((int)u[UR_SLOPEIDX] > 0 ? 1 : 0));
         u[UR_ENDCNT] = (unsigned int)nh;
-        d[DF_POS] = 0.0;
+        d[DF_POS] = rd[db + F_POS0];
         d[DF_SPEED] = 3.0;
         d[DF_ACCEL] = 0.0;
         d[DF_TARGET] = 0.85 * rd[D_BASESPEED];

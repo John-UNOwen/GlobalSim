@@ -9,7 +9,7 @@ use std::time::Instant;
 
 const COURSE: i32 = 10504;
 const GRID20: &str = r#"{"columns":20,"rowSpacing":3}"#;
-const SIZES: [usize; 6] = [1, 2, 4, 8, 16, 32];
+const SIZES: [usize; 7] = [1, 2, 4, 8, 16, 32, 128];
 
 fn repo_file(rel: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(rel)

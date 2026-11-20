@@ -498,10 +498,8 @@ fn gate_reasons_names_every_refusal() {
         "{{\"courseId\":10504,\"experimentalGrid\":{{\"columns\":20,\"rowSpacing\":3}},\"horses\":[{}]}}",
         vec!["{}"; 21].join(",")
     );
-    assert_eq!(
-        facade::gate_reasons(&classic_grid, Some(&accepted)).as_deref(),
-        Some("experimentalGrid belongs to the retail lane")
-    );
+    // Grid starts are ported to the classic lane too, so the gate accepts.
+    assert_eq!(facade::gate_reasons(&classic_grid, Some(&accepted)), None);
     let classic_trace = r#"{"courseId":10504,"traceConservePower":true,"horses":[{}]}"#;
     assert_eq!(
         facade::gate_reasons(classic_trace, Some(&accepted)).as_deref(),
@@ -607,17 +605,54 @@ fn classic_v77_with_skills(ids: &[&str]) -> String {
     text
 }
 
+/// The zero-skill classic v77 roster grown to 21 horses with dense gate
+/// indices and a valid grid key: the compact meta must carry the engine's
+/// experimentalGridVersion tag (src/lib.rs:1135-1138).
+fn classic_v77_grid() -> String {
+    let mut value = json::parse(&classic_v77()).expect("classic v77 parses");
+    if let json::Value::Object(map) = &mut value {
+        map.insert(
+            "experimentalGrid".into(),
+            json::parse(r#"{"columns":20,"rowSpacing":3}"#).expect("grid key"),
+        );
+        if let Some(json::Value::Array(horses)) = map.get("horses") {
+            let mut horses = horses.clone();
+            let base = horses[1].clone();
+            while horses.len() < 21 {
+                horses.push(base.clone());
+            }
+            let gated: Vec<json::Value> = horses
+                .into_iter()
+                .enumerate()
+                .map(|(index, horse)| {
+                    let mut horse = horse;
+                    if let json::Value::Object(fields) = &mut horse {
+                        fields.insert("gateIndex".into(), json::Value::Number(index as f64));
+                    }
+                    horse
+                })
+                .collect();
+            map.insert("horses".into(), json::arr(gated));
+        }
+    }
+    let mut text = String::new();
+    json::to_string_into(&value, &mut text);
+    text
+}
+
 /// The facade's lane flip: a non-retail zero-skill request runs on the classic
 /// kernel lane in the same batch as a retail request, and its compact meta,
-/// packet and full reply match the engine.
+/// packet and full reply match the engine. A classic grid request rides the
+/// same batch: its meta carries the engine's grid tag.
 #[test]
 fn a_classic_request_answers_from_the_gpu_lane() {
     let classic = classic_v77();
     let retail =
         race_exec::skills_request(&v77_line(), 10504, 1, 0, &SKILLS, None).expect("skills request");
-    let requests = [classic.clone(), retail];
+    let classic_grid = classic_v77_grid();
+    let requests = [classic.clone(), retail, classic_grid.clone()];
     let mut gpu = GpuRaces::new().expect("device gate");
-    let outcomes = gpu.run_batch(&requests, &[1, 1]).expect("batch");
+    let outcomes = gpu.run_batch(&requests, &[1, 1, 1]).expect("batch");
     assert_eq!(outcomes.len(), requests.len());
 
     let mut problems: Vec<String> = Vec::new();
@@ -639,6 +674,12 @@ fn a_classic_request_answers_from_the_gpu_lane() {
         let cpu_reply = json::parse(&cpu.reply).expect("engine reply parses");
         let gpu_meta = json::parse(meta).expect("facade meta parses");
         check_num(&mut problems, &tag, "playerHorseIndex", &cpu_reply, &gpu_meta);
+        // The grid tag rides the meta exactly when the engine tagged.
+        assert_eq!(
+            gpu_meta.get("experimentalGridVersion").is_some(),
+            cpu_reply.get("experimentalGridVersion").is_some(),
+            "{tag}: the grid tag must match the engine"
+        );
         let cpu_results = cpu_reply.get_array("results").expect("engine results");
         let gpu_results = gpu_meta.get_array("results").expect("facade results");
         if cpu_results.len() != gpu_results.len() {
@@ -692,24 +733,28 @@ fn a_classic_request_answers_from_the_gpu_lane() {
         }
     }
 
-    let full = gpu.run_batch_full(&[classic.clone()], &[7]).expect("full batch");
-    let cpu = dep_cpu::run_cpu_binary(&classic, 7).expect("engine full run");
-    if full[0].reply.as_deref() != Some(cpu.reply.as_str()) {
-        let gpu_text = full[0]
-            .reply
-            .clone()
-            .unwrap_or_else(|| format!("fallback {:?}", full[0].fallback));
-        let common = gpu_text
-            .as_bytes()
-            .iter()
-            .zip(cpu.reply.as_bytes())
-            .take_while(|(gpu, cpu)| gpu == cpu)
-            .count();
-        let gpu_tail = &gpu_text[common..(common + 80).min(gpu_text.len())];
-        let cpu_tail = &cpu.reply[common..(common + 80).min(cpu.reply.len())];
-        problems.push(format!(
-            "classic full reply differs at byte {common}: gpu {gpu_tail:?}, engine {cpu_tail:?}"
-        ));
+    let full = gpu
+        .run_batch_full(&[classic.clone(), classic_grid.clone()], &[7, 7])
+        .expect("full batch");
+    for (index, request) in [classic.as_str(), classic_grid.as_str()].into_iter().enumerate() {
+        let cpu = dep_cpu::run_cpu_binary(request, 7).expect("engine full run");
+        if full[index].reply.as_deref() != Some(cpu.reply.as_str()) {
+            let gpu_text = full[index]
+                .reply
+                .clone()
+                .unwrap_or_else(|| format!("fallback {:?}", full[index].fallback));
+            let common = gpu_text
+                .as_bytes()
+                .iter()
+                .zip(cpu.reply.as_bytes())
+                .take_while(|(gpu, cpu)| gpu == cpu)
+                .count();
+            let gpu_tail = &gpu_text[common..(common + 80).min(gpu_text.len())];
+            let cpu_tail = &cpu.reply[common..(common + 80).min(cpu.reply.len())];
+            problems.push(format!(
+                "classic reply {index} differs at byte {common}: gpu {gpu_tail:?}, engine {cpu_tail:?}"
+            ));
+        }
     }
     if !problems.is_empty() {
         panic!("{} mismatching races:\n{}", problems.len(), problems.join("\n"));

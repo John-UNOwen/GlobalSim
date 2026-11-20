@@ -63,9 +63,10 @@ pub const SK_ASTRIDE: usize = 8;
 pub const SK_ARM_SAMPLED: u32 = 1;
 pub const SK_ARM_DEAD: u32 = 2;
 
-// Record slots per race: the roster cap times the eight-slot window each
-// runner can hold (skills.cl SK_RMAX). sk_targets caps live targets at the
-// roster, so the raise adds no behavior at small rosters.
+// Record slots per race (skills.cl SK_RMAX), sized for the eight-slot window
+// of a 120-horse grid-mode roster. A larger non-grid roster whose compiled
+// records exceed 960 is refused by name at compile time. sk_targets caps
+// live targets at the roster, so the cap adds no behavior at small rosters.
 pub const SK_RMAX: usize = 960;
 pub const SK_EMAX: usize = 192;
 pub const SK_PMAX: usize = 3072;

@@ -20,9 +20,9 @@
 // never evaluates a transcendental power.
 
 // Course and runner caps. Grid mode admits rosters up to 120
-// (src/lib.rs:262-272), so 120 is the binding layout bound and every
-// runner-indexed region sizes to it.
-#define RACE_MAXR 120
+// (src/lib.rs:262-272) but the engine answers larger non-grid rosters, so
+// the kernel carries 144 and every runner-indexed region sizes to it.
+#define RACE_MAXR 144
 // 400 s of race time at dt=0.0666 is under 6007 ticks.
 #define RACE_MAX_TICKS 6144
 // Slopes per course, from course_data.json entries.

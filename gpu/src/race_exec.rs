@@ -13,7 +13,10 @@ use crate::race::{FallbackReason, RaceOutcome, RaceRunner};
 use crate::retail_geometry;
 use ocl::{Buffer, Queue, flags};
 
-pub const RACE_MAXR: usize = 120;
+// Grid mode stops at 120 (src/lib.rs:262-272) but the engine answers larger
+// non-grid rosters, so the kernel carries 144, mirrored by the kernel's
+// RACE_MAXR and the initialization program's MAXR.
+pub const RACE_MAXR: usize = 144;
 pub const RACE_MAX_TICKS: usize = 6144;
 pub const RACE_MAX_SLOPES: usize = 16;
 pub const RI_STRIDE: usize = RI_DEBUG_TICK + 16;
@@ -258,6 +261,9 @@ pub struct RaceGpu {
     /// The engine's grid-mode starts were in force for this race, so the
     /// compact reply carries the experimentalGridVersion tag like the engine's.
     pub grid: bool,
+    /// Grid start positions in roster order, the f32-narrowed values the
+    /// field ranks its recording set by (src/race_field.rs:118-125).
+    pub grid_pos: Vec<f64>,
     pub kernel_flag: u32,
     pub kernel_arg: u32,
     pub finish_step: Option<f64>,
@@ -734,9 +740,8 @@ fn prepare(
         return flagged("World geometry requires the experimental runtime and standard starting grid");
     }
     // The three later-stamina systems draw live from the shared solver
-    // stream (race_solver.rs:2767-3043). The retail runtime kernel carries no
-    // live stream consumer; its randomness is host-resolved reservations, so
-    // the draws cannot be placed there (retail_core.cl SI_RESRV).
+    // stream (race_solver.rs:2767-3043). The retail kernel has no live
+    // stream consumer, its randomness is host-reserved (retail_core.cl SI_RESRV).
     if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) == Some(true) {
         return flagged(
             "experimentalLaterStaminaMechanics draws from a live solver stream \
@@ -1291,8 +1296,8 @@ impl RaceContext {
     let queue = self.spike.queue();
 
     let m = launched.len();
-    // Frame-byte budget per launch. One 120-horse race writes
-    // RACE_MAX_TICKS * n * 6 f64 (about 35.4 MB), so a big batch splits into
+    // Frame-byte budget per launch. A full 144-horse race writes
+    // RACE_MAX_TICKS * n * 6 f64 (about 42.5 MB), so a big batch splits into
     // several launches; every current suite fits a single one.
     const FRAME_BYTES_BUDGET: usize = 512 << 20;
     let race_frames_bytes = RACE_MAX_TICKS * n * 6 * std::mem::size_of::<f64>();
@@ -1457,6 +1462,7 @@ impl RaceContext {
             ticks: 0,
             fallback: race.host_fallback.clone(),
             grid: race.grid,
+            grid_pos: Vec::new(),
             kernel_flag: 0,
             kernel_arg: 0,
             finish_step: None,
@@ -1474,6 +1480,14 @@ impl RaceContext {
             debug_pace: Vec::new(),
             debug_sk: None,
         };
+        if race.grid {
+            // The engine ranks its recording set by these construction-time
+            // positions (src/race_field.rs:118-125), the key its competition
+            // reorder sorts by.
+            out.grid_pos = (0..race.n)
+                .map(|r| race.pd[PI_RUNNER0 + PI_RUN_STRIDE * r + PI_RUN_POS])
+                .collect();
+        }
         if race.host_fallback.is_none() && !mode.timed() {
             let st = &status[slot * ST_STRIDE..][..ST_STRIDE];
             let ev = &events_all[slot * EV_STRIDE..][..EV_STRIDE];

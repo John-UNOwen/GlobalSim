@@ -32,19 +32,21 @@ pub fn engine_parse(text: &str) -> Result<EngineValue, String> {
 }
 
 // Kernel layout, mirrors gpu/src/kernels/initialization.cl. The strides are
-// sized to the widest case (IM_INIT with the grid-mode roster cap).
-pub const IN_U_STRIDE: usize = 384;
-pub const IN_L_STRIDE: usize = 144;
-pub const OUT_U_STRIDE: usize = 3840;
-pub const OUT_L_STRIDE: usize = 144;
+// sized to the widest case (IM_INIT with the race kernel's roster cap):
+// IN_U 16 + 3*MAX_RUNNERS, IN_L 8 + MAX_RUNNERS + 10, OUT_U the per-runner
+// block plus the bank tail, OUT_L MAX_RUNNERS + 24.
+pub const IN_U_STRIDE: usize = 448;
+pub const IN_L_STRIDE: usize = 168;
+pub const OUT_U_STRIDE: usize = 4608;
+pub const OUT_L_STRIDE: usize = 168;
 
 pub const MODE_STATS: u32 = 0;
 pub const MODE_R30: u32 = 1;
 pub const MODE_INIT: u32 = 2;
 pub const MODE_HP: u32 = 3;
 
-// The grid-mode roster cap (src/lib.rs:267).
-pub const MAX_RUNNERS: usize = 120;
+// The race kernel's roster cap, mirrored by the kernel's MAXR.
+pub const MAX_RUNNERS: usize = 144;
 pub const MAX_SLOPES: usize = 8;
 
 // Input u32 slots.

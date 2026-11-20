@@ -93,6 +93,8 @@ pub const F_SLOPE0: usize = 58;
 pub const F_STYLECNT: usize = 59;
 pub const F_NIGECNT: usize = 60;
 pub const F_SPOTP: usize = 61;
+// The start position, 0.0 outside grid mode. The kernel seeds DF_POS from it.
+pub const F_POS0: usize = 62;
 
 pub const CLS_ST_STRIDE: usize = 16 + 20 * CLS_MAXR;
 pub const S_FALLBACK: usize = 0;
@@ -296,6 +298,7 @@ pub(crate) struct Prepared {
     su_table: Vec<u32>,
     n: usize,
     host_fallback: Option<String>,
+    grid: bool,
 }
 
 /// Course fields the classic lane reads, extracted like the engine's
@@ -374,6 +377,7 @@ fn flagged(n: usize, reason: String) -> Prepared {
         su_table: vec![0u32; crate::skills_compile::SK_STRIDE],
         n,
         host_fallback: Some(reason),
+        grid: false,
     }
 }
 
@@ -438,28 +442,28 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
     }
     // Engine errors first, in the order the engine raises them: the grid
     // shape check runs inside parse_race_spec (lib.rs:262-272, :1502) and the
-    // classic trace check follows at lib.rs:1504-1506.
-    if let Some(grid) = root.get("experimentalGrid") {
-        let valid = grid.as_object().is_some_and(|o| o.len() == 2)
-            && grid.get("columns").and_then(Value::as_f64) == Some(20.0)
-            && grid.get("rowSpacing").and_then(Value::as_f64) == Some(3.0)
-            && (21..=120).contains(&n);
-        if !valid {
-            return Ok(flagged(
-                n,
-                "experimentalGrid requires 21 through 120 horses, columns=20 and rowSpacing=3.0.".into(),
-            ));
+    // classic trace check follows at lib.rs:1504-1506. A valid grid is an
+    // engine-supported mode on both lanes (lib.rs:603-609, :747-749).
+    let grid = match root.get("experimentalGrid") {
+        None => false,
+        Some(grid) => {
+            let valid = grid.as_object().is_some_and(|o| o.len() == 2)
+                && grid.get("columns").and_then(Value::as_f64) == Some(20.0)
+                && grid.get("rowSpacing").and_then(Value::as_f64) == Some(3.0)
+                && (21..=120).contains(&n);
+            if !valid {
+                return Ok(flagged(
+                    n,
+                    "experimentalGrid requires 21 through 120 horses, columns=20 and rowSpacing=3.0.".into(),
+                ));
+            }
+            true
         }
-    }
+    };
     if root.get("traceConservePower").and_then(Value::as_bool).unwrap_or(false) {
         // The engine itself errors on classic (lib.rs:1504-1506): the flag
         // needs the retail runtime, so quote its text, not a GPU-only reason.
         return Ok(flagged(n, "traceConservePower requires experimentalRetailRuntime".into()));
-    }
-    // Modes the engine answers but the classic kernel does not port: the
-    // refusal is a host fallback, never an approximation.
-    if root.get("experimentalGrid").is_some() {
-        return Ok(flagged(n, "experimentalGrid belongs to the retail lane".into()));
     }
     let later_stamina =
         root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool).unwrap_or(false);
@@ -712,7 +716,17 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         let db = CLS_RD_RUN0 + CLS_RD_RUN_STRIDE * r;
         let rb = CLS_RI_RUN0 + CLS_RI_RUN_STRIDE * r;
         let gate = gate_order.iter().position(|&i| i == r).unwrap_or(0);
-        rd[db + F_LANE0] = starting_lane(gate, course.track, n, grids);
+        // Grid starts take the row-lane pair (src/lib.rs:274-279) in pure
+        // f64: the f32 round-trip at lib.rs:610 belongs to the retail runtime.
+        let (start_pos, lane) = if grid {
+            let column = gate % 20;
+            let lane = (column as f64 + if column >= 9 { 0.6 } else { 0.0 }) / 18.0;
+            (-3.0 * (gate / 20) as f64, lane)
+        } else {
+            (0.0, starting_lane(gate, course.track, n, grids))
+        };
+        rd[db + F_LANE0] = lane;
+        rd[db + F_POS0] = start_pos;
         rd[db + F_SPEED_STAT] = speed;
         rd[db + F_STAMINA] = stamina;
         rd[db + F_POWER] = power;
@@ -774,7 +788,7 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         ri[rb + R_INIT_DOWNHILL] = init_downhill;
         ri[rb + R_TEAM] = horse.get("teamId").and_then(Value::as_i64).unwrap_or(0) as u32;
     }
-    Ok(Prepared { ri, rd, su_table: plan.words, n, host_fallback: None })
+    Ok(Prepared { ri, rd, su_table: plan.words, n, host_fallback: None, grid })
 }
 
 /// One race as the classic kernel ran it. Rows carry the six replay columns
@@ -789,6 +803,9 @@ pub struct ClassicGpu {
     pub frames: Vec<Vec<[f64; CLS_FRAME_COLS]>>,
     pub ticks: usize,
     pub fallback: Option<String>,
+    /// Grid-mode starts were in force, so the replies carry the engine's
+    /// experimentalGridVersion tag like the engine's do on every lane.
+    pub grid: bool,
     pub kernel_flag: u32,
     pub finish_step_all: Vec<Option<f64>>,
     pub finish_raw_all: Vec<Option<f64>>,
@@ -937,6 +954,7 @@ impl ClassicContext {
                 frames: Vec::new(),
                 ticks: 0,
                 fallback: race.host_fallback.clone(),
+                grid: race.grid,
                 kernel_flag: 0,
                 finish_step_all: Vec::new(),
                 finish_raw_all: Vec::new(),
