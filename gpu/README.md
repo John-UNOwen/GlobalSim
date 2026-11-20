@@ -85,6 +85,7 @@ Suites:
 | `wave10_folds` (gpu + initialization + geometry + race) | Full-reply provenance folds: mutating one kernel channel moves exactly the arrays decoded from it, every channel carries live records in a gated scenario (pending and immediate activations, rush edges, fan and cross-target selections, the asitame release, kinds 4 and 5, the style-leader and non-leader phase records, snapshot ranks and the spurt columns), and the requests outside the full lane stay refused (see "Wave-10 full replies") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 | `parity_audit` (gpu + initialization + geometry + race) | Engine parity audit: the app comparison traffic on both lanes compact bit-exact and full byte-equal, all 751 merged skill ids through both compilers against pinned refusal-family lists, and the `gate_reasons` fallback set pinned exactly (see "Engine parity audit" under "Wave 13b") |
+| `wave17_classic_drift` (gpu + initialization + geometry + race) | The scenes the classic-lane base physics drifted 1 to 2 ulp in speed on: plain v77 10105 seed 2, 10404 seed 1, 10810 seeds 1 and 2, 10908 seed 1, plus 10312, 10506, 10511 and 10607 high-stamina seeds 1..3, every frame column `to_bits`-equal against the CPU engine and full replies byte-equal (see "Wave 17: the classic-lane section bake") |
 
 ### What the gate proves
 
@@ -2048,11 +2049,13 @@ runners of the high-stamina field firing once per seed (27 per course), the
 unflagged controls run zero, and the flagged fields diverge from their
 controls. The same file's 2100 m battery keeps that counter at zero: at
 exactly 2100 m the engine injects nothing, and neither does the kernel.
-Four other long courses drift 1 to 2 ulp in speed off the engine on some
-seed or field even with the flag off (10105 seed 2 plain at tick 442, 10312
-seed 1 high-stamina at tick 910, 10404, 10810, 10908, 10506, 10511, 10607
-and 10205 similar); a pre-existing base-physics gap outside this wave, kept
-out of the gated scene set.
+Four other long courses used to drift 1 to 2 ulp in speed off the engine on
+some seed or field even with the flag off (10105 seed 2 plain at tick 442,
+10312 seed 1 high-stamina at tick 910, 10404, 10810, 10908, 10506, 10511,
+10607 and 10205 similar). Wave 17 closed that base-physics gap and gates the
+drift scenes (see "Wave 17: the classic-lane section bake"). This wave's
+scene set keeps the four clean-tier courses, whose bit-exactness now also
+exercises the fixed bake.
 
 The retail lane keeps its refusal, now with the architectural reason: the
 three systems draw live from the shared solver stream whose positions follow
@@ -2178,6 +2181,41 @@ slot. The band and its text have a single source,
 `race_exec::NON_GRID_MAX_RUNNERS` and `race_exec::NON_GRID_BAND_REFUSAL`,
 shared by `race_exec::prepare`, `classic_exec::prepare` and
 `facade::gate_reasons`.
+
+## Wave 17: the classic-lane section bake
+
+The classic lane's last base-physics parity gap closed. The section modifier
+bake in `classic_exec::prepare` multiplied the course base speed into the
+draw term and divided by 100 afterwards. The engine (`race_solver.rs:1057-1058`)
+divides the draw term by 100 first and then multiplies. Division by 100 is
+inexact, so the two associations round differently for many draws and the
+baked section term sits one ulp from the engine's value. With the flag off and
+skills cleared the target speed is `BTS[phase] + section` (pos-keep
+coefficient 1, no hill term), so on draws where that sum sits within one
+section ulp of a rounding boundary of the larger grid, the kernel target
+rounds one ulp high. A runner pinned to its target then keeps the wrong bit
+for the rest of the race, which is why the drift never healed and why the four
+2500 m courses at equal stats and seed stopped at one shared bit pair.
+
+The term dump at the first diverging tick of the 10506 seed 1 high-stamina
+scene (scratch probe): at tick 356 runner 6 both sides run pinned to their own
+constant target, engine `0x403363ecb2faa26a` and kernel `0x403363ecb2faa26b`,
+with `BTS[1] = 19.3245` equal on both sides, pos-keep coefficient 1 and the
+hill and skill terms zero. Taking the draw value that reproduces the host-baked
+section term `0x3fb0da4463151a81`, the engine association returns
+`0x3fb0da4463151a80`, one ulp lower, and `BTS[1] + 0x3fb0da4463151a80`
+reproduces the engine target bit exactly. `classic_exec.rs` now bakes the
+factor first, then multiplies, matching the engine association.
+
+`wave17_classic_drift::classic_drift_scenes_answer_bit_exact` gates the whole
+drift set: the plain v77 field at 10105 seed 2, 10404 seed 1, 10810 seeds 1
+and 2 and 10908 seed 1, and the high-stamina field with skills cleared at
+10312, 10506, 10511 and 10607, seeds 1 to 3, where the shared pair
+19.39033049220090 against 19.390330492200896 on runner 6 used to sit. All
+seventeen scenes answer with every frame column `to_bits`-equal against the
+CPU engine and the full reply byte-equal. `wave13a_later_stamina` keeps its
+four clean-tier courses unchanged.
+
 ## Grid mode
 
 `experimentalGrid` puts the field in 20-lane rows behind the line: rank 119

@@ -423,10 +423,9 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
     {
         return Ok(flagged(n, "retail runtime belongs to the retail lane".into()));
     }
-    // Engine errors first, in the order the engine raises them (the grid
-    // shape check in parse_race_spec at lib.rs:262-272, :1502, then the
-    // classic trace check at lib.rs:1504-1506). A valid grid is engine-
-    // supported on both lanes (lib.rs:603-609, :747-749).
+    // Engine errors first, in the engine's raise order: grid shape check
+    // (parse_race_spec lib.rs:262-272, :1502), then classic trace check
+    // (lib.rs:1504-1506). Valid grid both lanes (lib.rs:603-609, :747-749).
     let grid = match root.get("experimentalGrid") {
         None => false,
         Some(grid) => {
@@ -596,10 +595,9 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         }
         let [mut speed, mut stamina, mut power, mut guts, mut wisdom] = stats.adjusted_f64();
         let mut kakari_chance = 0.0f64;
-        // The raw stamina seed the staminasyoubu gate and value read: the
-        // wire stat times the mood coefficient (race_solver_builder.rs:279,
-        // :290, mood clamped at lib.rs:508). Constructor kind 2 bumps move
-        // it beside the adjusted stat, each clamped at 1 (race_solver.rs:2558).
+        // Raw stamina the staminasyoubu gate and value read: the wire stat
+        // times the mood coefficient (race_solver_builder.rs:279, :290, mood
+        // clamp lib.rs:508). Kind 2 bumps it beside the stat, clamp 1 (:2558).
         let moodc = stats_case.mood.clamp(-2, 2) as f64;
         let mut raw_stamina = raws[r][1] * (1.0 + 0.02 * moodc);
 
@@ -703,9 +701,14 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
                 .position(|&x| x > 0.45)
                 .unwrap_or(0) as f64;
         let max_v = wisdom / 5500.0 * (wisdom * 0.1).log10();
+        let section_base = base_speed(course.distance);
         let mut sections = [0.0; 25];
         for slot in &mut sections[..24] {
-            *slot = base_speed(course.distance) * (max_v - 0.65 + solver.random() * 0.65) / 100.0;
+            // Match race_solver.rs:1057-1058 associativity: divide by 100
+            // before multiplying, else the section term drifts 1 ulp and the
+            // target speed follows on some stat bands.
+            let factor = (max_v - 0.65 + solver.random() * 0.65) / 100.0;
+            *slot = section_base * factor;
         }
         let (solver_hi, solver_lo) = (solver.hi, solver.lo);
 
