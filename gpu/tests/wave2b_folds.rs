@@ -95,20 +95,22 @@ fn new_kinds_compile_for_self() {
 
 #[test]
 fn mid_race_stat_bump_gates() {
-    // A guts fire whose condition can hold at time zero would land in the
-    // engine's constructor pass ahead of the init draws the kernel bakes.
-    refused(
-        &one_runner("order>=2", 500000, &["{\"type\":4,\"target\":1,\"modifier\":1000}"]),
-        "constructor pass",
-    );
-    refused(
+    // Wave 9c removed the constructor-pass refusal: the kernel's init-pass
+    // fire now writes the accumulator and field exactly where the engine's
+    // constructor pass moves them, phase gate or not (retail init draws
+    // precede the constructor fire in the engine too).
+    let plan = one_runner("order>=2", 500000, &["{\"type\":4,\"target\":1,\"modifier\":1000}"]);
+    is_live(&plan, "dynamic kind 4");
+    assert!(plan.live_guts, "dynamic kind 4 flags live guts");
+    is_live(
         &one_runner("order>=2", 500000, &["{\"type\":5,\"target\":1,\"modifier\":1000}"]),
-        "constructor pass",
+        "dynamic kind 5",
     );
-    // A cooldown keeps the record out of the constructor pass.
-    refused(
+    // A static fire with a cooldown still fires in the constructor pass on
+    // both sides and writes the live fields there.
+    is_live(
         &one_runner("always>=0", 500000, &["{\"type\":5,\"target\":1,\"modifier\":1000}"]),
-        "constructor pass",
+        "cooled static kind 5",
     );
     // A phase gate keeps the fire out of the constructor pass in both
     // engines, the shape the kernel ports, for guts and wisdom alike.

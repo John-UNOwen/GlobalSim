@@ -45,11 +45,6 @@ fn is_live(plan: &skills_compile::SkillsPlan, what: &str) {
     assert_eq!(flags & SK_FLAG_DEAD, 0, "{what}: expected the live lowering");
 }
 
-fn refused(plan: &skills_compile::SkillsPlan, name: &str) {
-    let reason = plan.reason.as_deref().unwrap_or_else(|| panic!("{name}: refusal expected"));
-    assert!(reason.contains(name), "{name}: refusal must name it, got {reason}");
-}
-
 fn flags(plan: &skills_compile::SkillsPlan) -> u32 {
     plan.words[SK_RECORDS + 2]
 }
@@ -70,45 +65,30 @@ fn cross_stat_kinds_gate_by_kind() {
 }
 
 #[test]
-fn stat_bump_self_needs_a_phase_gate() {
-    // The engine's constructor pass evaluates the same condition with no
-    // field, so a GutsUp or WisdomUp arm that can hold at time zero must
-    // stay refused.
+fn stat_bump_self_lowers_without_a_phase_gate() {
+    // Wave 9c removed the constructor-pass refusal: the kernel's init-pass
+    // fire writes the guts and wisdom accumulator and field where the
+    // engine's constructor pass moves them, so an ungated self fire lowers.
     for kind in [4i64, 5] {
         let effect = format!("{{\"type\":{kind},\"target\":1,\"modifier\":1000}}");
-        refused(
-            &one_runner("always>=0", 500000, &[effect.as_str()]),
-            "constructor pass",
-        );
-        refused(
-            &one_runner("order>=2", 500000, &[effect.as_str()]),
-            "constructor pass",
-        );
-        // A phase term the field starts at satisfies, so it gates nothing.
-        refused(
-            &one_runner("phase>=0", 500000, &[effect.as_str()]),
-            "constructor pass",
-        );
-        refused(
-            &one_runner("phase>-1", 500000, &[effect.as_str()]),
-            "constructor pass",
-        );
-        // One ungated arm can hold at time zero, so the whole record is refused.
-        refused(
-            &one_runner("phase>=2@always>=0", 500000, &[effect.as_str()]),
-            "constructor pass",
-        );
-        // Phase gates that read false at phase zero lower live. A mid-race
-        // GutsUp fire moves live guts, so the plan flags it.
+        for cond in [
+            "always>=0",
+            "order>=2",
+            "phase>=0",
+            "phase>-1",
+            "phase>=2@always>=0",
+        ] {
+            let plan = one_runner(cond, 500000, &[effect.as_str()]);
+            is_live(&plan, cond);
+            assert_eq!(plan.live_guts, kind == 4, "kind {kind} live_guts for {cond}");
+        }
+        // Phase gates that read false at phase zero also lower live, and the
+        // gate covers the cooldown-zero shape: one loop fire, then dead.
         for cond in ["phase>=1", "phase>=2", "phase>0", "phase>1", "phase>=2&order>=2"] {
             let plan = one_runner(cond, 500000, &[effect.as_str()]);
-            if plan.reason.is_some() {
-                refused(&plan, cond);
-            }
             is_live(&plan, cond);
             assert_eq!(plan.live_guts, kind == 4, "kind {kind} gated live_guts");
         }
-        // A gate also covers the cooldown-zero shape: one loop fire, then dead.
         is_live(
             &one_runner("phase>=1", 0, &[effect.as_str()]),
             &format!("gated kind {kind} cooldown zero"),

@@ -30,6 +30,8 @@
 #define SK_REGIONS 41328
 #define SK_TERMS 49520
 #define SK_TAGS 50800
+// The runner row remain_distance_viewer_id reads (playerHorseIndex).
+#define SK_VIDX 9
 
 #define SK_RSTRIDE 26
 #define SK_ESTRIDE 10
@@ -46,8 +48,8 @@
 #define SK_CORMAX 12
 #define SK_SLOPEMAX 16
 #define SK_WINMAX 16
-#define SK_MWINMAX 32
-#define SK_ARMMAX 2
+#define SK_MWINMAX 64
+#define SK_ARMMAX 4
 
 #define SK_FLAG_RETAIN 1
 #define SK_FLAG_WISDOM 2
@@ -63,6 +65,7 @@
 #define SK_FLAG_RANWHITE 2048
 #define SK_FLAG_GENERAL 4096
 #define SK_FLAG_BUMPED 8192
+#define SK_FLAG_INIT_BUMP 16384
 
 #define SK_TERM_ALL_CORNER 0
 #define SK_TERM_STRAIGHT 1
@@ -73,6 +76,7 @@
 #define SK_TERM_PHASE_LATERHALF 6
 #define SK_TERM_FC_RANDOM 7
 #define SK_TERM_DIST_RATE_AFTER 8
+#define SK_TERM_CORNER_RANDOM 9
 
 // Arm entry flags. Bit 1 marks an arm whose static chain collapsed: its
 // random term still draws, and the arm never passes the membership gate.
@@ -153,9 +157,13 @@
 #define FEAT_RTEMP 58
 #define FEAT_RTEMP_OPP 62
 #define FEAT_RTEMP_END 65
+// remain_distance_viewer_id: the engine's course-distance minus floor over the
+// viewer row from SK_VIDX, the same form as FEAT_REMAIN for that runner.
+#define FEAT_VREMAIN 66
 
 // The (skill, effect) dispatch kinds the port covers.
 #define SK_EFF_SPEEDUP 1
+#define SK_EFF_STAMINUP 2
 #define SK_EFF_GUTSUP 4
 #define SK_EFF_WISDOMUP 5
 #define SK_EFF_RUNAWAY 6
@@ -183,27 +191,29 @@
 #define SK_S_DISABLED 4
 
 // Word layout of one record's state block (SKR_STRIDE words).
-#define SKR_STRIDE 20
+#define SKR_STRIDE 24
 #define SKR_STATE 0
 #define SKR_NWIN 1
 #define SKR_SINGLE 2
 #define SKR_LATCH 3
 #define SKR_AWIN0 4
 #define SKR_AWIN1 5
-#define SKR_USED 6         // the record owner has activated this skill id
-#define SKR_AA_RUN 7       // a delayed running activation exists for this record
-#define SKR_AA_UNAPPLIED 8 // activations queued for this record's next turn
-#define SKR_GREEN 9        // this (runner, skill id) counted in the green set
-#define SKR_RESERVED 10    // the random-skill reservation picked this record
-#define SKR_AA_COUNT 11    // per-effect-slot delivered counts, SKR_AA_COUNT + e
-#define SKR_WISFAIL 19     // the ordinary lottery failed; only reservations fire
+#define SKR_AWIN2 6
+#define SKR_AWIN3 7
+#define SKR_USED 8         // the record owner has activated this skill id
+#define SKR_AA_RUN 9       // a delayed running activation exists for this record
+#define SKR_AA_UNAPPLIED 10 // activations queued for this record's next turn
+#define SKR_GREEN 11       // this (runner, skill id) counted in the green set
+#define SKR_RESERVED 12    // the random-skill reservation picked this record
+#define SKR_AA_COUNT 13    // per-effect-slot delivered counts, SKR_AA_COUNT + e
+#define SKR_WISFAIL 21     // the ordinary lottery failed; only reservations fire
 
 // Double layout of one record's dynamic block (SKD_STRIDE doubles). The
 // effect timers are indexed by effect slot; an effect fires at most once per
 // (skill, detail) cycle, so one timer chain per slot mirrors the engine's
 // per-receiver duration timers.
-#define SKD_STRIDE 148
-#define SKD_EFF_T 140    // per-effect duration timers, negative while active
+#define SKD_STRIDE 276
+#define SKD_EFF_T 268    // per-effect duration timers, negative while active
 #define SKD_ANY_LAST 4    // observe_anyskill: last activation count seen
 #define SKD_ANY_TRUES 5   // observe_anyskill: activations already counted
 #define SKD_ANY_RESULT 6  // observe_anyskill: changed flag, read by FEAT_ANYACT
@@ -213,8 +223,8 @@
 #define SKD_AEXT 3        // overtake extensions of that instance, three at most
 #define SKD_TRIG0 10      // trigger start, first merged window start
 #define SKD_TRIG1 11      // trigger end, last merged window end
-#define SKD_WINDOWS 12    // merged arm chains, up to 32 (start, end) pairs
-#define SKD_ARMS 76       // per-arm runtime chains, 16 pairs per arm slot
+#define SKD_WINDOWS 12    // merged arm chains, up to 64 (start, end) pairs
+#define SKD_ARMS 140      // per-arm runtime chains, 16 pairs per arm slot
 
 // f32::MAX, the phase sampler's tail bound.
 #define SK_FLT_MAX 0x1.fffffep+127f
@@ -319,7 +329,9 @@ static int sk_sample_trigger(const uint kind, const int arg, __global uint* bank
         sk_distance_window(bank, start, end, wlo, whi);
         return 1;
     }
-    if (kind == SK_TERM_FC_RANDOM) {
+    if (kind == SK_TERM_FC_RANDOM || kind == SK_TERM_CORNER_RANDOM) {
+        // corner_random resolves its request argument to one course corner row
+        // at compile time, so both kinds draw the same window there.
         if (corner_idx >= 0 && corner_idx < (int)sk[SK_NCOR]) {
             sk_distance_window(bank, as_float(sk[SK_CORNERS + 2 * corner_idx]),
                 as_float(sk[SK_CORNERS + 2 * corner_idx + 1]), wlo, whi);
@@ -453,8 +465,9 @@ static void sk_init_triggers(__global const uint* sk, __global uint* sks,
             sks[SKR_STRIDE * rec + SKR_STATE] = (uint)SK_S_READY;
             sks[SKR_STRIDE * rec + SKR_LATCH] = 0u;
             sks[SKR_STRIDE * rec + SKR_USED] = 0u;
-            sks[SKR_STRIDE * rec + SKR_AWIN0] = 0u;
-            sks[SKR_STRIDE * rec + SKR_AWIN1] = 0u;
+            for (int w = SKR_AWIN0; w < SKR_AWIN0 + SK_ARMMAX; w++) {
+                sks[SKR_STRIDE * rec + w] = 0u;
+            }
             sks[SKR_STRIDE * rec + SKR_AA_RUN] = 0u;
             sks[SKR_STRIDE * rec + SKR_AA_UNAPPLIED] = 0u;
             sks[SKR_STRIDE * rec + SKR_GREEN] = 0u;
@@ -639,4 +652,19 @@ static void sk_init_wisdom(__global const uint* sk, __global uint* sks,
         }
         mult_out[r] = (double)mult;
     }
+}
+
+/// The lottery outcome of a skill's (runner, skill id) group, consulted by
+/// records whose static constructor fire the kernel bakes after the roll.
+static uint sk_gate_enabled(__global const uint* sk, __global const uint* sks,
+    int rec) {
+    const int nrec = (int)sk[SK_NREC];
+    __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
+    for (int q = 0; q < nrec; q++) {
+        __global const uint* qd = sk + SK_RECORDS + SK_RSTRIDE * q;
+        if (qd[0] == rd[0] && qd[1] == rd[1] && (qd[2] & SK_FLAG_WISDOM)) {
+            return sks[SKR_STRIDE * q + SKR_STATE] != (uint)SK_S_DISABLED;
+        }
+    }
+    return 1u;
 }

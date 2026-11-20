@@ -74,7 +74,9 @@ bit-exact in solo mode. Paired mode takes the same draws from keyed substreams.
 One `uint[SK_STRIDE]` block per race, kernel argument `sk`. Every f64 payload
 occupies two words (low, high) via bit cast, every f32 payload one word.
 
-Header words 0 to 8: `nrec, nprog, nreg, neff, ntag, nstr, ncor, nslope, nterm`.
+Header words 0 to 9: `nrec, nprog, nreg, neff, ntag, nstr, ncor, nslope, nterm,
+viewer_row` (the `playerHorseIndex` the `remain_distance_viewer_id` leaf reads,
+0 when the request omits it).
 
 Sections (word offsets inside the block):
 
@@ -107,7 +109,17 @@ verdict), bit2 carries a sampled term, bit3 always-false (the condition
 folded false: the record stays in the table, spends its sampled draw and the
 kernel skips the gate), bit4 any-skill observe (see the matrix), bit5 wisdom
 follower, bit6 init-defer (a field or loop leaf defers the fire past the
-constructor pass, see the initialization note). `delay_bits` is the f32 start-delay multiplier, the folded product
+constructor pass, see the initialization note), bit7 green tag (a tag in
+601 to 615 records the id once per runner for the activated-green set that
+gates random re-activation, `lib.rs:187-193`), bits 8 to 12 the random
+re-activation selection bits: bit8 primary record (alternative 0), bit9
+re-activation eligibility (every effect carries a non-negative baseDuration
+and a kind above 5, the engine's pool filter), bit10 gold rarity (2 and 6,
+the priority-pass pool), bit11 white rarity (1, the priority-0 pass joins
+it), bit12 `isGeneralSkill`, bit13 bumped (the kinds 4 and 5 self writes are
+folded construction bumps, so the arms skip them) and bit14 init-bump (a
+roll-gated bump the kernel bakes itself after the wisdom lottery, see the
+application points). `delay_bits` is the f32 start-delay multiplier, the folded product
 over the skill's enabled always-conditioned delay effects. The compiler
 resolves the level before the kernel runs: the effect stores the
 level-resolved modifier `retail_skill_value(raw, multiplier)` and
@@ -137,13 +149,15 @@ comparison in engine token order (0 `==`, 1 `!=`, 2 `<`, 3 `<=`, 4 `>`, 5
 Term (8 words): `kind, arg, tag_off, tag_len, corner_idx, 0, 0, 0`. `kind` is
 the sampler id (0 all_corner_random, 1 straight_random, 2 down_slope_random,
 3 up_slope_random, 4 phase_random, 5 phase_firsthalf_random,
-6 phase_laterhalf_random, 7 is_finalcorner_random), and `corner_idx` selects
-the qualifying final corner for id 7. The sampler runs at init on the shared
-stream (solo) or a keyed substream (paired, tag `T{sid}:{alt}:condition:{name}`)
-and produces the sampled windows. The init kernel intersects them with the
-record's static region list in engine `rmap_*` order and writes the final
-windows, trigger and single flag into scratch. The runtime checks a sampled
-record the same way as any other: the window gate reads the final windows.
+6 phase_laterhalf_random, 7 is_finalcorner_random, 8 distance_rate_after_random,
+9 corner_random), and `corner_idx` selects the qualifying final corner for id 7
+and the resolved index-tagged corner row for id 9. The sampler runs at init on
+the shared stream (solo) or a keyed substream (paired, tag
+`T{sid}:{alt}:condition:{name}`) and produces the sampled windows. The init
+kernel intersects them with the record's static region list in engine `rmap_*`
+order and writes the final windows, trigger and single flag into scratch. The
+runtime checks a sampled record the same way as any other: the window gate
+reads the final windows.
 
 ## Evaluation model (interpreter)
 
@@ -213,6 +227,20 @@ tiers, 3 and 7 are the retail HP tiers). Modifier dispatch follows retail
   accumulator rides the `PRD_WIS_ACC` word (NaN when no bump folded), so a
   loop fire chains from a construction bump. The spurt plan keeps the
   captured wisdom until a receiver refresh recaptures it, as in the engine.
+- Roll-gated constructor bump. When a static-true self fire of kinds `2`,
+  `4` or `5` also carries the wisdom lottery (`wisdomCheck` set, cooldown 0),
+  the host cannot precompute whether it fires, so it pushes no `bumps` entry
+  and the record carries `SK_FLAG_INIT_BUMP` (with `SK_FLAG_BUMPED`, which
+  already suppresses the init-pass self write). The kernel replays the bump
+  once the roll lands: `sk_init_wis_bump` adds the enabled records' `WisdomUp`
+  modifiers to the section and rushing wisdom input inside `im_init` (after
+  `sk_init_wisdom`, so the section, rushing and temptation draws see the
+  bumped value the engine's post-constructor `horse.wisdom` feeds at
+  `lib.rs:760`), and `sk_init_stat_bump` replays the enabled records' `2`, `4`
+  and `5` effects onto the stat output columns before the HP chain, so the
+  `GameHpState` and every later seed start from the bumped field. A failed roll
+  leaves the record `SK_S_DISABLED`, so neither helper moves anything and no
+  bump lands, matching the engine not installing the skill.
 - `RunAway(6)`: the runtime arm is SkillAbilityNull, so the fire is inert
   beyond its event and instance bookkeeping. The build-time rule that matters
   is elsewhere: a Nige that learned a type 6 effect races as Oonige
@@ -409,12 +437,18 @@ comparators (`activation_conditions.rs:229-243`).
 | weather | request `weather` enum (`Sunny=1..Snowy=4`), six, refuses a request without a parsable value |
 | season | request `season` enum (`Spring=1..Sakura=5`), six, refuses a request without a parsable value |
 | is_dirtgrade | request `isDirtGrade` flag when present, else `track_id` in `DIRT_GRADE_TRACK_IDS` (`[10101,10103,10104,10105]`), `==,!=` only (`activation_conditions.rs:1572,734-742`) |
+| grade | request `grade` enum, the `g1` default when absent (`lib.rs:284`), six, refuses a present but unparsable grade |
+| time | request `time` enum, the midday default when absent (`lib.rs:285`), six, refuses a present but unparsable time |
+| motivation | horse `mood` clamped to `[-2,2]` plus three (`lib.rs:505`), six |
+| base_power | the runner's ranked wire stat: `ranked_base_stat` (overcap, team rank bonus) truncated as `as i32`, six (`race_solver_builder.rs:872-881`) |
+| post_number | the client gate block mirrored from the wire `gateIndex` (absent means the roster index), `==,<=,>=` only, the three arms the engine registers (`activation_conditions.rs:1002-1039`) |
 | popularity | horse `popularity` (default 0), six |
 | running_style | horse strategy group, `==` only |
 | all_corner_random, straight_random, down_slope_random, up_slope_random | sampled term (`==1`), init-time windows through the scan gate |
 | phase_random, phase_firsthalf_random, phase_laterhalf_random | sampled term (`==0..4` phase index), window from the six-way phase split |
 | is_finalcorner_random | sampled term, window over the qualifying final corner (an id >= 4 starting within the last 1000 m), else no draw and the record stays inert |
 | distance_rate_after_random | sampled term (`==`, argument >= 0), init windows like the other samplers |
+| corner_random | sampled term (`==`, the argument resolves the course corner row: the index-tagged row when the course tags them, else the legacy `rows.len() + arg - 5` slot), the row's start..end as the one window, an untagged non-integer course index refuses (the engine's init error) and no resolved row folds the arm dead (`activation_conditions.rs:549-572`, `retail_initialization.rs:135-160`) |
 | lane_type | dynamic FEAT_LANETYPE, `HorseRaceInfo.get_Lane` bands: 0..3 from the live lane crossing 0.2, 0.4, 0.6, six |
 | is_move_lane | dynamic FEAT_MOVELANE, 0 idle, 1 while a lane move runs and 2 when it is directional, six |
 | blocked_front_continuetime | dynamic FEAT_BFRONT, `trunc` of the continuous blocked-front clock, six |
@@ -451,6 +485,7 @@ comparators (`activation_conditions.rs:229-243`).
 | running_style_count_same_rate | roster fold: the same count against the f32 `+0.5`-truncation threshold `arg% * n`, six; an empty field (`n<=0`) folds false |
 | running_style_equal_popularity_one | roster fold: true when exactly one horse holds `popularity == 1` and its strategy group matches the runner's; no unique favorite folds false for every comparator |
 | same_skill_horse_count | roster fold: horses whose skill list holds the record's id, six |
+| remain_distance_viewer_id | dynamic FEAT_VREMAIN, course distance minus `floor` of the viewer row's position, the viewer from the request `playerHorseIndex` (default 0) through the `SK_VIDX` header word, six; an out-of-range or non-integer present value fails the engine's spec parse (`lib.rs:292-300`), so it refuses, and the leaf defers the record out of the constructor pass |
 
 The out-band cells live in race scratch (`SI_BND20/40/50/70` per runner),
 updated every tick in `field_update` from the previous-tick rank once the
@@ -497,22 +532,22 @@ per-record state. The per-record slots are `SKD_ANY_LAST/TRUES/RESULT`.
 
 One sampled term per record is required. A second random term in one condition flags
 the race (`skill {sid} has more than one random term`), and a random name outside the
-eight samplers above refuses by name.
+samplers above refuses by name.
 
 Not yet ported (fallback-flagged, plan order in the README):
 
 - no engine name behind them, so the registry itself cannot answer:
   `behind_time`, `near_time` and `infront_time` (the nearest entries are the
-  ported `*_near_lane_time` timers),
-  `is_other_character_activate_advantage_skill` (a cross-runner cache of the
-  previous tick's activations, `field.other_advantage_active`),
-  `remain_distance_viewer_id` (a viewer's remaining distance, no concept in
-  the field)
+  ported `*_near_lane_time` timers)
+- `is_other_character_activate_advantage_skill` refuses on equivalence: the
+  engine reads a field-wide previous-tick `(runner, kind)` advantage pair set
+  with same-team exclusion, swapped at every field update
+  (`race_field.rs:373-398`), and no per-runner kernel flag mirrors it
 - precondition `is_activate_any_skill`: the engine drops precondition nodes
   before the observe map is built (`race_solver.rs:551`), so the flag never
   becomes readable and the compiler refuses it by name
-- `base_*` (base stat reads), `motivation`, `grade`, `time`, `post_number`,
-  `course_distance`, `furlong`
+- `base_speed`, `base_stamina`, `base_guts` and `base_wiz` (the sibling base
+  stat reads, no consumer yet), `course_distance`, `furlong`
 - effects outside the accepted set 1, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 21,
   22, 27, 28, 29, 31, 35, 36, 37 and 38 (`skills_compile.rs` refuses the rest
   by kind): `32` AllStatusUp (a mid-race all-stat bump with no kernel consumer)

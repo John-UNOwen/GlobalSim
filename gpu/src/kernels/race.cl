@@ -633,6 +633,31 @@ static int race_tick(__global uint* scr, __global uint* si, __global float* sf,
     return 0;
 }
 
+/// The engine's constructor moves an enabled wisdom-gated record's self stat
+/// bumps into horse.stats before the hill, hp and seed reads (the field is
+/// the clamped f32 accumulator). Replay that onto the stats output columns
+/// the whole race setup reads, once the lottery has enabled the record.
+static void sk_init_stat_bump(__global const uint* sk, __global const uint* sks,
+    __global uint* scr) {
+    const int nrec = (int)sk[SK_NREC];
+    for (int rec = 0; rec < nrec; rec++) {
+        __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
+        if ((rd[2] & SK_FLAG_INIT_BUMP) == 0) continue;
+        if (!sk_gate_enabled(sk, sks, rec)) continue;
+        __global ulong* scol =
+            (__global ulong*)(scr + SCR_STATS_OUT + (int)rd[1] * 160 + 128);
+        for (int e = 0; e < (int)rd[5]; e++) {
+            const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * ((int)rd[6] + e);
+            const int kind = (int)ef[0];
+            const int slot = kind == 2 ? 8 : kind == 4 ? 10 : kind == 5 ? 11 : -1;
+            if (slot < 0) continue;
+            const float value = convert_float_rte(as_double(scol[slot]))
+                + convert_float_rte(as_double((ulong)ef[6] | ((ulong)ef[7] << 32)));
+            scol[slot] = as_ulong((double)clamp_1_2000_f32(value));
+        }
+    }
+}
+
 __kernel void race(__global const uint* ri_all, __global const double* rd_all,
     __global uint* scr_u_all, __global double* scr_d_all,
     __global double* frames_all, __global uint* status_all,
@@ -788,6 +813,9 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             race_fb(st, FB_INIT);
             return;
         }
+        // The init lottery has run, so enabled wisdom-gated constructor bumps
+        // can now move the stat columns that every later seed reads.
+        if (sk_on) sk_init_stat_bump(skt, sks, scr);
         // Unpaired: the race rng is the clone the runtime takes at the
         // after_delays point, so later initialization draws never touch the
         // race stream. Paired: lib.rs:794 replaces that clone per runner with
@@ -1081,6 +1109,11 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         // The stat-modifier accumulator starts at the initialized speed,
         // matching the engine's unwrap_or(horse.speed as f32).
         sd[SD_HPS + r] = (double)speed;
+        // The stamina field and accumulator both start at the adjusted
+        // stamina; a StaminaUp fire moves them and rebuilds max hp, matching
+        // the engine's stat writes and refresh around race_solver.rs:2646.
+        sd[SD_STAM + r] = as_double(scol[8]);
+        sd[SD_STAM_A + r] = (double)convert_float_rte(as_double(scol[8]));
         // The wisdom field and accumulator mirror the speed pair. The NaN
         // accumulator word means no construction bump: the seed is then the
         // unwrap_or seed. A bump carries the unclamped chain instead.

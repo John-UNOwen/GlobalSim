@@ -22,8 +22,11 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     // double block gained 6 columns of RACE_MAXR (SRL plus 720).
     // Wave 8 grew the pd runner block 9 to 11 words (RIL plus 240) and the
     // double block 5 more guts columns of RACE_MAXR (SRL plus 600).
-    assert_eq!(re::SCR_U_WORDS, 479796);
-    assert_eq!(re::SRL_WORDS, 233720);
+    // Wave 9c grew the record state 20 to 24 words per record (plus 3840),
+    // the double block 2 more stat columns (plus 1920) and the record double
+    // block 148 to 276 for four-arm window chains (plus 122880).
+    assert_eq!(re::SCR_U_WORDS, 483636);
+    assert_eq!(re::SRL_WORDS, 356840);
     // Input and status strides track RACE_MAXR.
     assert_eq!(re::RI_STRIDE, 1592);
     // Wave 7 grew the pd runner block from 8 to 9 words for the unclamped

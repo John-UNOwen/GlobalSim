@@ -24,6 +24,8 @@ pub const SK_NSLOPE: usize = 7;
 pub const SK_NTERM: usize = 8;
 
 pub const SK_STRAIGHTS: usize = 16;
+// The runner the viewer-side leaves read, from the request's playerHorseIndex.
+pub const SK_VIDX: usize = 9;
 pub const SK_CORNERS: usize = 40;
 pub const SK_SLOPES: usize = 64;
 pub const SK_RECORDS: usize = 112;
@@ -44,6 +46,12 @@ pub const SK_GSTRIDE: usize = 4;
 pub const SK_MSTRIDE: usize = 8;
 pub const SK_ASTRIDE: usize = 8;
 
+// Arm flags, mirroring skills.cl SK_ARM_SAMPLED and SK_ARM_DEAD. The dead
+// flag marks an arm whose chain is empty or whose sampled term resolved no
+// row, so it never passes the runtime gate.
+pub const SK_ARM_SAMPLED: u32 = 1;
+pub const SK_ARM_DEAD: u32 = 2;
+
 // Record slots per race: the roster cap times the eight-slot window each
 // runner can hold (skills.cl SK_RMAX). sk_targets caps live targets at the
 // roster, so the raise adds no behavior at small rosters.
@@ -58,7 +66,7 @@ pub const SK_STRMAX: usize = 12;
 pub const SK_CORMAX: usize = 12;
 pub const SK_SLOPEMAX: usize = 16;
 pub const SK_REGMAX: usize = 16;
-pub const SK_ARMMAX: usize = 2;
+pub const SK_ARMMAX: usize = 4;
 
 pub const SK_FLAG_RETAIN: u32 = 1;
 pub const SK_FLAG_WISDOM: u32 = 2;
@@ -74,6 +82,10 @@ pub const SK_FLAG_RANGOLD: u32 = 1024;
 pub const SK_FLAG_RANWHITE: u32 = 2048;
 pub const SK_FLAG_GENERAL: u32 = 4096;
 pub const SK_FLAG_BUMPED: u32 = 8192;
+/// A wisdom-gated record whose static core fires in the engine's constructor
+/// pass (race_solver.rs:1008 before the section draws at lib.rs:760). The
+/// kernel bakes its self bumps once the lottery has enabled it.
+pub const SK_FLAG_INIT_BUMP: u32 = 16384;
 
 pub const SK_TERM_ALL_CORNER: u32 = 0;
 pub const SK_TERM_STRAIGHT: u32 = 1;
@@ -84,6 +96,7 @@ pub const SK_TERM_PHASE_FIRSTHALF: u32 = 5;
 pub const SK_TERM_PHASE_LATERHALF: u32 = 6;
 pub const SK_TERM_FC_RANDOM: u32 = 7;
 pub const SK_TERM_DIST_RATE_AFTER: u32 = 8;
+pub const SK_TERM_CORNER_RANDOM: u32 = 9;
 
 pub const OP_TRUE: u32 = 0;
 pub const OP_AND: u32 = 1;
@@ -158,6 +171,9 @@ pub const FEAT_RPHASE: u32 = 57;
 pub const FEAT_RTEMP: u32 = 58;
 pub const FEAT_RTEMP_OPP: u32 = 62;
 pub const FEAT_RTEMP_END: u32 = 65;
+// remain_distance_viewer_id: the course distance minus the floor of the
+// viewer row's position, the viewer from the SK_VIDX header word.
+pub const FEAT_VREMAIN: u32 = 66;
 
 /// One race's compiled table. `reason` is Some when the race must run on the
 /// CPU, naming the first construct the kernel cannot evaluate. `bumps` are
@@ -544,7 +560,7 @@ impl Compiler {
                 }
             };
             let g = Geometry::new(course);
-            let statics = Statics::new(course, horse, root, sid);
+            let statics = Statics::new(course, horse, root, sid, runner);
             let leaves: Vec<Leaf> = match terms.iter().map(|t| classify(t, &g, &statics)).collect() {
                 Ok(l) => l,
                 Err(why) => {
@@ -552,6 +568,9 @@ impl Compiler {
                     return;
                 }
             };
+            if leaves.iter().any(|l| leaf_feat(l) == FEAT_VREMAIN) {
+                self.words[SK_VIDX] = statics.viewer.unwrap_or(0) as u32;
+            }
 
             // The builder evaluates a precondition over the whole course, clips
             // the main chain to the first precondition region's start, and checks
@@ -600,6 +619,9 @@ impl Compiler {
                     ));
                     return;
                 }
+                if pre_leaves.iter().any(|l| leaf_feat(l) == FEAT_VREMAIN) {
+                    self.words[SK_VIDX] = statics.viewer.unwrap_or(0) as u32;
+                }
                 pre_trivial = pre_leaves.iter().all(|l| matches!(l, Leaf::True));
                 pre_init_defer = pre_leaves.iter().any(|l| {
                     matches!(leaf_feat(l), FEAT_ORDER_RATE | FEAT_OTIME | FEAT_DDTOP
@@ -607,7 +629,8 @@ impl Compiler {
                         | FEAT_BFRONT | FEAT_NEARIF | FEAT_VISN | FEAT_INBAND
                         | FEAT_BALL | FEAT_BFRONTB | FEAT_CHGUP_MID | FEAT_CHGUP_FC
                         | FEAT_NOTOP | FEAT_NOTOD | FEAT_SURR | FEAT_TEMPT_B
-                        | FEAT_TEMPT_F | FEAT_RTEMP..=FEAT_RTEMP_END | FEAT_DDRATE | FEAT_DDTOPF)
+                        | FEAT_TEMPT_F | FEAT_RTEMP..=FEAT_RTEMP_END | FEAT_DDRATE
+                        | FEAT_DDTOPF | FEAT_VREMAIN)
                 });
                 let mut pre_regions: Vec<(f64, f64)> = vec![(0.0, g.distance)];
                 for leaf in pre_leaves.iter() {
@@ -677,11 +700,17 @@ impl Compiler {
                 self.unsupported("skill table overflow: too many arms");
                 return;
             }
-            let mut arms: Vec<([Vec<(f64, f64)>; 2], [usize; 2], usize)> = Vec::new();
+            let mut arms: Vec<([Vec<(f64, f64)>; 2], [u32; 2], usize)> = Vec::new();
             let mut sampled_count = 0usize;
             for (start, end) in groups.iter() {
                 let arm_sampled =
                     leaves[*start..*end].iter().filter(|l| matches!(l, Leaf::Sampled)).count();
+                if arm_sampled > 1 {
+                    self.unsupported(format!(
+                        "skill {sid} arm has more than one random term"
+                    ));
+                    return;
+                }
                 sampled_count += arm_sampled;
                 let mut regions = seed.clone();
                 let mut pre_split: Vec<(f64, f64)> = Vec::new();
@@ -713,7 +742,8 @@ impl Compiler {
                         break;
                     }
                 }
-                let sampled_flag = arm_sampled.min(1) | if regions.is_empty() { 2 } else { 0 };
+                let sampled_flag =
+                    arm_sampled.min(1) as u32 | if regions.is_empty() { SK_ARM_DEAD } else { 0 };
                 if regions.is_empty() {
                     // Keep the collapsed arm as a draw-only entry: the engine
                     // still samples its random term at startup, and an empty
@@ -723,14 +753,10 @@ impl Compiler {
                 }
                 arms.push(([pre_split, regions], [sampled_flag, 0], 0));
             }
-            if !arms.is_empty() && arms.iter().all(|a| a.1[0] & 2 != 0) {
+            if !arms.is_empty() && arms.iter().all(|a| a.1[0] & SK_ARM_DEAD != 0) {
                 // Every arm collapsed, so the union is empty and the builder
                 // skips the alternative.
                 dead = true;
-            }
-            if sampled_count > 1 {
-                self.unsupported(format!("skill {sid} has more than one random term"));
-                return;
             }
             if !dead {
                 let pre_sig = if pre_trivial { String::new() } else { pre_text.to_string() };
@@ -759,20 +785,20 @@ impl Compiler {
             let anyact =
                 leaves.iter().any(|l| matches!(l, Leaf::Dynamic { feat, .. } if *feat == FEAT_ANYACT));
 
+            // Resolve each arm's sampled term. The engine samples one term per
+            // arm at init, so the draws stay in text order. An arm whose term
+            // resolves to no row spends no draw and can never fire, so it
+            // collapses like an empty region chain.
             let mut term_word = u32::MAX;
-            let mut skip_draw = false;
-            if sampled_count == 1 {
-                let mut found: Option<(usize, &Term)> = None;
-                for (ai, arm) in arms.iter().enumerate() {
-                    if arm.1[0] & 1 != 0 {
-                        let name = terms[groups[ai].0..groups[ai].1]
-                            .iter()
-                            .find(|t| t.name.contains("random"))
-                            .unwrap();
-                        found = Some((ai, name));
-                    }
+            for ai in 0..arms.len() {
+                if arms[ai].1[0] & SK_ARM_SAMPLED == 0 {
+                    continue;
                 }
-                let (arm_at, t) = found.unwrap();
+                let (gs, ge) = groups[ai];
+                let t = terms[gs..ge]
+                    .iter()
+                    .find(|t| t.name.contains("random"))
+                    .expect("a flagged arm carries its sampled term");
                 let kind = match t.name.as_str() {
                     "all_corner_random" => SK_TERM_ALL_CORNER,
                     "straight_random" => SK_TERM_STRAIGHT,
@@ -783,6 +809,7 @@ impl Compiler {
                     "phase_laterhalf_random" => SK_TERM_PHASE_LATERHALF,
                     "is_finalcorner_random" => SK_TERM_FC_RANDOM,
                     "distance_rate_after_random" => SK_TERM_DIST_RATE_AFTER,
+                    "corner_random" => SK_TERM_CORNER_RANDOM,
                     other => {
                         self.unsupported(format!("skill {sid} random term '{other}' is not ported"));
                         return;
@@ -794,6 +821,10 @@ impl Compiler {
                     // The retail sampler scales the course distance by the
                     // argument percent, so any non-negative integer is valid.
                     t.arg >= 0
+                } else if kind == SK_TERM_CORNER_RANDOM {
+                    // The row resolution below only reads the argument in its
+                    // i64 range, and the kernel word never uses it.
+                    true
                 } else if matches!(
                     kind,
                     SK_TERM_PHASE_RANDOM | SK_TERM_PHASE_FIRSTHALF | SK_TERM_PHASE_LATERHALF
@@ -811,62 +842,80 @@ impl Compiler {
                     ));
                     return;
                 }
-                let corner_idx = if kind == SK_TERM_FC_RANDOM {
-                    match fc_random_index(course, g.distance) {
+                let corner_idx = match kind {
+                    SK_TERM_FC_RANDOM => match fc_random_index(course, g.distance) {
                         Some(i) => i as i32,
                         None => {
-                            // Without a qualifying corner the engine draws no
-                            // window, so this term spends no draw. The record is
-                            // inert: mark it dead but take no sampled draw.
-                            dead = true;
-                            skip_draw = true;
-                            -1
+                            arms[ai].1[0] = SK_ARM_DEAD;
+                            continue;
                         }
-                    }
-                } else {
-                    -1
+                    },
+                    SK_TERM_CORNER_RANDOM => match corner_random_row(course, t.arg) {
+                        Err(why) => {
+                            self.unsupported(format!("skill {sid}: {why}"));
+                            return;
+                        }
+                        Ok(Some(i)) => i as i32,
+                        Ok(None) => {
+                            arms[ai].1[0] = SK_ARM_DEAD;
+                            continue;
+                        }
+                    },
+                    _ => -1,
                 };
-                if !skip_draw {
-                    if self.nterm >= SK_MMAX {
-                        self.unsupported("skill table overflow: too many sampled terms");
-                        return;
-                    }
-                    let (tag_off, tag_len) =
-                        self.tag(&format!("T{sid}:{alt_index}:condition:{}", t.name));
-                    let at = SK_TERMS + SK_MSTRIDE * self.nterm;
-                    self.words[at] = kind;
-                    self.words[at + 1] = t.arg as u32;
-                    self.words[at + 2] = tag_off as u32;
-                    self.words[at + 3] = tag_len as u32;
-                    self.words[at + 4] = corner_idx as u32;
-                    self.nterm += 1;
-                    arms[arm_at].1[1] = (self.nterm - 1) as usize;
+                if self.nterm >= SK_MMAX {
+                    self.unsupported("skill table overflow: too many sampled terms");
+                    return;
+                }
+                // Duplicate tags across one alternative's arms are faithful:
+                // the paired mode reseeds a fresh substream per draw, so only
+                // the shared solo bank's draw order matters.
+                let (tag_off, tag_len) =
+                    self.tag(&format!("T{sid}:{alt_index}:condition:{}", t.name));
+                let at = SK_TERMS + SK_MSTRIDE * self.nterm;
+                self.words[at] = kind;
+                self.words[at + 1] = t.arg as u32;
+                self.words[at + 2] = tag_off as u32;
+                self.words[at + 3] = tag_len as u32;
+                self.words[at + 4] = corner_idx as u32;
+                self.nterm += 1;
+                arms[ai].1[1] = (self.nterm - 1) as u32;
+                if term_word == u32::MAX {
                     term_word = (self.nterm - 1) as u32;
                 }
             }
+            if !dead && !arms.is_empty() && arms.iter().all(|a| a.1[0] & SK_ARM_DEAD != 0) {
+                dead = true;
+            }
 
             let arms_base = self.narm;
-            let mut arms_len = 1usize;
+            let arms_len;
             let mut arm0_prog = (0usize, 0usize);
             let mut arm0_pre = (0usize, 0usize);
             let mut arm0_post = (0usize, 0usize);
             if dead {
-                // A dead record still spends its random draw: the engine samples
-                // the random term before any region is evaluated, so flag the one
-                // reserved arm as sampled and point it at the term to keep the
-                // shared stream aligned. The inert chain stays empty.
-                let at = SK_ARMS + SK_ASTRIDE * self.narm;
-                if term_word != u32::MAX {
-                    self.words[at + 6] = 1;
-                    self.words[at + 7] = term_word;
+                // A dead record still spends its resolved random draws: the
+                // engine samples before any region is evaluated, so every arm
+                // entry that carries a term keeps the shared stream aligned.
+                // The inert chains stay empty.
+                for (_, flags, _) in arms.iter() {
+                    let at = SK_ARMS + SK_ASTRIDE * self.narm;
+                    if flags[0] & SK_ARM_SAMPLED != 0 {
+                        self.words[at + 6] = SK_ARM_SAMPLED;
+                        self.words[at + 7] = flags[1];
+                    }
+                    self.narm += 1;
                 }
-                self.narm += 1;
+                arms_len = arms.len().max(1);
             } else {
                 arms_len = arms.len();
                 for (ai, (lists, flags, _)) in arms.iter().enumerate() {
                     let (gs, ge) = groups[ai];
-                    let (n_pre, pre_b) =
-                        if flags[0] == 1 { self.push_regions(&lists[0]) } else { (0, self.nreg) };
+                    let (n_pre, pre_b) = if flags[0] == SK_ARM_SAMPLED {
+                        self.push_regions(&lists[0])
+                    } else {
+                        (0, self.nreg)
+                    };
                     let (n_post, post_b) = self.push_regions(&lists[1]);
                     if self.reason.is_some() {
                         return;
@@ -887,8 +936,8 @@ impl Compiler {
                     self.words[at + 3] = pre_b as u32;
                     self.words[at + 4] = n_post as u32;
                     self.words[at + 5] = post_b as u32;
-                    self.words[at + 6] = flags[0] as u32;
-                    self.words[at + 7] = flags[1] as u32;
+                    self.words[at + 6] = flags[0];
+                    self.words[at + 7] = flags[1];
                     self.narm += 1;
                     if ai == 0 {
                         arm0_prog = (prog_len, prog_base);
@@ -929,32 +978,38 @@ impl Compiler {
             // fires once in the engine's constructor pass and is gone. Its
             // 4/5/29 bumps are constants the init inputs already consume.
             let cooldown = alt.get("cooldown").and_then(Value::as_f64).unwrap_or(0.) / 10000.0;
-            let static_fire = !dead
+            let static_core = !dead
                 && cooldown <= 0.0
-                && !wisdom
                 && term_word == u32::MAX
                 && sampled_count == 0
                 && groups.len() <= 1
                 && pre_text.is_empty()
                 && leaves.iter().all(|l| matches!(l, Leaf::True));
+            let static_fire = static_core && !wisdom;
+            // The lottery decides a wisdom-gated constructor fire, which the
+            // host cannot precompute, so the kernel bakes its self bumps after
+            // the roll instead. Kind 29 feeds the host-only rush bonus and
+            // value usages other than 1 draw at read time, so both stay out.
+            let gated_static = static_core
+                && wisdom
+                && effect_list.iter().all(|ef| {
+                    let k = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
+                    let t = ef.get("target").and_then(Value::as_i64).unwrap_or(1) as i32;
+                    let vu = ef.get("valueUsage").and_then(Value::as_f64).unwrap_or(1.0) as i32;
+                    matches!(k, 2 | 4 | 5) && t == 1 && vu == 1
+                });
             // The random-activation candidate filter keeps a record only when
             // every effect has a non-negative duration and a type past
             // WisdomUp that is not AllStatusUp (race_solver.rs:2710-2711).
-            // A phase gate keeps an arm false at time zero in both engines,
-            // the guard a mid-race wisdom fire needs. Phase terms carry the
-            // threshold in the term, the leaf keeps the comparator.
-            let phase_gated = groups.iter().all(|(gs, ge)| {
-                leaves[*gs..*ge].iter().enumerate().any(|(k, l)| {
-                    matches!(l, Leaf::Dynamic { feat: FEAT_RPHASE, cmp, arg: None }
-                        if (*cmp == 5 && terms[*gs + k].arg >= 1)
-                            || (*cmp == 4 && terms[*gs + k].arg >= 0))
-                })
-            });
+            // Mid-race guts and wisdom writes move the live fields the kernel
+            // reads each tick, so a kind 4 or 5 fire needs no phase gate: the
+            // constructor-pass fire (kernel init pass) applies the bump the
+            // same way the engine's constructor pass does.
             let mut bumped = false;
             let mut selig = true;
             for ef in effect_list {
                 let kind = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
-                if !matches!(kind, 1 | 4 | 5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 14
+                if !matches!(kind, 1 | 2 | 4 | 5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 14
                     | 21 | 22 | 27 | 28 | 29 | 31 | 35 | 36 | 37 | 38)
                 {
                     let reason = match kind {
@@ -994,21 +1049,15 @@ impl Compiler {
                     ));
                     return;
                 }
-                // Cross stats delivery re-runs refresh_stat_effects on the
-                // receiver. SpeedUp, WisdomUp and GutsUp write the receiver's
-                // live accumulator and field there; GutsUp additionally makes
-                // the guts-derived powf terms live for the whole race.
+                // Cross delivery re-runs refresh_stat_effects on the receiver, and
+                // SpeedUp, WisdomUp and GutsUp write its live field there. GutsUp
+                // also makes the guts-derived powf terms live for the whole race.
                 if target != 1 && kind == 4 && !dead {
                     self.live_guts = true;
                 }
-                // The extra activation is queued into running_skills and applied
-                // on that instance's own turn, where the effect re-draws its
-                // targets and delivers them at that moment (race_solver.rs:1841,
-                // 2479-2484, 2525, 2527-2537). A follow-up registers one token
-                // holding one value, so only the token-registering kinds have a
-                // path: the others write per-receiver state, the recovery share,
-                // the stat writes and their refresh, the aux presence cells, the
-                // kakari rewrite and the random-activation request.
+                // A follow-up lands on the instance's own turn, re-drawing its
+                // targets, and registers one token with one value
+                // (race_solver.rs:2479-2537). Only token kinds have a kernel path.
                 let aa =
                     ef.get("additionalActivate").and_then(Value::as_f64).unwrap_or(0.0) as i32;
                 if aa != 0 && !matches!(kind, 21 | 22 | 27 | 28 | 31) {
@@ -1051,18 +1100,6 @@ impl Compiler {
                 if kind == 4 && !(static_fire && target == 1) && !dead {
                     self.live_guts = true;
                 }
-                // A GutsUp or WisdomUp self fire moves the live field the
-                // pace and downhill draws read each tick. Every arm needs a
-                // false-at-zero phase gate: one ungated arm short-circuits
-                // the field leaves and fires in the constructor pass, where
-                // the engine moves the field ahead of the baked init draws.
-                if (kind == 4 || kind == 5) && target == 1 && !static_fire && !dead && !phase_gated {
-                    self.unsupported(format!(
-                        "skill {sid} effect type {kind} without a phase gate could fire in the \
-                         constructor pass ahead of the baked init draws"
-                    ));
-                    return;
-                }
                 if static_fire && target == 1 && matches!(kind, 4 | 5 | 29) {
                     self.bumps.push((runner, kind, modifier));
                     bumped = true;
@@ -1098,7 +1135,8 @@ impl Compiler {
                     | FEAT_BFRONT | FEAT_NEARIF | FEAT_VISN | FEAT_INBAND
                     | FEAT_BALL | FEAT_BFRONTB | FEAT_CHGUP_MID | FEAT_CHGUP_FC
                     | FEAT_NOTOP | FEAT_NOTOD | FEAT_SURR | FEAT_TEMPT_B
-                    | FEAT_TEMPT_F | FEAT_RTEMP..=FEAT_RTEMP_END | FEAT_DDRATE | FEAT_DDTOPF)
+                    | FEAT_TEMPT_F | FEAT_RTEMP..=FEAT_RTEMP_END | FEAT_DDRATE | FEAT_DDTOPF
+                    | FEAT_VREMAIN)
             });
 
             // retail_initialization rolls the wisdom lottery once per skill id;
@@ -1112,7 +1150,7 @@ impl Compiler {
             self.words[at + 2] = (if retain { SK_FLAG_RETAIN } else { 0 })
                 | (if wisdom && first_record { SK_FLAG_WISDOM } else { 0 })
                 | (if wisdom && !first_record { SK_FLAG_WISDOM_FOLLOW } else { 0 })
-                | (if sampled_count == 1 && !dead { SK_FLAG_SAMPLED } else { 0 })
+                | (if term_word != u32::MAX && !dead { SK_FLAG_SAMPLED } else { 0 })
                 | (if dead { SK_FLAG_DEAD } else { 0 })
                 | (if anyact { SK_FLAG_ANYACT } else { 0 })
                 | (if init_defer { SK_FLAG_INIT_DEFER } else { 0 })
@@ -1122,7 +1160,8 @@ impl Compiler {
                 | (if matches!(rarity, 2 | 6) { SK_FLAG_RANGOLD } else { 0 })
                 | (if rarity == 1 { SK_FLAG_RANWHITE } else { 0 })
                 | (if general { SK_FLAG_GENERAL } else { 0 })
-                | (if bumped { SK_FLAG_BUMPED } else { 0 });
+                | (if bumped { SK_FLAG_BUMPED } else { 0 })
+                | (if gated_static { SK_FLAG_INIT_BUMP | SK_FLAG_BUMPED } else { 0 });
             self.words[at + 3] = priority as u32;
             self.words[at + 4] = rarity;
             self.words[at + 5] = (self.neff - eff_base) as u32;
@@ -1490,10 +1529,27 @@ struct Statics {
     sid: f64,
     // Nonzero teams make the opponent counts differ from their plain ones.
     any_team: bool,
+    // Wave-9c request folds. v_grade and v_time read the RaceParameters enums;
+    // absent strings take the spec defaults "g1" and "midday" (lib.rs:284-285),
+    // present unparsable ones fail the engine's own parse, so they refuse.
+    grade: Option<f64>,
+    race_time: Option<f64>,
+    // v_motivation reads the per-runner mood clamped to [-2,2] (lib.rs:505).
+    motivation: f64,
+    // The runtime_phase trigger base stats are ranked stats truncated to i32
+    // (race_solver_builder.rs:872-881), so v_base_power folds per runner.
+    base_power: f64,
+    // post_number compares the client gate block for the wire gateIndex
+    // (default roster index, lib.rs:311) over the roster size.
+    post_number: f64,
+    // The viewer row remain_distance_viewer_id reads, defaulting to 0. An
+    // out-of-range or non-integer present value fails the engine's spec
+    // parse (lib.rs:292-300), so it refuses at leaf use.
+    viewer: Option<i64>,
 }
 
 impl Statics {
-    fn new(course: &Value, horse: &Value, root: &Value, sid: &str) -> Statics {
+    fn new(course: &Value, horse: &Value, root: &Value, sid: &str, runner: usize) -> Statics {
         let track_id = course.get("raceTrackId").and_then(Value::as_i64).unwrap_or(0);
         // The retail builder counts base styles once for the roster
         // (lib.rs:393-401) and hands each runner those counts minus itself
@@ -1585,8 +1641,144 @@ impl Statics {
             skill_ids,
             sid: sid.parse::<u32>().unwrap_or(0) as f64,
             any_team,
+            grade: enum_code_or_default(root.get("grade").and_then(Value::as_str), grade_code, 100.0),
+            race_time: enum_code_or_default(root.get("time").and_then(Value::as_str), time_code, 2.0),
+            motivation: (horse
+                .get("mood")
+                .and_then(Value::as_f64)
+                .map(|n| n as i32)
+                .unwrap_or(0)
+                .max(-2)
+                .min(2)
+                + 3) as f64,
+            // The runtime_phase builder ranks the wire power and truncates the
+            // result to i32 (race_solver_builder.rs:872-881).
+            base_power: ref_ranked_base_stat(
+                horse_raw_stat(horse, 2),
+                horse.get("mood").and_then(Value::as_f64).map(|n| n as i32).unwrap_or(0),
+                horse_team_rank(horse),
+            ) as i32 as f64,
+            post_number: gate_block(
+                horse
+                    .get("gateIndex")
+                    .and_then(Value::as_f64)
+                    .map(|n| n as i32)
+                    .unwrap_or(runner as i32),
+                if n_runners == 0 { 9 } else { n_runners },
+            ) as f64,
+            viewer: match root.get("playerHorseIndex") {
+                None => Some(0),
+                Some(v) => v
+                    .as_f64()
+                    .filter(|x| {
+                        let i = *x as i64;
+                        *x == i as f64 && i >= 0 && i < n_runners.max(1)
+                    })
+                    .map(|x| x as i64),
+            },
         }
     }
+}
+
+/// The client gate block of a wire gate_index, mirroring the engine's
+/// post_number filters (activation_conditions.rs:1002-1039). Gates outside the
+/// field report block 1.
+fn gate_block(gate: i32, num_umas: i64) -> i64 {
+    if num_umas < 1 || gate < 0 || (gate as i64) >= num_umas {
+        return 1;
+    }
+    let gate = gate as i64;
+    if num_umas <= 8 {
+        return gate + 1;
+    }
+    let per_post = num_umas / 8;
+    let small_posts = 8 - num_umas % 8;
+    let cutoff = small_posts * per_post;
+    if gate < cutoff {
+        gate / per_post + 1
+    } else {
+        small_posts + (gate - cutoff) / (per_post + 1) + 1
+    }
+}
+
+/// An enum-coded request string with the spec's own default when the key is
+/// absent, like the engine's grade and time spec defaults (lib.rs:284-285).
+fn enum_code_or_default(
+    text: Option<&str>,
+    code: fn(&str) -> Option<i64>,
+    default: f64,
+) -> Option<f64> {
+    match text {
+        None => Some(default),
+        Some(t) => code(t).map(|c| c as f64),
+    }
+}
+
+/// The race_parameters.rs parse_grade discriminants.
+fn grade_code(text: &str) -> Option<i64> {
+    match text.to_ascii_uppercase().as_str() {
+        "GRADE_0" => Some(0),
+        "GRADE_1000" => Some(1000),
+        "PRE-OP" | "PREOP" | "PRE_OP" => Some(700),
+        "G1" => Some(100),
+        "G2" => Some(200),
+        "G3" => Some(300),
+        "OP" => Some(400),
+        "MAIDEN" => Some(800),
+        "DEBUT" => Some(900),
+        "DAILY" => Some(999),
+        _ => None,
+    }
+}
+
+/// The race_parameters.rs parse_time discriminants. An empty or unparsable
+/// non-absent string reports None, refusing the construct the way the
+/// engine's parse fails the race.
+fn time_code(text: &str) -> Option<i64> {
+    match text.to_ascii_uppercase().as_str() {
+        "NONE" | "NOTIME" | "NO_TIME" => Some(0),
+        "MORNING" => Some(1),
+        "MIDDAY" => Some(2),
+        "EVENING" => Some(3),
+        "NIGHT" => Some(4),
+        _ => None,
+    }
+}
+
+/// The retail corner_random sampler's row for a request argument
+/// (retail_initialization.rs:135-166). Any corner carrying an "index" makes
+/// every row parse it, and an unparsable one fails the engine's init, so it
+/// reports Err. Without metadata the argument is the legacy offset -5 from
+/// the row count. Ok(None) means no row, the arm never fires and no draw.
+fn corner_random_row(course: &Value, arg: i64) -> Result<Option<usize>, String> {
+    let corners = course.get("corners").and_then(Value::as_array);
+    let Some(rows) = corners else {
+        return Ok(None);
+    };
+    if arg <= 0 {
+        return Ok(None);
+    }
+    if rows.iter().any(|c| c.get("index").is_some()) {
+        let mut found: Option<usize> = None;
+        for (i, c) in rows.iter().enumerate() {
+            let Some(v) = c.get("index").and_then(Value::as_i64) else {
+                return Err(format!(
+                    "corner index '{}' is not an integer, the engine's init fails",
+                    c.get("index").and_then(Value::as_str).unwrap_or("")
+                ));
+            };
+            if v == arg {
+                found = Some(i);
+            }
+        }
+        return Ok(found);
+    }
+    let legacy = rows.len() as i64 + arg - 5;
+    Ok(if legacy >= 0 && (legacy as usize) < rows.len() {
+        Some(legacy as usize)
+    } else {
+        None
+    })
 }
 
 /// Index into the roster's four base-style counts. The retail builder folds
@@ -1733,6 +1925,10 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         "activate_count_all" if matches!(t.op, 3 | 5) => Ok(dyn_leaf(FEAT_ACTALL, t)),
         "activate_count_end_after" if t.op == 5 => Ok(dyn_leaf(FEAT_ACT2, t)),
         "activate_count_later_half" if t.op == 5 => Ok(dyn_leaf(FEAT_ACTLH, t)),
+        // The runtime_phase builder ranks the wire power and truncates to i32,
+        // so v_base_power is a per-runner constant (activation_conditions.rs:1233
+        // reading the trigger horse built at race_solver_builder.rs:872-881).
+        "base_power" => Ok(fold(s.base_power, t)),
         "bashin_diff_behind" => Ok(dyn_leaf(FEAT_BASH_BEHIND, t)),
         "bashin_diff_infront" => Ok(dyn_leaf(FEAT_BASH_INFRONT, t)),
         "behind_near_lane_time" => Ok(dyn_leaf(FEAT_BHNEAR, t)),
@@ -1747,6 +1943,10 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         "change_order_up_middle" => Ok(dyn_leaf(FEAT_CHGUP_MID, t)),
         "compete_fight_count" if t.op == 4 => Ok(dyn_leaf(FEAT_FIGHT, t)),
         "corner" => Ok(dyn_leaf(FEAT_CORNER, t)),
+        // The retail sampler resolves the request argument to one corner row
+        // at init (retail_initialization.rs:135-166) and draws one distance
+        // window there, so the leaf is a sampled term like the other randoms.
+        "corner_random" if t.op == 0 => Ok(Leaf::Sampled),
         "distance_diff_rate" => Ok(dyn_leaf(FEAT_DDRATE, t)),
         "distance_diff_top" => Ok(dyn_leaf(FEAT_DDTOP, t)),
         "distance_diff_top_float" => Ok(dyn_leaf(FEAT_DDTOPF, t)),
@@ -1756,6 +1956,10 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
             arg: Some(dist_rate_threshold(t.arg, d)),
         }),
         "distance_type" if matches!(t.op, 0 | 1) => Ok(fold(s.distance_type as f64, t)),
+        "grade" => match s.grade {
+            Some(v) => Ok(fold(v, t)),
+            None => Err("'grade' needs a parsable grade in the request".into()),
+        },
         "ground_condition" => match s.ground_condition {
             Some(v) => Ok(fold(v, t)),
             None => Err("'ground_condition' needs a parsable groundCondition".into()),
@@ -1808,9 +2012,17 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
             Ok(Leaf::RegionDyn(vec![(phase_start(d, 2), d)], FEAT_LASTSPURT))
         }
         "is_move_lane" => Ok(dyn_leaf(FEAT_MOVELANE, t)),
+        // The engine swaps a field-wide set of previous-tick (runner, kind)
+        // advantage pairs with same-team exclusion at every field update
+        // (race_field.rs:373-398), which no per-runner kernel flag mirrors.
+        "is_other_character_activate_advantage_skill" => Err(
+            "'is_other_character_activate_advantage_skill' needs the field's team-filtered \
+             previous-tick advantage pair set".into(),
+        ),
         "is_overtake" => Ok(dyn_leaf(FEAT_IS_OVERTAKE, t)),
         "is_temptation" if t.op == 0 => Ok(dyn_leaf(FEAT_IS_TEMPTATION, t)),
         "lane_type" => Ok(dyn_leaf(FEAT_LANETYPE, t)),
+        "motivation" => Ok(fold(s.motivation, t)),
         "near_count" => Ok(dyn_leaf(FEAT_NEAR, t)),
         "near_infront_count" => Ok(dyn_leaf(FEAT_NEARIF, t)),
         "order" => Ok(dyn_leaf(FEAT_ORDER, t)),
@@ -1846,7 +2058,18 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         "overtake_target_time" => Ok(dyn_leaf(FEAT_OTIME, t)),
         "phase" => Ok(dyn_leaf(FEAT_RPHASE, t)),
         "popularity" => Ok(fold(s.popularity, t)),
+        // The registry only registers eq, lte and gte immediate filters
+        // (activation_conditions.rs:1020-1039,1644-1648); any other comparator
+        // fails the engine's build too.
+        "post_number" if matches!(t.op, 0 | 3 | 5) => Ok(fold(s.post_number, t)),
+        "post_number" => Err("'post_number' only registers == <= and >=".into()),
         "remain_distance" => Ok(dyn_leaf(FEAT_REMAIN, t)),
+        // The live check always resolves a viewer row (the spec default is 0),
+        // so this is the engine's remain_distance for that runner's position.
+        "remain_distance_viewer_id" => match s.viewer {
+            Some(_) => Ok(dyn_leaf(FEAT_VREMAIN, t)),
+            None => Err("'remain_distance_viewer_id' needs an in-range playerHorseIndex".into()),
+        },
         "rotation" => Ok(fold(s.turn as f64, t)),
         "running_style" if t.op == 0 => {
             Ok(if style_matches(s.strategy, t.arg) { Leaf::True } else { Leaf::False })
@@ -1917,6 +2140,10 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         }
         "overtake_target_no_order_up_time" => Ok(dyn_leaf(FEAT_NOTOP, t)),
         "overtake_target_no_order_down_time" => Ok(dyn_leaf(FEAT_NOTOD, t)),
+        "time" => match s.race_time {
+            Some(v) => Ok(fold(v, t)),
+            None => Err("'time' needs a parsable time in the request".into()),
+        },
         "track_id" => Ok(fold(s.track_id as f64, t)),
         "visiblehorse" => Ok(dyn_leaf(FEAT_VISN, t)),
         "weather" => match s.weather {

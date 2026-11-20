@@ -74,10 +74,12 @@ Suites:
 | `wave7_folds` | Compile-time gates for the mid-race stat fires: cross SpeedUp, GutsUp and WisdomUp compile live on targets 4, 9 and 10 (kind 4 sets the plan's `live_guts` flag), ungated self GutsUp and WisdomUp refuse by name, every phase-gated self shape lowers, and `SK_FLAG_BUMPED` marks exactly the static 4/5/29 bumps (see "Wave-7 mid-race stat fires") |
 | `wave7_gate` (gpu + initialization + geometry + race) | The real kind-1 loop fire 201641 beside a constructor-pass SpeedUp probe, plus a 668xxx battery for self WisdomUp refire, the static-bump-to-loop-fire accumulator chain, cross SpeedUp and WisdomUp on all three fans, the 10 s refire cycle and the immune and same-team debuff drops, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-7 mid-race stat fires") |
 | `wave8_powf_gate` (gpu) | Bit-exactness gate for the transcribed ucrtbase `pow` and `powf` (`powf_core.cl`): the engine's guts domains plus fuzz bands, `to_bits` equality against Rust `f64::powf` and `f32::powf` at 100%, default 38.7M pairs, env-widened to 419.4M with zero differences |
-| `wave8_folds` | Compile-time gates for live guts: every shipped GutsUp id compiles as a baked constructor bump (three keep their own condition refusals), and the mid-race and cross synthetic shapes set the plan's `live_guts` flag while static-only shapes never do |
+| `wave8_folds` | Compile-time gates for live guts: the shipped GutsUp ids compile as baked constructor bumps (two keep their `random_lot` condition refusals, and 210141 folds dead on its `motivation` gate since wave 9c), and the mid-race and cross synthetic shapes set the plan's `live_guts` flag while static-only shapes never do |
 | `wave8_gate` (gpu + initialization + geometry + race) | The 669xxx GutsUp battery: self phase-gated refire and drop, static bump chained into a loop fire, all three cross fans, the immune and same-team debuff drops, the constructor-only static control, and the real static ids 200211, 202181 and 1200051, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-8 live guts") |
  | `wave9_folds` | Compile-time gates for the tail: a `duration_usage` 4 record lowers with its running instance and the aux kinds 11, 12, 35 and 38 refuse under it, the `additionalActivate` fan compiles live on kinds 21, 22, 27, 28 and 31 at targets 1, 4, 9 and 10 and refuses outside that, `value_usage` at any wire value compiles as the engine's pass-through, and the real `duration_usage` 4 ids 100531 and 900531 plan live (see "Wave-9 running instance, fan and pass-through values") |
  | `wave9_gate` (gpu + initialization + geometry + race) | The real 100531 and 900531 beside a 6691xxx `duration_usage` 4 battery (no delayed effect, an extended `additionalActivate` sibling, a kind-2 turn on a short cooldown, a cross-target fan), a 6692xxx battery for the `additionalActivate` fan outside self on kinds 21, 22, 27, 28 and 31, and 6693xxx for the `value_usage` pass-through, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events, plus one ignored scene that reproduces the fan-churn drift (see "Wave-9 running instance, fan and pass-through values") |
+ | `wave9c_folds` | Compile-time gates for the condition-name tail: `grade`, `time`, `motivation`, `base_power` and `post_number` fold both directions with the refused shapes, the corner sampler resolves its row live, refuses an untagged non-integer course index and folds a missing-row arm, the viewer leaf lowers live with its header row and refuses an out-of-range `playerHorseIndex`, the roll-gated constructor bump marks `INIT_BUMP` and `BUMPED` with no host bump only for the kinds the kernel can bake, and the advantage-skill machine refuses (see "Wave-9c condition-name tail") |
+ | `wave9c_gate` (gpu + initialization + geometry + race) | The real merged ids 100471, 900471, 200251, 202231, 202331, 210141 and 200351 on fitted seats beside a 6694xx battery for the directions the roster cannot reach (the false-side post_number fold, the activating time, grade, motivation, base_power and viewer-row fires, the corner sampler with a missing row and with four arms, the StaminaUp kind static, mixed and roll-gated), v77 roster seeds 1..3: zero fallback and frame identity with the battery's mid-race rows activating (see "Wave-9c condition-name tail") |
 | `grid_gate` (gpu + initialization + geometry + race) | Grid starts at 21, 24, 40 and 120 horses, two courses, seeds 1..2: zero fallback and frame-for-frame `to_bits` identity against the CPU engine, the 21-horse grid-vs-retail control pair differing at frame 0, and invalid grid shapes falling back with the engine's own message (see "Grid mode") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 
@@ -1350,9 +1352,10 @@ from the field at the points the engine reads it.
   `SD_DUEL_A`); `SCR_U_WORDS` is unchanged at 479,796 and `SRL_WORDS` moves
   233,120 to 233,720, repinned in `tests/layout.rs`.
 - Gates: `wave8_powf_gate` above. `wave8_folds` audits the shipped catalog
-  (13 of the 16 GutsUp ids compile as baked bumps; 202441, 202442 and
-  210141 keep their pre-existing `random_lot`/`motivation` condition
-  refusals, never a guts refusal) and the flag matrix. `wave8_gate` replays
+  (13 of the 16 GutsUp ids compile as baked bumps; 202441 and 202442 keep
+  their pre-existing `random_lot` condition refusals, and 210141, whose
+  `motivation>=4` gate the wave-9c fold closes, folds dead on the default
+  mood instead of refusing) and the flag matrix. `wave8_gate` replays
   the v77 roster seeds 1..3 with zero fallback: 669001/669002 self refire
   and phase-2 drop, 669030/669031 static bump chained into a loop fire,
   669010/669011/669012 all three cross fans, 669041/669042 the immune and
@@ -1461,6 +1464,71 @@ alternatives, and none of the 751 merged ids has one;
 the batched extension relies on `extend_first` running the whole overtake batch
 before the retire sweep, which is what the engine does
 (`race_solver.rs:1776-1798`).
+
+### Wave-9c condition-name tail
+
+The last skill-side fallbacks in the merged table were condition names the
+compiler refused by name. All are ported except one, which refuses on
+equivalence.
+
+- `grade` and `time` fold the request enums. An absent key takes the spec
+  default, `g1` and midday (`lib.rs:284-285`); a present unparsable string
+  fails the engine's own parse, so the compiler refuses it by name.
+- `motivation` folds `clamp(mood, -2, 2) + 3` (`lib.rs:505`), and
+  `base_power` the ranked wire stat: overcap and team rank bonus, truncated
+  `as i32` (`race_solver_builder.rs:872-881`). The sibling reads
+  `base_speed`, `base_stamina`, `base_guts` and `base_wiz` stay refused, no
+  consumer yet.
+- `post_number` mirrors the client gate block from the wire `gateIndex`
+  (absent means the roster index, `lib.rs:311`) over the roster size, on the
+  three comparators the engine registers, `== <= >=`
+  (`activation_conditions.rs:1002-1039`).
+- `corner_random` is sampled term id 9: the argument resolves a course corner
+  row (the index-tagged row, else the legacy `rows.len() + arg - 5` slot) and
+  its `start..end` is the one window; a non-integer tagged index refuses
+  (the engine's init error) and an unresolved row folds the arm dead. Each
+  arm resolves and draws its own window, so the four-arm shape 200351 carries
+  (`==1@==2@==3@==4`) compiles, and 200351 fires in the gate.
+- `remain_distance_viewer_id` is a live leaf (feature 66): course distance
+  minus `floor` of the viewer row's position, the viewer from the request
+  `playerHorseIndex` (default 0) through the header word. An out-of-range or
+  non-integer present value fails the engine's spec parse (`lib.rs:292-300`),
+  so it refuses, and the leaf defers the record out of the constructor pass.
+- `is_other_character_activate_advantage_skill` stays refused on equivalence:
+  the engine reads a field-wide previous-tick `(runner, kind)` advantage pair
+  set with same-team exclusion, swapped at every field update
+  (`race_field.rs:373-398`), and no per-runner kernel flag mirrors it.
+- Roll-gated constructor bump. The merged table also proved a bump path that
+  only a kernel-side bake can carry: a static-true constructor fire behind
+  the wisdom lottery (`210141`: motivation gate, cooldown 0, permanent, self
+  stamina, guts and wisdom bumps). The host cannot know the roll's
+  outcome, so it pushes no bump and flags the record
+  `SK_FLAG_INIT_BUMP | SK_FLAG_BUMPED`. The kernel replays the fire once
+  enabled: `sk_init_wis_bump` inside `im_init`, after `sk_init_wisdom`, moves
+  the enabled records' `WisdomUp` modifiers onto the section and rushing
+  wisdom input (the engine's constructor fires before
+  `initialize_sections_and_rushing` and hands it the bumped `horse.wisdom` at
+  `lib.rs:760`), and `sk_init_stat_bump` in the race kernel replays the
+  kinds' `2`, `4` and `5` effects onto the stat output columns before the HP
+  chain, so every later seed starts from the bumped field. A failed roll
+  leaves the record disabled and nothing moves, matching the engine not
+  installing the skill. The same shape without the lottery keeps the
+  pre-existing host-bump path.
+
+Gates: `wave9c_folds` compiles each direction alone, the folds true and
+false, `post_number` on its three comparators and the refused fourth, the
+corner row resolution live, refused and arm-dead, the viewer leaf live with
+its header word and the out-of-range refusal, the gated bake matrix
+(`INIT_BUMP` set with no host bump only when the roll gates kinds 2, 4 or 5),
+and the advantage-skill refusal. `wave9c_gate` replays the v77 roster seeds
+1..3 with zero fallback and frame identity on the real ids 100471, 900471,
+200251, 202231, 202331, 210141 and 200351, and on a 6694xx battery for the
+directions the real ids cannot reach on this roster (the false-side
+post_number fold, the true sides of time, grade, motivation and base_power
+as activating mid-race fires, the viewer-row distance, the corner sampler
+with a missing row and with four arms, and the StaminaUp kind static, mixed
+and roll-gated). The battery's mid-race rows must and do activate. The
+earlier wave suites reran green on the same binaries.
 
 ### Cost
 
@@ -1653,8 +1721,10 @@ true now.
 
 - Skills outside the ported subset: the names with no engine registry entry
   (`behind_time`, `near_time`, `infront_time`),
-  `is_other_character_activate_advantage_skill` and
-  `remain_distance_viewer_id`, the all-stat 32 and the variantless 33 and 34,
+  `is_other_character_activate_advantage_skill` (the field's team-filtered
+  previous-tick advantage pair set, `race_field.rs:373-398`), the sibling
+  base-stat reads `base_speed`, `base_stamina`, `base_guts` and `base_wiz`,
+  `course_distance`, `furlong`, the all-stat 32 and the variantless 33 and 34,
   and the other constructs named
   in the `SKILLS_DESIGN.md` matrix. Each
   flags its race with the construct named

@@ -250,13 +250,13 @@ fn roster_reads_fold() {
 
 #[test]
 fn still_refused_constructs_by_name() {
-    // The advantage-skill machine caches other runners' previous-tick
-    // activations, and the viewer distance has no concept in the field.
+    // The advantage-skill machine caches the field's previous-tick
+    // (runner, kind) advantage pairs with team exclusion, which no per-runner
+    // kernel flag mirrors. remain_distance_viewer_id ported in wave 9c.
     refused(
         &one_runner("is_other_character_activate_advantage_skill==1"),
         "is_other_character_activate_advantage_skill",
     );
-    refused(&one_runner("remain_distance_viewer_id>=0"), "remain_distance_viewer_id");
     // Not engine names at all: no registry entry can answer for them.
     refused(&one_runner("behind_time>=1"), "behind_time");
     refused(&one_runner("near_time>=1"), "near_time");

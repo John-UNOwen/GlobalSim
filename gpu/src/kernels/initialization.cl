@@ -445,7 +445,27 @@ static void im_r30(__global const uint* ib, __global const ulong* ilb,
         ob[O3_SOLVER_LO] = s_lo;
 }
 
-static void im_init(__global const uint* ib, __global const ulong* ilb,
+/// Replay the enabled wisdom-gated records' self WisdomUp bumps onto the
+/// per-runner init inputs, mirroring the engine's constructor fire ordering.
+static void sk_init_wis_bump(__global const uint* sk, __global const uint* sks,
+    __global uint* ib) {
+    const int nrec = (int)sk[SK_NREC];
+    for (int rec = 0; rec < nrec; rec++) {
+        __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
+        if ((rd[2] & SK_FLAG_INIT_BUMP) == 0) continue;
+        if (!sk_gate_enabled(sk, sks, rec)) continue;
+        __global uint* rb = ib + US_R0 + IIS_STRIDE * (int)rd[1];
+        float value = convert_float_rte(as_float(rb[US_WISB]));
+        for (int e = 0; e < (int)rd[5]; e++) {
+            const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * ((int)rd[6] + e);
+            if ((int)ef[0] != 5) continue;
+            value += convert_float_rte(as_double((ulong)ef[6] | ((ulong)ef[7] << 32)));
+        }
+        rb[US_WISB] = as_uint(clamp_1_2000_f32(value));
+    }
+}
+
+static void im_init(__global uint* ib, __global const ulong* ilb,
     __global uint* ob, __global ulong* olb, __global const uint* sk,
     __global uint* sks, __global double* skd, __global uint* sub) {
         const int seed = (int)ib[US_A];
@@ -494,6 +514,10 @@ static void im_init(__global const uint* ib, __global const ulong* ilb,
         if (sk_on) sk_init_wisdom(sk, sks, bank, sub, ilb, sk_mult, paired, seed, n,
             IL_RUNNER0);
         else for (int r = 0; r < n; r++) sk_mult[r] = 1.0;
+        // The engine's constructor fires the enabled wisdom-gated records
+        // before the section and rushing draws (race_solver.rs:1008 before
+        // lib.rs:760), so their wisdom bumps land here, behind both.
+        if (sk_on) sk_init_wis_bump(sk, sks, ib);
         for (int r = 0; r < n; r++) {
             const float base_wisdom = convert_float_rte(as_double(ilb[IL_RUNNER0 + r]));
             float chance = 100.0f - 9000.0f / base_wisdom;
@@ -636,7 +660,7 @@ __kernel void initialization(__global const uint* in_u, __global const ulong* in
     } else if (mode == IM_R30) {
         im_r30(ib, ilb, ob, olb);
     } else if (mode == IM_INIT) {
-        im_init(ib, ilb, ob, olb, 0, 0, 0, 0);
+        im_init((__global uint*)ib, ilb, ob, olb, 0, 0, 0, 0);
     } else {
         im_hp(ib, ilb, ob, olb);
     }

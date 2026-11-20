@@ -35,9 +35,9 @@ fn plan_with(skill_data: &json::Value, ids: &[i64]) -> skills_compile::SkillsPla
 }
 
 /// The shipped type-4 skills, eighteen effect entries over sixteen ids.
-/// 202441, 202442 and 210141 sit apart below: their `random_lot` and
-/// `motivation` conditions are refusals of their own, independent of the
-/// guts effect.
+/// 202441 and 202442 sit apart below: their `random_lot` conditions are
+/// refusals of their own, independent of the guts effect. 210141 folds
+/// dead on its `motivation` condition instead of refusing.
 const REAL_GUTS_IDS: [i64; 13] = [
     200211, 200212, 200221, 200222, 200231, 200232, 200233, 200241, 200242, 200291, 200292,
     202181, 1200051,
@@ -75,7 +75,7 @@ fn real_guts_skills_compile_as_bumps() {
     assert!(plan.bumps.iter().any(|(_, kind, _)| *kind == 4), "some bumps landed");
     // The three condition-gated skills stay refused by their condition, the
     // same refusal as before the guts path existed, never by the guts effect.
-    for (id, gate) in [(202441i64, "random_lot"), (202442, "random_lot"), (210141, "motivation")] {
+    for (id, gate) in [(202441i64, "random_lot"), (202442, "random_lot")] {
         let mut one = json::obj(vec![]);
         if let json::Value::Object(map) = &mut one {
             map.insert(id.to_string(), all.get(&id.to_string()).expect("id").clone());
@@ -84,6 +84,18 @@ fn real_guts_skills_compile_as_bumps() {
         let reason = plan.reason.unwrap_or_else(|| panic!("{id} unexpectedly compiled"));
         assert!(reason.contains(gate), "{id}: refusal must name the condition, got {reason}");
     }
+    // 210141 folds on its motivation condition instead: the default mood
+    // gives motivation 3, so the `motivation>=4` alternative folds dead and
+    // the skill compiles without a bump.
+    let mut one = json::obj(vec![]);
+    if let json::Value::Object(map) = &mut one {
+        map.insert("210141".to_string(), all.get("210141").expect("id").clone());
+    }
+    let plan = plan_with(&one, &[210141]);
+    if let Some(reason) = &plan.reason {
+        panic!("210141 refused: {reason}");
+    }
+    assert!(plan.bumps.is_empty(), "210141's dead fold carries no bump");
 }
 
 fn def(cond: &str, cooldown: i64, effects: &str) -> String {
