@@ -211,9 +211,26 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
         const int rush = rushing_step(si, sf, r, position_f, dist_f, dt, pd, bank);
         if (rush == 1) {
             si[SI_TEMPT + r] += 1u;
+            // The engine's kakari activate hook stamps the start clock.
+            const ulong cbits = as_ulong(sd[SD_CLOCK + r]);
+            __global uint* rc = rc_take(scr, st, SCR_RC_KAK, RC_KAK_CAP, 4);
+            if (rc) {
+                rc[0] = 0u;
+                rc[1] = (uint)r;
+                rc[2] = (uint)cbits;
+                rc[3] = (uint)(cbits >> 32);
+            }
         }
         if (rush == -1) {
             race_event(ev, st, r, EV_KAKARI);
+            const ulong cbits = as_ulong(sd[SD_CLOCK + r]);
+            __global uint* rc = rc_take(scr, st, SCR_RC_KAK, RC_KAK_CAP, 4);
+            if (rc) {
+                rc[0] = 1u;
+                rc[1] = (uint)r;
+                rc[2] = (uint)cbits;
+                rc[3] = (uint)(cbits >> 32);
+            }
         }
         si[SI_KAKARI + r] = si[SI_RS_ACTIVE + r];
         si[SI_RMODE + r] = si[SI_RS_MODE + r];
@@ -245,7 +262,16 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
         sd[SD_LSS + r] = (double)sf[SF_SP_SPEED + r];
         // The Conserve Power release rides the last-spurt transition.
         if (!was_spurting && (int)si[SI_SP_ACTIVE + r]) {
-            asitame_release(si, sf, sd, r, pd, course_distance, strategy);
+            // The engine captures the actual start pair at the transition.
+            if (scr[SCR_RC_ON] != 0u) {
+                const ulong cbits = as_ulong(sd[SD_CLOCK + r]);
+                const ulong pbits = as_ulong(sd[SD_POS + r]);
+                st[ST_SPURTT0 + 2 * r] = (uint)cbits;
+                st[ST_SPURTT0 + 2 * r + 1] = (uint)(cbits >> 32);
+                st[ST_SPURTD0 + 2 * r] = (uint)pbits;
+                st[ST_SPURTD0 + 2 * r + 1] = (uint)(pbits >> 32);
+            }
+            asitame_release(scr, st, si, sf, sd, r, pd, course_distance, strategy);
         }
     }
 
@@ -417,6 +443,27 @@ static int race_tick(__global uint* scr, __global uint* si, __global float* sf,
     const float pm_range, const int pm_notfwd, const float dt) {
     // Diagnostics mirror: the journal helper stamps events with this tick.
     scr[SK_JRN_T] = (uint)tick;
+    if (scr[SCR_RC_ON] != 0u) {
+        // StyleLeaders::update over the cached ranks: the smallest-index
+        // runner with the strictly smallest rank leads the style group.
+        for (int j = 0; j < n; j++) {
+            uint leader = 1u;
+            for (int k = 0; k < n; k++) {
+                if (k == j
+                    || field_style((int)si[SI_STRATEGY + k])
+                        != field_style((int)si[SI_STRATEGY + j])) {
+                    continue;
+                }
+                const int rj = (int)si[SI_RANKCOL + j];
+                const int rk = (int)si[SI_RANKCOL + k];
+                if (rk < rj || (rk == rj && k < j)) {
+                    leader = 0u;
+                    break;
+                }
+            }
+            scr[SCR_RC_LEAD + j] = leader;
+        }
+    }
     // Rows over the pre-movement state: the last-straight flags feed the
     // duel collect and the duel entry test.
     uint any_straight = 0u;
@@ -597,6 +644,28 @@ static int race_tick(__global uint* scr, __global uint* si, __global float* sf,
             si[SI_DASH + r] = 0u;
         }
     }
+    if (scr[SCR_RC_ON] != 0u && tick >= 0) {
+        // The first frame whose step left the runner in the last spurt, and
+        // PositioningScore::update: a phase change publishes the phase when
+        // the runner led its style group at the cached ranks of this tick.
+        for (int r = 0; r < n; r++) {
+            if (st[ST_SPFIRST0 + r] == 0u && (int)si[SI_SP_ACTIVE + r] != 0) {
+                st[ST_SPFIRST0 + r] = (uint)(tick + 1);
+            }
+            const int ph = (int)si[SI_RPHASE + r];
+            if (ph == (int)si[SI_PPHASE + r]) {
+                continue;
+            }
+            __global uint* rc = rc_take(scr, st, SCR_RC_PHR, RC_PHR_CAP, 4);
+            if (rc != 0) {
+                rc[0] = (uint)r;
+                rc[1] = (uint)ph;
+                rc[2] = (uint)(tick + 1);
+                rc[3] = scr[SCR_RC_LEAD + r];
+            }
+            si[SI_PPHASE + r] = (uint)ph;
+        }
+    }
     // Overlap resolution over the post-movement rows.
     lane_resolve_overlaps(si, sd, n, rs + RS_LKEYS, rs + RS_LORDER);
     // The duel start pass first: a fresh participant keeps its partner
@@ -604,7 +673,7 @@ static int race_tick(__global uint* scr, __global uint* si, __global float* sf,
     for (int r = 0; r < n; r++) {
         if (rs[RS_ADV + r] && !(int)si[SI_DUEL_ACTIVE + r]
             && (int)si[SI_DUEL_FIGHT + r] == 0) {
-            duel_update(si, sf, sd, shl, pd, r, n, course_distance,
+            duel_update(scr, st, si, sf, sd, shl, pd, r, n, course_distance,
                 has_corner_events);
         }
     }
@@ -622,8 +691,8 @@ static int race_tick(__global uint* scr, __global uint* si, __global float* sf,
             continue;
         }
         near_lane_timers(si, sd, rs, r, n, (double)dt);
-        spot_update(scr, si, sd, r, n, pd, section_length);
-        duel_update(si, sf, sd, shl, pd, r, n, course_distance,
+        spot_update(scr, st, si, sd, r, n, pd, section_length);
+        duel_update(scr, st, si, sf, sd, shl, pd, r, n, course_distance,
             has_corner_events);
     }
     // The duel and spot receivers catch up with the flag columns after
@@ -681,6 +750,44 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
     st[ST_ARG] = 0u;
     st[ST_TICKS] = 0u;
     ev[0] = 0u;
+    // Full-reply exports start empty: the kernel writes the snapshot columns
+    // once the constructor fires, and the channel headers count from zero.
+    for (int w = ST_SNAPG0; w < ST_STRIDE; w++) {
+        st[w] = 0u;
+    }
+    scr[SCR_RC_ON] = ri[RI_FULL];
+    if (scr[SCR_RC_ON] != 0u) {
+        scr[SCR_RC_SEQ] = 0u;
+        scr[SCR_RC_RPT] = 0u;
+        for (int w = SCR_RC_ACT; w < SCR_U_WORDS; w++) {
+            scr[w] = 0u;
+        }
+    }
+    // Full-reply exports start empty: the channel headers count from zero,
+    // and the snapshot columns read as absent until the kernel writes them.
+    for (int r = 0; r < RACE_MAXR; r++) {
+        st[ST_SNAPG0 + 2 * r] = 0u;
+        st[ST_SNAPG0 + 2 * r + 1] = 0u;
+        st[ST_SNAPW0 + 2 * r] = 0u;
+        st[ST_SNAPW0 + 2 * r + 1] = 0u;
+        st[ST_SPURTT0 + 2 * r] = 0u;
+        st[ST_SPURTT0 + 2 * r + 1] = 0u;
+        st[ST_SPURTD0 + 2 * r] = 0u;
+        st[ST_SPURTD0 + 2 * r + 1] = 0u;
+        st[ST_SPFIRST0 + r] = 0u;
+    }
+    scr[SCR_RC_ON] = ri[RI_FULL];
+    scr[SCR_RC_SEQ] = 0u;
+    scr[SCR_RC_RPT] = 0u;
+    if (scr[SCR_RC_ON] != 0u) {
+        scr[SCR_RC_ACT] = 0u;
+        scr[SCR_RC_TGT] = 0u;
+        scr[SCR_RC_FAN] = 0u;
+        scr[SCR_RC_CONS] = 0u;
+        scr[SCR_RC_COMP] = 0u;
+        scr[SCR_RC_PHR] = 0u;
+        scr[SCR_RC_KAK] = 0u;
+    }
 
     // The skill table block for this race, zero-filled (NREC 0) when the
     // host compiled no skills. Views over it stay live for every race.
@@ -954,6 +1061,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         si[SI_SPOT_TOKEN + r] = 0u;
         si[SI_DUEL_TOKEN + r] = 0u;
         si[SI_CPFLAGS + r] = 0u;
+        si[SI_PPHASE + r] = 0u;
         // The ordered additional-activation walk, its pending overtake queue,
         // the late-corner and green tallies, and the random-skill requests.
         si[SI_LCO + r] = 0u;
@@ -1161,9 +1269,25 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         scr[SK_JRN_T] = 0u;
         skills_scan(skt, sks, skd, scr, si, sd, shl, rs, pd, sf,
             course_distance, 1, n, dist_f, 1, ev, st, bank, paired);
+        // The engine's constructor repeat pass runs with the startup flag on,
+        // and its hook marks the ordinals those fires consume.
+        scr[SCR_RC_RPT] = 1u;
         skills_scan(skt, sks, skd, scr, si, sd, shl, rs, pd, sf,
             course_distance, 0, n, dist_f, 1, ev, st, bank, paired);
+        scr[SCR_RC_RPT] = 0u;
         sk_columns(skt, scr, sd, n);
+    }
+    if (scr[SCR_RC_ON] != 0u) {
+        // The engine snapshots the two order keys from the live horse fields
+        // after the constructor fires, before the startup pass can move them.
+        for (int r = 0; r < n; r++) {
+            const ulong gb = as_ulong((double)convert_float_rte(sd[SD_HPG + r]));
+            const ulong wb = as_ulong((double)convert_float_rte(sd[SD_HPW + r]));
+            st[ST_SNAPG0 + 2 * r] = (uint)gb;
+            st[ST_SNAPG0 + 2 * r + 1] = (uint)(gb >> 32);
+            st[ST_SNAPW0 + 2 * r] = (uint)wb;
+            st[ST_SNAPW0 + 2 * r + 1] = (uint)(wb >> 32);
+        }
     }
 
     // The startup pass (experimentalRetailStartup, lib.rs:831): one full

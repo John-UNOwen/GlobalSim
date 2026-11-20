@@ -81,6 +81,8 @@ Suites:
  | `wave9c_folds` | Compile-time gates for the condition-name tail: `grade`, `time`, `motivation`, `base_power` and `post_number` fold both directions with the refused shapes, the corner sampler resolves its row live, refuses an untagged non-integer course index and folds a missing-row arm, the viewer leaf lowers live with its header row and refuses an out-of-range `playerHorseIndex`, the roll-gated constructor bump marks `INIT_BUMP` and `BUMPED` with no host bump only for the kinds the kernel can bake, and the advantage-skill machine refuses (see "Wave-9c condition-name tail") |
  | `wave9c_gate` (gpu + initialization + geometry + race) | The real merged ids 100471, 900471, 200251, 202231, 202331, 210141 and 200351 on fitted seats beside a 6694xx battery for the directions the roster cannot reach (the false-side post_number fold, the activating time, grade, motivation, base_power and viewer-row fires, the corner sampler with a missing row and with four arms, the StaminaUp kind static, mixed and roll-gated), v77 roster seeds 1..3: zero fallback and frame identity with the battery's mid-race rows activating (see "Wave-9c condition-name tail") |
 | `grid_gate` (gpu + initialization + geometry + race) | Grid starts at 21, 24, 40 and 120 horses, two courses, seeds 1..2: zero fallback and frame-for-frame `to_bits` identity against the CPU engine, the 21-horse grid-vs-retail control pair differing at frame 0, and invalid grid shapes falling back with the engine's own message (see "Grid mode") |
+| `wave10_gate` (gpu + initialization + geometry + race) | The full (non-compact) reply lane, seeds 1..3: the retail lane, the zero-skill control, the fan and `duration_usage` 4 battery, the startup pass, paired streams with a data signature, world geometry, retain-all frames and the competition-reorder roster each come out of `run_batch_full` and `full_reply::build` whole and byte-for-byte equal to the engine's own reply text, frames included (see "Wave-10 full replies") |
+| `wave10_folds` (gpu + initialization + geometry + race) | Full-reply provenance folds: mutating one kernel channel moves exactly the arrays decoded from it, every channel carries live records in a gated scenario (pending and immediate activations, rush edges, fan and cross-target selections, the asitame release, kinds 4 and 5, the style-leader and non-leader phase records, snapshot ranks and the spurt columns), and the requests outside the full lane stay refused (see "Wave-10 full replies") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 
 ### What the gate proves
@@ -1558,6 +1560,8 @@ and the 24-race matrix test above pins the class of it.
 `facade::GpuRaces` is the lane an app holds. `new` runs the exactness gate,
 loads the engine data and builds the race kernel once, `run_batch(requests,
 seeds)` answers a launch with one `BatchOutcome` per request, in input order,
+`run_batch_full(requests, seeds)` answers with the engine's whole non-compact
+reply text per race instead of meta and packet (see "Wave-10 full replies"),
 and `run_repeated(request, seeds)` answers one request over many seeds after
 preparing it once (see "Batch cost").
 
@@ -1599,10 +1603,11 @@ opening one.
 Constraints. One `GpuRaces` per thread: it owns the OpenCL queue and
 program and is not Sync. Every launchable race in one `run_batch` shares one
 runner count, the kernel's uniform grid constraint, and a mixed batch is an
-Err for the caller to split. Full replies and CPU replays stay on the CPU
-lanes: the kernel exports no `skillDetailEvents`, `competitionEvents`,
-`positioningPhases` or per-tick frame times inside the meta, and the compact
-contract asks for none of them.
+Err for the caller to split. CPU replays stay on the CPU lanes. The compact
+meta carries no `skillDetailEvents`, `competitionEvents` or
+`positioningPhases` and asks for none of them; the full lane answers those
+from kernel channels and refuses what it does not carry, listed in "Wave-10
+full replies".
 
 ### `run_repeated` and the cost of one call
 
@@ -1712,12 +1717,73 @@ logs one `(runner, id)` per skill fire (`race_event` in
 fire lands one entry, and an episode outliving the race emits an engine
 entry only through the finalizer, one the fire already covers.
 
-## Not covered (step 6 blockers)
+## Wave-10 full replies
 
-Engine behavior the race loop port does not reach, each needing its own port
-and gate. This is the step-6 snapshot: skills and grid mode have moved on since,
-so the refusal lists in `SKILLS_DESIGN.md` and "Grid mode" below are what is
-true now.
+The refusal "full (non-compact) replies" is closed. `facade::run_batch_full`
+and `full_reply::build` answer each race with the engine's whole reply text,
+byte for byte, frames included. `src/full_reply.rs` rebuilds the reply object
+(`src/lib.rs:1055-1135`) from kernel channels alone and emits it through the
+vendored json module, the same one the engine's `write_json` uses, so key
+order and number formatting are byte-equal by construction. The gate
+(`tests/wave10_gate.rs`) compares whole texts; the fold (`tests/wave10_folds.rs`)
+mutates one channel at a time and moves exactly the arrays decoded from it.
+
+The kernel writes seven record streams, at the points the engine records the
+same events, into the per-race u32 scratch (`retail_core.cl:459-477`, caps in
+words: ACT 24,576, TGT 49,152, FAN 16,384, CONS 768, COMP 768, PHR 8,192, KAK
+1,024), and the reply columns into the ST status block, read back only when
+the race was prepared full. The host decodes them into `race_exec::ReplyRaw`
+as flat word streams, one header word per channel.
+
+| reply field | engine authority | kernel source |
+| --- | --- | --- |
+| `skillEvents` | `src/lib.rs:635-676` activate and deactivate hooks | ACT ten-word activation records plus KAK rush-edge pairs, merged and sorted by time, ordinary events first at equal time, then ordinal, kakari after every ordinal (`lib.rs:1030-1033`) |
+| `skillDetailEvents`, `skillTargetEvents` | `race_solver.rs:2446-2451`, grouped by horse then push order | TGT records, per-effect length-prefixed selections, 0 encoding null |
+| `additionalTargetEvents` | `race_solver.rs:1871-1875, 1933-1937` fan delivery | FAN deliveries with the `runtime_subset` scope |
+| `competitionEvents` | `race_field.rs:181-201` spot reorder, duel pushes | COMP `[tick, kind, runner]`, kind 4 re-sorted per drain batch by the OONIGE-first, leader-first, roster-rank key, the startup marker word joining the tick 0 batch |
+| `conservePowerEvents` | `src/lib.rs:637-644` asitame hook | CONS records written inside `asitame_release` (`retail_core.cl:3155`), gated by the same 1200 power rule as the engine's injected pseudo-skill (`race_solver_builder.rs:786-814`) |
+| `positioningPhases` | `src/lib.rs:866-887` per-tick leader update, `stadium_score.rs:20-46` | PHR `[runner, phase, tick+1, lead]` per phase change of the unclamped `phase_boundaries` count (`retail_physics.rs:9-12`), published only where the lead word marks the runner as its style group's rank argmin that tick |
+| `gutsOrder`, `wizOrder` | `src/lib.rs:811-827` snapshot orders with tolerance ties | ST snapshot columns, re-ranked by `parameter_orders` |
+| `actualLastSpurtStartTime`, `actualLastSpurtStartDistance` | captured at the last-spurt transition | ST pair captured at the same transition (`race.cl:265-273`) |
+| `playerLastSpurtTime` | `spfirst` frame or the finish fallback | ST first-spurt-frame column |
+| `runningStyle`, `rushingStartCount`, `rushingPenaltyCount`, `hpEmptyOnRace`, `startDelayTime`, `lastSpurtStartDistance`, `finishTime`, `finishTimeRaw`, `finishOrder`, frames, version keys | unchanged | the compact exports, replay capture and static keys |
+
+The full lane refuses, by name at `full_reply::build` and by gate before the
+run: `singleMode`, `traceConservePower`, `experimentalLaterStaminaMechanics`
+and grid-mode races (the staggered roster ranks the snapshots read are
+grid-aware and stay compact-only).
+
+Two engine rules surfaced while chasing byte equality and both were ports of
+the engine, not the engine's behavior changing:
+
+- Style leader scan. `StyleLeaders::update` (`stadium_score.rs:20-30`) picks
+  the smallest-index runner with the strictly smallest cached rank across the
+  whole style group. The kernel's leader word had only compared against
+  lower-index peers, so the lowest-index runner of a style led vacuously and
+  published phase changes the engine suppresses. The scan is now the full
+  argmin (`race.cl` leader block).
+- Duration compile in f32. The engine folds the ms base at compile time as
+  `(base as f32) * 0.0001_f32` (`race_solver_builder.rs:416-418`). f32 of
+  0.0001 rounds down, so 12000 ms becomes 1.1999999284744263, and 900531's
+  pending duration chain lands two ulps below the f64 divide a `* 0.0001`
+  compile produced (`skills_compile.rs:962-965` mirrors the f32 product).
+
+Scratch deltas, pinned by `tests/layout.rs`: `SCR_U_WORDS` 500,021 to 602,999
+(reply channels plus the record-state and scalar-slot shifts the phase mirror
+needs, 1.91 to 2.29 MB per race slot), `ST_STRIDE` 1,088 to 2,168 (snapshot,
+spurt pair and first-frame columns), `SK_STRIDE` 54,912 to 55,872.
+
+The pending-slot model matches the engine's: one slot per (horse, skill id)
+holding the larger remaining duration, so two live entries of one id collapse
+their durations the same way the engine's scan does. Startup repeats sort
+after ordinary events at equal time, carrying the `repeat` flag while the
+engine marks them by ordinal (`lib.rs:1030-1033`), and kakari events carry no
+ordinal, ordering after every ordinal event.
+
+## Not covered
+
+What the GPU lane still refuses, each named at the race or at compile time.
+The skill-side lists live in `SKILLS_DESIGN.md`.
 
 - Skills outside the ported subset: the names with no engine registry entry
   (`behind_time`, `near_time`, `infront_time`),
@@ -1728,23 +1794,20 @@ true now.
   and the other constructs named
   in the `SKILLS_DESIGN.md` matrix. Each
   flags its race with the construct named
-- Grid mode (`experimentalGrid`): not ported, host-gated. The engine enables
-  it when the key is an object with exactly `columns: 20.0` and
-  `rowSpacing: 3.0` and the roster is 21 to 120 horses (`src/lib.rs:262-272`),
-  starting the field on rows 3 m behind the line (`src/lib.rs:274-279`,
-  applied at `src/lib.rs:605-611`). Every kernel scratch stride is sized for
-  24, so `prepare` flags any request carrying the key. The capacity work a
-  port needs is in "Grid capacity plan" below
+- Grid-mode races answer compact only. The frames, the finish exports and the
+  staggered roster ranks the engine snapshots each tick are grid-aware, and
+  `full_reply::build` refuses them by name; see "Grid mode" below for the
+  frame-exact grid port itself
 - Ground and terrain lookups beyond the slope and corner geometry events.
   The verified tick loop reads terrain only through the slope regions
   (`race_solver_retail.rs:833`, ported), the corner events (ported) and the
-  `groundCondition` enum (initialization tables and folded skill leaves), and
-  no course-data field is left outside that set. Any ground channel the
-  non-compact telemetry would want stays unprobed and gated with this entry
-- Full (non-compact) replies: the version keys, `finishTime`, `gutsOrder`,
-  `wizOrder`, `runningStyle`, `positioningPhases`, the `actualLastSpurt*`
-  pair and the other telemetry channels the compact contract does not read.
-  Those races stay on the CPU lanes (see "Batch API").
+  `groundCondition` enum (initialization tables and folded skill leaves).
+  Settled by wave 10: the engine's whole non-compact reply carries no ground
+  channel beyond that set, and the reply lane matches it byte for byte
+- Requests outside the full-reply lane, refused by name in
+  `full_reply::build` and gated before the kernel run: `singleMode`,
+  `traceConservePower` and `experimentalLaterStaminaMechanics`
+  (see "Wave-10 full replies")
 
 
 ## Grid mode

@@ -10,7 +10,7 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     // The kernel's retail_core.cl scratch map grows by the skill regions, and
     // the host mirror must keep the same layout the work item reads.
     use globalsim_gpu::race_exec as re;
-    assert_eq!(re::SK_STRIDE, 54912);
+    assert_eq!(re::SK_STRIDE, 55872);
     // The full scratch mirrors: stat rows, race state, banks, then the skill
     // state block, five token orders, the substream bank, the staging, the
     // additional-activation token pool and the per-runner running lists.
@@ -26,7 +26,9 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     // the double block 2 more stat columns (plus 1920) and the record double
     // block 148 to 276 for four-arm window chains (plus 122880).
     // The fan hunt journal adds 16384 words plus the tick mirror (plus 16385).
-    assert_eq!(re::SCR_U_WORDS, 500021);
+    // Wave 10 adds the reply channel block plus the shifts from the record
+    // state 24 to 26 words and the scalar block 89 to 90 slots (plus 102978).
+    assert_eq!(re::SCR_U_WORDS, 602999);
     assert_eq!(re::SRL_WORDS, 356840);
     // Input and status strides track RACE_MAXR.
     assert_eq!(re::RI_STRIDE, 1592);
@@ -34,7 +36,8 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     // wisdom accumulator word (RIL_STRIDE 2072 to 2192). Wave 8 added the
     // guts accumulator and the spot proficiency word (2192 to 2432).
     assert_eq!(re::RIL_STRIDE, 2432);
-    assert_eq!(re::ST_STRIDE, 1088);
+    // Wave 10 adds the snapshot, spurt and first-spurt columns (1080 words).
+    assert_eq!(re::ST_STRIDE, 2168);
     // The pd runner block, race scalars and per-runner precompute block stack
     // in that order, each behind the last per the kernel's formulas.
     assert_eq!(re::PL_FRONT_LANE, re::PI_RUNNER0 + re::PI_RUN_STRIDE * re::RACE_MAXR);

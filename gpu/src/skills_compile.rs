@@ -11,7 +11,7 @@
 
 use crate::json::Value;
 
-pub const SK_STRIDE: usize = 54912;
+pub const SK_STRIDE: usize = 55872;
 
 pub const SK_NREC: usize = 0;
 pub const SK_NPROG: usize = 1;
@@ -29,14 +29,14 @@ pub const SK_VIDX: usize = 9;
 pub const SK_CORNERS: usize = 40;
 pub const SK_SLOPES: usize = 64;
 pub const SK_RECORDS: usize = 112;
-pub const SK_EFFECTS: usize = 25072;
-pub const SK_PROGRAMS: usize = 26992;
-pub const SK_ARMS: usize = 39280;
-pub const SK_REGIONS: usize = 41328;
-pub const SK_TERMS: usize = 49520;
-pub const SK_TAGS: usize = 50800;
+pub const SK_EFFECTS: usize = 26032;
+pub const SK_PROGRAMS: usize = 27952;
+pub const SK_ARMS: usize = 40240;
+pub const SK_REGIONS: usize = 42288;
+pub const SK_TERMS: usize = 50480;
+pub const SK_TAGS: usize = 51760;
 
-pub const SK_RSTRIDE: usize = 26;
+pub const SK_RSTRIDE: usize = 27;
 pub const SK_ESTRIDE: usize = 10;
 /// Effects per record cap: each effect gets its own duration timer slot and
 /// a token of its own, and the token packs the slot index in three bits.
@@ -786,9 +786,8 @@ impl Compiler {
                 leaves.iter().any(|l| matches!(l, Leaf::Dynamic { feat, .. } if *feat == FEAT_ANYACT));
 
             // Resolve each arm's sampled term. The engine samples one term per
-            // arm at init, so the draws stay in text order. An arm whose term
-            // resolves to no row spends no draw and can never fire, so it
-            // collapses like an empty region chain.
+            // arm at init, in text order. An arm whose term resolves to no row
+            // spends no draw and can never fire, so it collapses like an empty chain.
             let mut term_word = u32::MAX;
             for ai in 0..arms.len() {
                 if arms[ai].1[0] & SK_ARM_SAMPLED == 0 {
@@ -895,9 +894,8 @@ impl Compiler {
             let mut arm0_post = (0usize, 0usize);
             if dead {
                 // A dead record still spends its resolved random draws: the
-                // engine samples before any region is evaluated, so every arm
-                // entry that carries a term keeps the shared stream aligned.
-                // The inert chains stay empty.
+                // engine samples before any region is evaluated, keeping the
+                // shared stream aligned. The inert chains stay empty.
                 for (_, flags, _) in arms.iter() {
                     let at = SK_ARMS + SK_ASTRIDE * self.narm;
                     if flags[0] & SK_ARM_SAMPLED != 0 {
@@ -961,7 +959,10 @@ impl Compiler {
             let eff_base = self.neff;
             // The engine keeps the raw scaled value in f64 and rounds to f32 only
             // where the duration is consumed, so the table stores the f64 product.
-            let base_duration = alt.get("baseDuration").and_then(Value::as_f64).unwrap_or(0.) * 0.0001;
+            // race_solver_builder.rs:416-418 retail branch: the ms conversion
+            // runs in f32 with the rounded 0.0001 constant.
+            let base_ms = alt.get("baseDuration").and_then(Value::as_f64).unwrap_or(0.);
+            let base_duration = ((base_ms as f32) * 0.0001_f32) as f64;
             // The engine's `as f64 as i32` cast, so a wire value past i32 reads
             // the same tier on both sides (src/lib.rs:179-187). duration_usage
             // 4 extends the running instance on an overtake (race_solver.rs:2655).
@@ -988,8 +989,7 @@ impl Compiler {
             let static_fire = static_core && !wisdom;
             // The lottery decides a wisdom-gated constructor fire, which the
             // host cannot precompute, so the kernel bakes its self bumps after
-            // the roll instead. Kind 29 feeds the host-only rush bonus and
-            // value usages other than 1 draw at read time, so both stay out.
+            // the roll. Kind 29 and non-1 value usages draw late and stay out.
             let gated_static = static_core
                 && wisdom
                 && effect_list.iter().all(|ef| {
@@ -1186,6 +1186,7 @@ impl Compiler {
             self.words[at + 23] = pre_reg_b as u32;
             self.words[at + 24] = pre_prog_len as u32;
             self.words[at + 25] = pre_prog_b as u32;
+            self.words[at + 26] = alt_index as u32;
             self.nrec += 1;
             first_record = false;
         }
@@ -2059,8 +2060,8 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         "phase" => Ok(dyn_leaf(FEAT_RPHASE, t)),
         "popularity" => Ok(fold(s.popularity, t)),
         // The registry only registers eq, lte and gte immediate filters
-        // (activation_conditions.rs:1020-1039,1644-1648); any other comparator
-        // fails the engine's build too.
+        // (activation_conditions.rs:1020-1039, 1644-1648), and any other
+        // comparator fails the engine's build too.
         "post_number" if matches!(t.op, 0 | 3 | 5) => Ok(fold(s.post_number, t)),
         "post_number" => Err("'post_number' only registers == <= and >=".into()),
         "remain_distance" => Ok(dyn_leaf(FEAT_REMAIN, t)),

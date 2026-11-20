@@ -123,7 +123,10 @@ application points). `delay_bits` is the f32 start-delay multiplier, the folded 
 over the skill's enabled always-conditioned delay effects. The compiler
 resolves the level before the kernel runs: the effect stores the
 level-resolved modifier `retail_skill_value(raw, multiplier)` and
-`baseDuration * 0.0001`, so the kernel does no table work.
+`f32(f32(baseDuration) * 0.0001f)` widened to f64, the engine's compile-time
+conversion at `race_solver_builder.rs:416-418` (the f32 0.0001 constant rounds
+down, so 12000 ms lands on 1.1999999284744263), so the kernel does no table
+work.
 
 Effect (10 words): `effect_type, target (1 self, 4 visible, 9 ahead, 10
 behind), value_usage, duration_usage, target_value (max receivers, clamped to

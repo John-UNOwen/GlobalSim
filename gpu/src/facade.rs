@@ -3,13 +3,10 @@
 //! request over many seeds) per launch. The module is not Sync: keep the
 //! instance on one thread.
 //!
-//! The contract is the compact meta plus the GSIMRP01 packet. A race the
-//! kernel cannot answer bit-exactly comes back as `fallback` instead, meta
-//! and packet both None, and the batch's other races are untouched. Full
-//! replies and CPU replays stay on the CPU lanes: the kernel does not export
-//! skillDetailEvents, competitionEvents, positioningPhases or the per-tick
-//! frame times inside the meta, and the compact contract does not ask for
-//! them.
+//! The contract is the compact meta plus the GSIMRP01 packet, or the full
+//! reply text for `run_batch_full`. A race the kernel cannot answer
+//! bit-exactly comes back as `fallback`, everything else None, and the
+//! batch's other races are untouched. CPU replays stay on the CPU lanes.
 
 use crate::json::Value;
 use crate::{race_exec, replay_packet};
@@ -18,12 +15,14 @@ use crate::{race_exec, replay_packet};
 /// parse meta with the same `Value` this facade uses.
 pub use crate::json;
 
-/// One request's answer. Exactly one arm is set: the compact meta and packet
-/// together, or the reason the race stays on the CPU lane.
+/// One request's answer. The compact lanes set `meta` and `packet` together,
+/// the full lane sets `reply`; a race that stays on the CPU lane carries
+/// `fallback` and nothing else.
 pub struct BatchOutcome {
     pub meta: Option<String>,
     pub packet: Option<Vec<u8>>,
     pub fallback: Option<String>,
+    pub reply: Option<String>,
 }
 
 pub struct GpuRaces {
@@ -79,6 +78,63 @@ impl GpuRaces {
         }
         let (run, _) = self.ctx.run_prepared(&mut prepared, None)?;
         Ok(build_outcomes(&run, requests.iter().map(|request| player_horse_index(request))))
+    }
+
+    /// Runs one batch in a single launch and answers each launchable race
+    /// with the engine's full (non-compact) reply text in `reply`, built
+    /// from the kernel's reply channels (see `full_reply`). A race the
+    /// kernel flags or the assembly refuses carries `fallback` instead, and
+    /// the batch's other races are untouched.
+    pub fn run_batch_full(
+        &mut self,
+        requests: &[String],
+        seeds: &[i32],
+    ) -> Result<Vec<BatchOutcome>, String> {
+        if requests.len() != seeds.len() {
+            return Err(format!(
+                "run_batch_full needs one seed per request ({} requests, {} seeds)",
+                requests.len(),
+                seeds.len()
+            ));
+        }
+        let mut prepared: Vec<_> = Vec::with_capacity(requests.len());
+        for (request, seed) in requests.iter().zip(seeds) {
+            match self.ctx.prepare(request, *seed as i64) {
+                Ok(mut p) => {
+                    p.set_full();
+                    prepared.push(p);
+                }
+                Err(reason) => prepared.push(race_exec::Prepared::stub(reason)),
+            }
+        }
+        let (run, _) = self.ctx.run_prepared(&mut prepared, None)?;
+        Ok(run
+            .races
+            .iter()
+            .zip(requests.iter().zip(seeds))
+            .map(|(race, (request, seed))| match &race.fallback {
+                Some(reason) => BatchOutcome {
+                    meta: None,
+                    packet: None,
+                    fallback: Some(reason.clone()),
+                    reply: None,
+                },
+                None => match crate::full_reply::build(request, *seed as i64, race) {
+                    Ok(text) => BatchOutcome {
+                        meta: None,
+                        packet: None,
+                        fallback: None,
+                        reply: Some(text),
+                    },
+                    Err(reason) => BatchOutcome {
+                        meta: None,
+                        packet: None,
+                        fallback: Some(reason),
+                        reply: None,
+                    },
+                },
+            })
+            .collect())
     }
 
     /// Runs one request against many seeds in a single launch, preparing it
@@ -139,6 +195,7 @@ fn build_outcomes(
                 meta: None,
                 packet: None,
                 fallback: Some(reason.clone()),
+                reply: None,
             },
             None => {
                 let meta = compact_meta(race, player);
@@ -147,6 +204,7 @@ fn build_outcomes(
                     meta: Some(meta_text),
                     packet: Some(packet),
                     fallback: None,
+                    reply: None,
                 }
             }
         })

@@ -18,11 +18,11 @@ pub const RACE_MAX_TICKS: usize = 6144;
 pub const RACE_MAX_SLOPES: usize = 16;
 pub const RI_STRIDE: usize = RI_DEBUG_TICK + 16;
 pub const RIL_STRIDE: usize = PD_RUN0 + PD_RUN_STRIDE * RACE_MAXR;
-pub const ST_STRIDE: usize = ST_LSS0 + RACE_MAXR;
+pub const ST_STRIDE: usize = ST_SPFIRST0 + RACE_MAXR;
 // Skill scratch mirrors of retail_core.cl and skills.cl.
 pub const SK_STRIDE: usize = crate::skills_compile::SK_STRIDE;
 const SK_RMAX: usize = crate::skills_compile::SK_RMAX;
-const SKR_STRIDE: usize = 24;
+const SKR_STRIDE: usize = 26;
 const SK_SEQN: usize = 40;
 const SKD_STRIDE: usize = 276;
 const SCR_SK: usize = SCR_BANKS + RACE_MAXR * BANK_WORDS;
@@ -42,7 +42,27 @@ const SK_VVAL: usize = SK_RUN + RACE_MAXR * (1 + SK_RUNN);
 // Diagnostics mirror of the kernel's free-form additionalActivate journal.
 pub const SK_JRN0: usize = SK_VVAL + SK_RMAX * 16;
 pub const SK_JRN_N: usize = 16384;
-pub const SCR_U_WORDS: usize = SK_JRN0 + SK_JRN_N + 1;
+// Full-reply channel block, mirrors of the retail_core.cl region after the
+// journal, each region counting its own records.
+pub const SCR_RC_ON: usize = SK_JRN0 + SK_JRN_N + 1;
+pub const SCR_RC_SEQ: usize = SCR_RC_ON + 1;
+pub const SCR_RC_LEAD: usize = SCR_RC_SEQ + 1;
+pub const SCR_RC_RPT: usize = SCR_RC_LEAD + RACE_MAXR;
+pub const SCR_RC_ACT: usize = SCR_RC_RPT + 1;
+pub const RC_ACT_CAP: usize = 24576;
+pub const SCR_RC_TGT: usize = SCR_RC_ACT + 1 + RC_ACT_CAP;
+pub const RC_TGT_CAP: usize = 49152;
+pub const SCR_RC_FAN: usize = SCR_RC_TGT + 1 + RC_TGT_CAP;
+pub const RC_FAN_CAP: usize = 16384;
+pub const SCR_RC_CONS: usize = SCR_RC_FAN + 1 + RC_FAN_CAP;
+pub const RC_CONS_CAP: usize = 768;
+pub const SCR_RC_COMP: usize = SCR_RC_CONS + 1 + RC_CONS_CAP;
+pub const RC_COMP_CAP: usize = 768;
+pub const SCR_RC_PHR: usize = SCR_RC_COMP + 1 + RC_COMP_CAP;
+pub const RC_PHR_CAP: usize = 8192;
+pub const SCR_RC_KAK: usize = SCR_RC_PHR + 1 + RC_PHR_CAP;
+pub const RC_KAK_CAP: usize = 1024;
+pub const SCR_U_WORDS: usize = SCR_RC_KAK + 1 + RC_KAK_CAP;
 pub const SRL_SKD: usize = SRL_HP_OUT_L + RACE_MAXR * OOL;
 pub const SRL_WORDS: usize = SRL_SKD + SK_RMAX * SKD_STRIDE;
 pub const DT: f32 = 0.0666;
@@ -64,6 +84,7 @@ pub const RI_LOT_MIN: usize = 13;
 pub const RI_LOT_MAX: usize = 14;
 pub const RI_EMPTY_MOVE: usize = 15;
 pub const RI_DEBUG_TICK: usize = RI_RUN0 + RI_RUN_STRIDE * RACE_MAXR;
+pub const RI_FULL: usize = RI_DEBUG_TICK + 14;
 pub const RI_RUN0: usize = 16;
 pub const RI_RUN_STRIDE: usize = 13;
 pub const RR_STYLE: usize = 0;
@@ -134,6 +155,14 @@ pub const ST_RSCORE0: usize = ST_TEMPT0 + RACE_MAXR;
 pub const ST_HPEMPTY0: usize = ST_RSCORE0 + RACE_MAXR;
 pub const ST_DELAY0: usize = ST_HPEMPTY0 + RACE_MAXR;
 pub const ST_LSS0: usize = ST_DELAY0 + RACE_MAXR;
+// Full-reply exports, mirrors of retail_core.cl. The snapshot columns carry
+// horse stat bits, the spurt columns the actual start pair, and ST_SPFIRST0
+// the first frame whose step left the runner spurting (0 when never).
+pub const ST_SNAPG0: usize = ST_LSS0 + RACE_MAXR;
+pub const ST_SNAPW0: usize = ST_SNAPG0 + 2 * RACE_MAXR;
+pub const ST_SPURTT0: usize = ST_SNAPW0 + 2 * RACE_MAXR;
+pub const ST_SPURTD0: usize = ST_SPURTT0 + 2 * RACE_MAXR;
+pub const ST_SPFIRST0: usize = ST_SPURTD0 + 2 * RACE_MAXR;
 // skillEvents log, mirror of retail_core.cl: word 0 is the entry count,
 // then (runner, id) pairs, id EV_KAKARI for a completed rush episode.
 pub const EV_MAX: usize = 512;
@@ -156,7 +185,7 @@ const SCR_HP_IN: usize = SCR_INIT_OUT + OOU;
 const SCR_HP_OUT: usize = SCR_HP_IN + RACE_MAXR * IIU;
 const SCR_STATE: usize = SCR_HP_OUT + RACE_MAXR * 180;
 // SI_STRIDE mirror: retail_core.cl sizes the scalar block by SI_SLOTS.
-const SCR_SF: usize = SCR_STATE + 89 * RACE_MAXR;
+const SCR_SF: usize = SCR_STATE + 90 * RACE_MAXR;
 const SCR_LISTS: usize = SCR_SF + SF_STRIDE * RACE_MAXR;
 const SCR_CAND: usize = SCR_LISTS + LIST_STRIDE * RACE_MAXR;
 const SCR_CACHED: usize = (SCR_CAND + 3 * CAND_MAX + 63) & !63;
@@ -183,10 +212,43 @@ pub const FB_INIT: u32 = 5;
 pub const FB_GEOMETRY: u32 = 6;
 pub const FB_EVENT: u32 = 7;
 pub const FB_SKILL_SEQ: u32 = 8;
+pub const FB_RC: u32 = 9;
+
+/// The kernel's raw full-reply channel streams, in write order. The
+/// full_reply module decodes these into the engine's reply shape.
+#[derive(Clone)]
+pub struct ReplyRaw {
+    /// Ten-word activations: runner, sid, detail, clock lo/hi, duration
+    /// lo/hi, ordinal plus one, flags, tick. Flag bit 2 marks a finalize.
+    pub act: Vec<u32>,
+    /// Targets: runner, sid, detail, clock lo/hi, effect count, then one
+    /// length-prefixed list per effect, 0 encoding null.
+    pub tgt: Vec<u32>,
+    /// Fan deliveries: runner, sid, detail, clock lo/hi, length-prefixed
+    /// list, 0 encoding null.
+    pub fan: Vec<u32>,
+    /// Conserve releases: runner, clock lo/hi.
+    pub cons: Vec<u32>,
+    /// Competition starts: tick, kind, runner.
+    pub comp: Vec<u32>,
+    /// Positioning phases: runner, phase.
+    pub phr: Vec<u32>,
+    /// Rush edges: kind 0 start 1 end, runner, clock lo/hi.
+    pub kak: Vec<u32>,
+    /// Order-key stat snapshots per runner, raw f64 bits widened from f32.
+    pub snap_guts: Vec<f64>,
+    pub snap_wis: Vec<f64>,
+    /// The actual last-spurt start pair, None when the edge never fired.
+    pub spurt_time: Vec<Option<f64>>,
+    pub spurt_dist: Vec<Option<f64>>,
+    /// First frame index with the runner in the last spurt, 0 when never.
+    pub spfirst: Vec<usize>,
+}
 
 /// One race as the kernel ran it. `frames` holds the ticks plus the pre-loop
 /// frame 0, each row the six replay values per runner. `finish_*` stays None
 /// exactly when the runner never crossed the line or the race is flagged.
+#[derive(Clone)]
 pub struct RaceGpu {
     pub frames: Vec<Vec<[f64; 6]>>,
     pub ticks: usize,
@@ -215,6 +277,10 @@ pub struct RaceGpu {
     /// The race's skillEvents (horseIndex, id) pairs in kernel order, id
     /// EV_KAKARI for a completed rush episode.
     pub events: Vec<(usize, u32)>,
+    /// Full-reply channel streams and snapshot exports, read back only when
+    /// the race was prepared with `set_full`. Word 0 semantics: each channel
+    /// Vec is the flat record stream in kernel write order.
+    pub reply: Option<ReplyRaw>,
     /// Test diagnostics only, empty unless the request set RI_DEBUG_TICK.
     /// The fourteen reserved tail frame slots read back as fourteen blocks
     /// of `runners` rows of six: pre-move pace (mode, coefficient,
@@ -236,6 +302,7 @@ pub struct RaceGpu {
 /// One race's kernel skill scratch read back for a divergence hunt: the
 /// per-record double block at `SKD_STRIDE` per record slot and the per-record
 /// state words at `SKR_STRIDE` per record slot.
+#[derive(Clone)]
 pub struct SkillScratch {
     pub skd: Vec<f64>,
     pub sks: Vec<u32>,
@@ -533,9 +600,21 @@ pub struct Prepared {
     live_guts: bool,
     debug_scratch: bool,
     grid: bool,
+    full: bool,
 }
 
 impl Prepared {
+    /// Ask for the full-reply channels: the kernel writes the activation,
+    /// target, fan, conserve, competition, phase and rush streams plus the
+    /// snapshot columns the full reply needs. Only valid for a parsed
+    /// prepare, and it must stay off a prepared race the kernel ran already.
+    pub(crate) fn set_full(&mut self) {
+        if self.ri.len() > RI_FULL {
+            self.ri[RI_FULL] = 1;
+            self.full = true;
+        }
+    }
+
     /// A flagged placeholder keeping the batch aligned when one request fails
     /// to parse at all. It never reaches the launch.
     pub(crate) fn stub(reason: String) -> Prepared {
@@ -552,6 +631,7 @@ impl Prepared {
             live_guts: false,
             debug_scratch: false,
             grid: false,
+            full: false,
         }
     }
 
@@ -598,6 +678,7 @@ fn prepare(
         live_guts: false,
         debug_scratch: false,
         grid: false,
+        full: false,
     });
     // One validity test mirrors experimental_grid_enabled (src/lib.rs:262-272),
     // including its message, so invalid shapes flag with the engine's reason.
@@ -776,7 +857,7 @@ fn prepare(
             css: css.clone(),
         });
     }
-    Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, live_guts: sk_plan.live_guts, debug_scratch: false, grid })
+    Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, live_guts: sk_plan.live_guts, debug_scratch: false, grid, full: false })
 }
 
 /// Engine rule: an installed skill whose definition carries a type 6 effect
@@ -1193,7 +1274,8 @@ impl RaceContext {
     // The skill scratch readback stays off the normal path: the kernel leaves
     // the merged windows and the record state there, and a divergence hunt
     // asks for them per race through `run_with_skill_scratch`.
-    let want_sk = m > 0 && prepared.iter().any(|p| p.debug_scratch);
+    let want_sk = m > 0
+        && prepared.iter().any(|p| p.debug_scratch || p.full);
     let mut skd_all: Vec<f64> = Vec::new();
     let mut sks_all: Vec<u32> = Vec::new();
     if want_sk {
@@ -1358,6 +1440,7 @@ impl RaceContext {
             delay_all: Vec::new(),
             lss_all: Vec::new(),
             events: Vec::new(),
+            reply: None,
             debug_pace: Vec::new(),
             debug_sk: None,
         };
@@ -1426,6 +1509,42 @@ impl RaceContext {
                 out.events = (0..count)
                     .map(|k| (ev[1 + 2 * k] as usize, ev[2 + 2 * k]))
                     .collect();
+                if race.full {
+                    let u = (slot - 1) * SCR_U_WORDS;
+                    let channel = |base: usize, cap: usize| -> Vec<u32> {
+                        let count = (sks_all[u + base] as usize).min(cap);
+                        sks_all[u + base + 1..u + base + 1 + count].to_vec()
+                    };
+                    let bits = |word: usize| -> f64 {
+                        f64::from_bits(
+                            u64::from(st[word]) | (u64::from(st[word + 1]) << 32),
+                        )
+                    };
+                    out.reply = Some(ReplyRaw {
+                        act: channel(SCR_RC_ACT, RC_ACT_CAP),
+                        tgt: channel(SCR_RC_TGT, RC_TGT_CAP),
+                        fan: channel(SCR_RC_FAN, RC_FAN_CAP),
+                        cons: channel(SCR_RC_CONS, RC_CONS_CAP),
+                        comp: channel(SCR_RC_COMP, RC_COMP_CAP),
+                        phr: channel(SCR_RC_PHR, RC_PHR_CAP),
+                        kak: channel(SCR_RC_KAK, RC_KAK_CAP),
+                        snap_guts: (0..race.n)
+                            .map(|r| bits(ST_SNAPG0 + 2 * r))
+                            .collect(),
+                        snap_wis: (0..race.n)
+                            .map(|r| bits(ST_SNAPW0 + 2 * r))
+                            .collect(),
+                        spurt_time: (0..race.n)
+                            .map(|r| read_f64(st, ST_SPURTT0 + 2 * r))
+                            .collect(),
+                        spurt_dist: (0..race.n)
+                            .map(|r| read_f64(st, ST_SPURTD0 + 2 * r))
+                            .collect(),
+                        spfirst: (0..race.n)
+                            .map(|r| st[ST_SPFIRST0 + r] as usize)
+                            .collect(),
+                    });
+                }
             }
         }
         races.push(out);
@@ -1459,6 +1578,19 @@ pub fn run_with_snapshot(
         if debug_tick > 0 && p.ri.len() > RI_DEBUG_TICK {
             p.ri[RI_DEBUG_TICK] = debug_tick as u32;
         }
+        prepared.push(p);
+    }
+    Ok(ctx.run_prepared(&mut prepared, None)?.0)
+}
+
+/// Prepare every request with the full-reply channels on and launch once.
+/// Each race's streams arrive in `RaceGpu::reply` for `full_reply::build`.
+pub fn run_full(requests: &[(String, i64)]) -> Result<RaceRun, String> {
+    let mut ctx = RaceContext::open()?;
+    let mut prepared: Vec<Prepared> = Vec::with_capacity(requests.len());
+    for (request, seed) in requests {
+        let mut p = ctx.prepare(request, *seed)?;
+        p.set_full();
         prepared.push(p);
     }
     Ok(ctx.run_prepared(&mut prepared, None)?.0)
@@ -1507,6 +1639,7 @@ fn kernel_fallback(flag: u32, arg: u32) -> Option<String> {
         (FB_GEOMETRY, _) => "geometry rejected a query".into(),
         (FB_EVENT, _) => "event log overflow".into(),
         (FB_SKILL_SEQ, _) => "skill duration order overflow".into(),
+        (FB_RC, _) => "full-reply channel overflow".into(),
         (other, a) => format!("kernel fallback {other} arg {a}"),
     })
 }

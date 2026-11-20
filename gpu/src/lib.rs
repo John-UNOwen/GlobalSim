@@ -50,6 +50,11 @@ pub mod initialization;
 #[cfg(all(feature = "race", not(test)))]
 pub mod race_exec;
 
+// The full-reply assembly reads the kernel reply channels and replays them
+// through the vendored engine json, sort and physics modules above.
+#[cfg(all(feature = "race", not(test)))]
+pub mod full_reply;
+
 // The batch facade builds the compact meta plus the GSIMRP01 packet the app's
 // run_compact path consumes, so it needs race_exec, the geometry and
 // initialization hosts and the vendored binary_replay above.

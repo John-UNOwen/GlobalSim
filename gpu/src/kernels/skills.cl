@@ -8,7 +8,7 @@
 // -cl-fp32-correctly-rounded-divide-sqrt; every Rust `as f32` mirrors
 // convert_float_rte and no constant expression may contract to an FMA.
 
-#define SK_STRIDE 54912
+#define SK_STRIDE 55872
 
 #define SK_NREC 0
 #define SK_NPROG 1
@@ -24,16 +24,16 @@
 #define SK_CORNERS 40
 #define SK_SLOPES 64
 #define SK_RECORDS 112
-#define SK_EFFECTS 25072
-#define SK_PROGRAMS 26992
-#define SK_ARMS 39280
-#define SK_REGIONS 41328
-#define SK_TERMS 49520
-#define SK_TAGS 50800
+#define SK_EFFECTS 26032
+#define SK_PROGRAMS 27952
+#define SK_ARMS 40240
+#define SK_REGIONS 42288
+#define SK_TERMS 50480
+#define SK_TAGS 51760
 // The runner row remain_distance_viewer_id reads (playerHorseIndex).
 #define SK_VIDX 9
 
-#define SK_RSTRIDE 26
+#define SK_RSTRIDE 27
 #define SK_ESTRIDE 10
 #define SK_PSTRIDE 4
 #define SK_GSTRIDE 4
@@ -191,7 +191,7 @@
 #define SK_S_DISABLED 4
 
 // Word layout of one record's state block (SKR_STRIDE words).
-#define SKR_STRIDE 24
+#define SKR_STRIDE 26
 #define SKR_STATE 0
 #define SKR_NWIN 1
 #define SKR_SINGLE 2
@@ -207,6 +207,8 @@
 #define SKR_RESERVED 12    // the random-skill reservation picked this record
 #define SKR_AA_COUNT 13    // per-effect-slot delivered counts, SKR_AA_COUNT + e
 #define SKR_WISFAIL 21     // the ordinary lottery failed; only reservations fire
+#define SKR_ORD 24         // reply ordinal while a pending activation is live, 0 none
+#define SKR_PEND 25        // this record holds the (runner, skill id) pending slot
 
 // Double layout of one record's dynamic block (SKD_STRIDE doubles). The
 // effect timers are indexed by effect slot; an effect fires at most once per
