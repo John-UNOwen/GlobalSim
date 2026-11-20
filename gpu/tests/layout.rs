@@ -151,9 +151,9 @@ fn classic_scratch_regions_match_the_kernel_mirrors() {
     assert_eq!(ce::S_SPURTT + 2, ce::S_SPURTD);
     assert!(ce::S_SPURTTICK + 2 < ce::CLS_ST_RUN_STRIDE);
     // The activation diagnostics sit right after the tick mirror, in slots
-    // 15..19 of the widened runner block.
+    // 15..20 of the widened runner block.
     assert_eq!(ce::S_STAT_KEEP, ce::S_SPURTTICK + 1);
-    assert!(ce::S_STAT_GATE + 1 < ce::CLS_ST_RUN_STRIDE);
+    assert!(ce::S_STAT_SYB < ce::CLS_ST_RUN_STRIDE);
     // double scratch stacking: field tables below the runner block (duel park
     // and proximity mirrors each span 120*120), runner blocks, then the skill
     // runtime mirrors in kernel order: record windows, slot cooldown clocks,

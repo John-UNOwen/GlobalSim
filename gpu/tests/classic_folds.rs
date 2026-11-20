@@ -233,6 +233,23 @@ fn a_classic_build_error_drops_only_that_skill() {
         alt_plan.reason
     );
     assert_eq!(alt_plan.words[SK_NREC], 0, "the broken skill's live alternative drops with it");
+    // A skill id absent from the request's skillData is the same engine
+    // build error (race_solver_builder.rs:496 "bad skill ID {id}"), so the
+    // classic lane drops it and answers with the survivors.
+    let miss_text = format!(
+        "{{\"groundCondition\":\"Good\",\"weather\":\"Sunny\",\"season\":\"Spring\"\
+         ,\"skillData\":{{\"550001\":{}}},\"horses\":[{{\"skills\":[{{\"skillId\":\"550003\",\"level\":2}},{{\"skillId\":\"550001\",\"level\":2}}]}}]}}",
+        mk("always==1"),
+    );
+    let miss_root = json::parse(&miss_text).expect("miss root parses");
+    let miss_plan = skills_compile::plan_classic(&miss_root, &course);
+    assert!(
+        miss_plan.reason.is_none(),
+        "a missing skillData entry must drop the skill, not refuse the race: {:?}",
+        miss_plan.reason
+    );
+    assert_eq!(miss_plan.words[SK_NREC], 1, "only the listed skill keeps a record");
+    assert_eq!(miss_plan.words[SK_RECORDS], 550001, "the survivor is the listed skill");
 }
 
 /// A sampled leaf in a classic precondition is a static filter: the engine

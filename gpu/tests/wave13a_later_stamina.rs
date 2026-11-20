@@ -5,7 +5,7 @@
 //! the oracle for frames and the full reply, and the kernel's activation
 //! counters prove each system really ran. Above 2100 m the engine also
 //! injects the synthetic staminasyoubu skill (race_solver_builder.rs:819),
-//! which stays a named host fallback.
+//! ported in wave 16 and gated bit-exact on two long courses.
 
 #![cfg(feature = "race")]
 
@@ -118,7 +118,7 @@ fn assert_seed_bit_exact(
     seed: i64,
     rewrite: Option<(f64, f64)>,
     problems: &mut Vec<String>,
-) -> ([u32; 4], Option<usize>) {
+) -> ([u32; 5], Option<usize>) {
     let on_flag = [("experimentalLaterStaminaMechanics", Value::Bool(true))];
     let request = classic_request(course, seed, &on_flag, rewrite);
     assert!(
@@ -128,7 +128,7 @@ fn assert_seed_bit_exact(
     let race = run_classic(&request, seed);
     if let Some(reason) = &race.fallback {
         problems.push(format!("seed {seed}: kernel fallback {reason}"));
-        return ([0; 4], None);
+        return ([0; 5], None);
     }
     let cpu = dep_cpu::run_cpu_race(&request, seed).expect("cpu race");
     if let Some(tick) = first_frame_diff(&cpu.frames, &race.frames) {
@@ -143,7 +143,7 @@ fn assert_seed_bit_exact(
         problems.push(format!("seed {seed}: flagged full reply differs from the engine"));
     }
     let off = run_classic(&classic_request(course, seed, &[], rewrite), seed);
-    if off.later_stats != [0, 0, 0, 0] {
+    if off.later_stats != [0, 0, 0, 0, 0] {
         problems.push(format!("seed {seed}: flag-off run activated the systems"));
     }
     let diff = first_frame_diff(&off.frames, &race.frames);
@@ -160,7 +160,7 @@ fn assert_seed_bit_exact(
 fn classic_later_stamina_answers_bit_exact() {
     register_geometry(10504);
     let mut problems: Vec<String> = Vec::new();
-    let mut totals = [0u32; 4];
+    let mut totals = [0u32; 5];
     let mut diffs: Vec<String> = Vec::new();
     for seed in SEEDS {
         let (stats, diff) = assert_seed_bit_exact(10504, seed, None, &mut problems);
@@ -183,8 +183,10 @@ fn classic_later_stamina_answers_bit_exact() {
             diff.map(|t| t as f64 / 15.0)
         ));
     }
-    let [keep, cmp, sec, gate] = totals;
-    println!("activation totals: keep {keep}, compete {cmp}, secure {sec}, gate stops {gate}");
+    let [keep, cmp, sec, gate, syb] = totals;
+    println!(
+        "activation totals: keep {keep}, compete {cmp}, secure {sec}, gate stops {gate}, staminasyoubu {syb}"
+    );
     for line in &diffs {
         println!("{line}");
     }
@@ -197,6 +199,7 @@ fn classic_later_stamina_answers_bit_exact() {
     assert!(cmp >= 1, "compete before spurt never activated across the battery");
     assert!(sec >= 1, "secure lead never activated across the battery");
     assert!(gate >= 1, "stamina keep never gated a compete or secure roll");
+    assert_eq!(syb, 0, "staminasyoubu fired at 2100 m, where the engine never injects it");
 }
 
 /// The engine echoes the flag in every reply (lib.rs:1071). The classic
@@ -223,16 +226,56 @@ fn classic_reply_echoes_the_flag() {
     }
 }
 
-/// Above 2100 m the engine injects staminasyoubu (race_solver_builder.rs:
-/// 819) and the classic lane refuses by name, both the kernel and the gate.
+/// Wave 16: the staminasyoubu injection above 2100 m is ported. Frames
+/// bit-exact against the CPU engine and the full reply byte-equal, flagged
+/// and unflagged, seeds 1 to 3, on four long courses covering every value
+/// tier of race_solver_builder.rs:167-179: 10308 at 2200 m (0.5), 10108 at
+/// 2400 m (1.0), 11004 at 2600 m (1.2) and 10507 at 3600 m (1.5), on the
+/// plain v77 field and the high-stamina field that arms the raw stamina
+/// gate. The kernel's staminasyoubu counter (later_stats slot 5) proves the
+/// injected record fired on every course, the unflagged controls run every
+/// counter at zero, and the flagged field diverges from its unflagged
+/// control on at least one scene. Other long courses drift 1 to 2 ulp in
+/// speed off the engine on some seed or field even with the flag off (for
+/// example 10105 seed 2 plain at tick 442, 10312 seed 1 high-stamina at
+/// tick 910), a pre-existing base-physics gap kept out of this scene set.
 #[test]
-fn later_stamina_above_2100_m_is_a_named_host_fallback() {
-    let plain = classic_request(10108, 1, &[("experimentalLaterStaminaMechanics", Value::Bool(true))], None);
-    assert!(globalsim::PreparedRace::new(&plain).is_ok(), "the engine answers the long course");
-    let race = run_classic(&plain, 1);
-    assert_eq!(
-        race.fallback.as_deref(),
-        Some("staminasyoubu, injected above 2100 m, stays outside the classic kernel"),
-        "the kernel names the fallback"
+fn staminasyoubu_long_courses_answer_bit_exact() {
+    let courses = [(10308i32, 0.5), (10108, 1.0), (11004, 1.2), (10507, 1.5)];
+    for (course, _) in courses {
+        register_geometry(course);
+    }
+    let mut problems: Vec<String> = Vec::new();
+    let mut fired: Vec<u32> = Vec::new();
+    let mut diffs: Vec<String> = Vec::new();
+    for (course, tier) in courses {
+        let mut course_fires = 0u32;
+        for seed in SEEDS {
+            for rewrite in [None, Some((B_WISDOM, B_STAMINA))] {
+                let (stats, diff) = assert_seed_bit_exact(course, seed, rewrite, &mut problems);
+                course_fires += stats[4];
+                diffs.push(format!(
+                    "course {course} (tier {tier}) seed {seed}{}: first flagged frame difference vs unflagged {:?}",
+                    if rewrite.is_some() { " high-stamina" } else { "" },
+                    diff.map(|t| t as f64 / 15.0)
+                ));
+            }
+        }
+        fired.push(course_fires);
+    }
+    println!(
+        "staminasyoubu fires: 10308 {}, 10108 {}, 11004 {}, 10507 {}",
+        fired[0], fired[1], fired[2], fired[3]
     );
+    for line in &diffs {
+        println!("{line}");
+    }
+    for (i, (course, _)) in courses.iter().enumerate() {
+        assert!(fired[i] >= 1, "staminasyoubu never fired on course {course}");
+    }
+    assert!(
+        diffs.iter().any(|d| !d.ends_with("None")),
+        "the flag never changed a frame on the long courses"
+    );
+    assert!(problems.is_empty(), "{} problems:\n{}", problems.len(), problems.join("\n"));
 }

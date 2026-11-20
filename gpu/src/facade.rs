@@ -602,11 +602,9 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
         if root.get("traceConservePower").and_then(Value::as_bool) == Some(true) {
             return Some("traceConservePower requires experimentalRetailRuntime".into());
         }
-        // The three flag-only systems are ported; only the >2100 m
-        // staminasyoubu injection still falls back.
-        if let Some(reason) = classic_exec::later_stamina_refusal(request) {
-            return Some(reason);
-        }
+        // The flag-only systems and the >2100 m staminasyoubu injection are
+        // all ported, so nothing between the trace check and the skill
+        // compiler refuses on this mode.
         let skilled = root
             .get("horses")
             .and_then(Value::as_array)

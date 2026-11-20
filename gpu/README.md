@@ -1287,8 +1287,9 @@ WisdomUp mid-race fire. GutsUp landed later, self and cross, in wave 8.
   `last_spurt_speed` and `base_accel` rewrites are skipped as retail-dead:
   the step head recomputes the retail minimum and the phase-2 spurt before
   any consumer reads them (`race_solver_retail.rs:961` and `:1007-1034`),
-  the sole pre-phase-2 spurt-speed reader is the unmodeled staminasyoubu
-  hook, and the accel chain recomputes from power.
+  the sole pre-phase-2 spurt-speed reader, the staminasyoubu hook, is a
+  classic-lane injection the retail lane refuses, and the accel chain
+  recomputes from power.
 - GutsUp stayed refused at any mid-race fire in this wave: the spurt maximum
   term, the duel entry and the spot entry read `powf(bounded_stat(guts) *
   spurt[2], spurt[3])` from the runtime guts at every plan recompute
@@ -1894,32 +1895,43 @@ batch. Scratch sizes are pinned in `tests/layout.rs` under `CLS_*`.
 The remaining fallbacks, each named at the race, at the reply lane or at
 compile time, with what the engine does at the same point and why the GPU
 lane does not answer. `tests/parity_audit.rs` enumerates the app-facing set
-and proves every one of them is reachable, nothing else is (`gate_reasons_enumerates_exactly_the_documented_fallbacks`). The skill-side lists live in `SKILLS_DESIGN.md`.
+and proves every one of them is reachable, nothing else is (`gate_reasons_enumerates_exactly_the_documented_fallbacks`). The skill-side lists live in `SKILLS_DESIGN.md`. The audit column carries the verification for each row: an engine-error row names the gate that asserts the kernel refusal equals the engine error text, a limit row names its gate or code point and why the gap is not closable at the kernel's design point.
 
-| fallback text | engine side | GPU side |
-| --- | --- | --- |
-| `no GPU passes the exactness gate` | n/a | `facade::gate_reasons` with no device that passed `gpu::fp_gate_rejections` |
-| `missing cl_khr_fp64, missing CL_FP_DENORM in single_fp_config, missing CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT, missing CL_FP_DENORM in double_fp_config` | n/a | `gpu::fp_gate_rejections`, joined |
-| `experimentalGrid requires 21 through 120 horses, columns=20 and rowSpacing=3.0.` | engine parse error, `lib.rs:262-272` | quoted verbatim by `prepare` and the gate, retail and classic |
-| `World geometry requires the experimental runtime and standard starting grid` | engine error, `api.rs:68-71` | quoted verbatim |
-| `traceConservePower requires experimentalRetailRuntime` | engine error, `lib.rs:1504-1506` | quoted verbatim on the classic lane |
-| `experimentalLaterStaminaMechanics must be a boolean.`, `traceConservePower must be a boolean`, `experimentalRetailStartup must be a boolean` | engine parse errors, `lib.rs:343-349` | quoted verbatim |
-| `non-retail runtime` | the engine answers on its classic solver | the retail kernel is a retail-runtime port, it refuses rather than approximate, `race_exec::prepare` |
-| `retail runtime belongs to the retail lane` | the retail config switches the solver (`lib.rs:1514-1523`) | the classic kernel is a classic-runtime port, `classic_exec::prepare` |
-| `staminasyoubu, injected above 2100 m, stays outside the classic kernel` | the engine injects the synthetic skill, `race_solver_builder.rs:819` | classic lane, `classic_exec::later_stamina_refusal`, distance-gated |
-| `experimentalLaterStaminaMechanics draws from a live solver stream the retail kernel resolves host-side` | the three systems draw live (`race_solver.rs:2751-2756`) | retail lane, `race_exec::prepare` |
-| `traceConservePower is outside the full GPU lane` | the mode only adds reply keys (`lib.rs:1115-1123`) | `full_reply::build`, the compact lane answers |
-| `roster size outside the kernel's range` | the engine answers any roster it is given | capacity refusal past `RACE_MAXR` (120 retail) or `CLS_MAXR` (120 classic) |
-| `non-grid fields above 24 runners are outside the validated lane band` | the engine answers dense crowds at any size | band refusal past `NON_GRID_MAX_RUNNERS` (24) without a valid `experimentalGrid`, both lanes, `prepare` and `gate_reasons` (see "Wave 15: the non-grid band refusal and the cap back at 120") |
-| `more slopes than the classic kernel carries` | the engine's course table carries any count | classic lane, past `CLS_MAX_SLOPES` (16). `gate_reasons` alone cannot name it: the check needs the course table, it runs at prepare |
-| `the initialization reference flagged` | the engine answers | the host's `initialization::stats_reference` reports a fallback word for the roster, and the classic lane refuses instead of guessing adjusted stats |
-| skill-compiler refusals | the engine's retail and classic builders reject or accept | `skills_compile`, each reason names the construct. The retail set is 17 families and the classic set 54, enumerated and pinned in `parity_audit` (see "Engine parity audit") |
-| kernel `FB_*` fallbacks | n/a, kernel-internal | `race_exec::kernel_fallback`, capacity or geometry words the host missed |
+| fallback text | engine side | GPU side | audit |
+| --- | --- | --- | --- |
+| `no GPU passes the exactness gate` | n/a | `facade::gate_reasons` with no device that passed `gpu::fp_gate_rejections` | limit, `gpu::fp_gate_rejections` plus the parity probes. Not closable: bit-exact physics needs fp64 with correctly-rounded divide and sqrt, and no device absent from the host satisfies that |
+| `missing cl_khr_fp64, missing CL_FP_DENORM in single_fp_config, missing CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT, missing CL_FP_DENORM in double_fp_config` | n/a | `gpu::fp_gate_rejections`, joined | limit, `gpu::fp_gate_rejections` plus the parity probes. Not closable: same capability floor as the row above |
+| `experimentalGrid requires 21 through 120 horses, columns=20 and rowSpacing=3.0.` | engine parse error, `lib.rs:262-272` | quoted verbatim by `prepare` and the gate, retail and classic | engine error, `equivalence_gate::engine_rejected_request_shapes_quote_their_error_texts` proves engine text, kernel refusal and gate reason byte-equal, and `parity_audit` probes it |
+| `World geometry requires the experimental runtime and standard starting grid` | engine error, `api.rs:68-71` | quoted verbatim | engine error, `grid_gate::grid_with_geometry_quotes_the_engine_reason` proves kernel equals engine, `parity_audit` probes it. Not closable at the kernel: the grid physics port is the engine's pure-f64 grid, not World geometry |
+| `traceConservePower requires experimentalRetailRuntime` | engine error, `lib.rs:1504-1506` | quoted verbatim on the classic lane | engine error, `wave12c_modes::classic_engine_errors_quote_the_engine_text` proves all three texts equal, `facade_gate` and `parity_audit` probe it |
+| `experimentalLaterStaminaMechanics must be a boolean.`, `traceConservePower must be a boolean`, `experimentalRetailStartup must be a boolean` | engine parse errors, `lib.rs:343-349` | quoted verbatim | engine errors, `equivalence_gate::engine_rejected_request_shapes_quote_their_error_texts` proves each byte-equal on kernel and gate, `parity_audit` probes each |
+| `non-retail runtime` | the engine answers on its classic solver | the retail kernel is a retail-runtime port, it refuses rather than approximate, `race_exec::prepare` | limit, `parity_audit` probe. Not closable on this lane: the classic physics is a separate kernel, the classic lane answers these requests |
+| `retail runtime belongs to the retail lane` | the retail config switches the solver (`lib.rs:1514-1523`) | the classic kernel is a classic-runtime port, `classic_exec::prepare` | limit, `facade_gate` quotes it, `parity_audit` probes it. Not closable on this lane: the mirror of the row above |
+| `experimentalLaterStaminaMechanics draws from a live solver stream the retail kernel resolves host-side` | the three systems draw live (`race_solver.rs:2751-2756`) | retail lane, `race_exec::prepare` | limit, `facade_gate` quotes it, `parity_audit` probes it. The classic lane ports the systems and the staminasyoubu injection (wave 13a and 16), the retail kernel cannot host them: it carries no live stream consumer |
+| `traceConservePower is outside the full GPU lane` | the mode only adds reply keys (`lib.rs:1115-1123`) | `full_reply::build`, the compact lane answers | limit, `equivalence_gate::trace_conserve_power_is_reply_diagnostics_only` asserts the reason. Not closable yet: the conserve reply channels ride the compact classic lane only |
+| a horse skill with no entry in the request's skillData | the retail config errors at the init lookup, `Err("Missing retail initialization field {id}")` (`retail_initialization.rs:222`), the classic lane hits `Err("bad skill ID {id}")` (`race_solver_builder.rs:496`) and retries after dropping the skill (`lib.rs:726-739`) | retail lane, `skills_compile` refuses with the engine's init text, the classic lane drops the skill and answers | engine error, `equivalence_gate::a_missing_skill_data_entry_quotes_the_engine_error` proves retail kernel equals engine, `classic_folds::a_classic_build_error_drops_only_that_skill` and `wave12c_classic_gate::a_missing_skill_data_entry_drops_and_answers_like_the_engine` prove the classic drop |
+| `roster size outside the kernel's range` | the engine answers any roster it is given | capacity refusal past `RACE_MAXR` (120 retail) or `CLS_MAXR` (120 classic) | limit, `equivalence_gate::rosters_beyond_the_kernel_cap_refuse_by_size` plus the parity probes. Not closable at the strides: every kernel buffer is sized at 120 |
+| `non-grid fields above 24 runners are outside the validated lane band` | the engine answers dense crowds at any size | band refusal past `NON_GRID_MAX_RUNNERS` (24) without a valid `experimentalGrid`, both lanes, `prepare` and `gate_reasons` (see "Wave 15: the non-grid band refusal and the cap back at 120") | limit, `equivalence_gate::non_grid_crowds_above_24_refuse_the_kernel_band` plus the parity probes. Not closable yet: dense non-grid starts past 24 hit the crowd physics gap below |
+| `more slopes than the classic kernel carries` | the engine's course table carries any count | classic lane, past `CLS_MAX_SLOPES` (16). `gate_reasons` alone cannot name it: the check needs the course table, it runs at prepare | limit, `parity_audit::classic_prepare_only_fallbacks_stay_reachable` proves reachability through injected course text. Not closable at the stride: slope tables are fixed at 16 |
+| `raw stats beyond the host stats authority` | the engine answers | `classic_exec::prepare` refuses a non-finite base stat instead of guessing adjusted stats | limit, `classic_exec.rs:486`. No probe: valid JSON stats numbers are always finite, only an injected non-finite word reaches it |
+| `the initialization reference flagged` | the engine answers | the host's `initialization::stats_reference` reports a fallback word for the roster, and the classic lane refuses instead of guessing adjusted stats | limit, `classic_exec.rs:512`. No probe: the reference flags only stat shapes the host mirror cannot reproduce, the vendored-engine comparison in `initialization_gate` keeps the mirror honest |
+| skill-compiler refusals | the engine's retail and classic builders reject or accept | `skills_compile`, each reason names the construct. The retail set is 17 families and the classic set 54, enumerated and pinned in `parity_audit` (see "Engine parity audit") | limit, the `parity_audit` sweeps pin both family lists. Engine build errors are not refusals: the classic lane drops the skill like `lib.rs:728-739` (`classic_folds`, `wave12c_classic_gate`), the retail lane answers with the engine error text |
+| kernel `FB_*` fallbacks | n/a, kernel-internal | `race_exec::kernel_fallback`, capacity or geometry words the host missed | limit, `race_exec.rs:1693-1701`. No probe: reachable only when a host check misses, the strings mirror the kernel FB codes |
+| classic kernel fallbacks (`uniform lottery cap hit`, `tick count beyond the kernel's frame buffer`, `field or slope count beyond the kernel's range`, `reply record channel overflow`) | n/a, kernel-internal | `classic_exec::classic_kernel_fallback` | limit, `classic_exec.rs:1064-1072`. No probe: the host-side checks and the compiler bounds stop these first, the words stay as the kernel's last line |
 
 Wave 13b removed three rows from this table: "grid mode needs the engine's
 staggered roster ranks" (full replies now ported), and "experimentalGrid
 belongs to the retail lane" plus "experimentalGrid is outside the classic
 lane" (classic grid starts ported).
+
+Wave 16 removed two more: "staminasyoubu, injected above 2100 m, stays
+outside the classic kernel" (the injection is ported, see the wave 16
+paragraph under "Wave 13a"), and the app-facing "skillData has no entry for
+skill {id}" refusal. That refusal was never the engine's: the classic engine
+answers after dropping the skill (`lib.rs:726-739`), so the classic compiler
+now drops it too, and the retail kernel quotes the engine's own init lookup
+error, "Missing retail initialization field {id}"
+(`retail_initialization.rs:222`).
 
 Wave 12b landed the classic skill runtime end to end. The compiler profile
 (`skills_compile::plan_classic`) compiles the classic effect-value chain
@@ -2006,12 +2018,41 @@ per system) sit at `DF_CMPM` to `DF_SECCL`, 108 to 113, so the runner double
 stride moved 112 to 120. The classic reply now echoes the real flag
 (`lib.rs:1071`) instead of a fixed false.
 
-The port is scoped by distance, not dropped: above 2100 m the engine also
-injects the synthetic staminasyoubu skill (`race_solver_builder.rs:817-848`),
-a construction hook the classic kernel does not model, so those requests
-carry the named host fallback "staminasyoubu, injected above 2100 m, stays
-outside the classic kernel" from both `classic_exec::prepare` and
-`facade::gate_reasons` (`classic_exec::later_stamina_refusal`).
+Wave 16 ported the injection above 2100 m. The engine's
+`with_stamina_syoubu` hook (`race_solver_builder.rs:817-848`) adds one
+synthetic skill per runner when `experimentalLaterStaminaMechanics` is set
+and `course.distance > 2100.0`: skill_id `staminasyoubu`, White rarity,
+`wisdom_check` false, Immediate sampling (no rng draw), regions
+`[distance*2/3, distance]`, no cooldown (the fire parks the cooldown key at
+`INFINITY` exactly like the engine parks it, `race_solver.rs:2167-2169`),
+and an extra condition `raw_stamina > 1200.0 && current_speed >=
+last_spurt_speed` (`race_solver_builder.rs:843`). One TargetSpeed effect
+adds `sqrt(raw_stamina - 1200) * 0.0085 * tier(distance)` to the target
+speed (`race_solver.rs:2496-2498`, tiers at
+`race_solver_builder.rs:167-179`) for a 9999 s duration scaled to the
+course, so it never expires mid-race. The classic compiler packs the record
+with the wire skills (`skills_compile::classic_injections`), the kernel
+gates and fires it in `cc_sk_scan`, visiting the injected record before
+every wire record of the tick the way the engine's descending sequence walk
+does (`race_solver.rs:2142-2145`), and the host carries the raw-stamina
+seed in the new `F_RAWST` read word, folding constructor StaminaUp bumps
+with the engine's `max(1.0)` clamp (`race_solver.rs:2558`). Nothing between
+the trace check and the skill compiler refuses on the classic lane anymore.
+
+`wave13a_later_stamina::staminasyoubu_long_courses_answer_bit_exact` covers
+every non-zero value tier: 10308 (0.5), 10108 (1.0), 11004 (1.2) and 10507
+(1.5), on the plain v77 field and the high-stamina field, flagged and
+unflagged, seeds 1 to 3. Frames are bit-exact against the CPU engine and
+full replies byte-equal, the kernel's staminasyoubu counter shows all nine
+runners of the high-stamina field firing once per seed (27 per course), the
+unflagged controls run zero, and the flagged fields diverge from their
+controls. The same file's 2100 m battery keeps that counter at zero: at
+exactly 2100 m the engine injects nothing, and neither does the kernel.
+Four other long courses drift 1 to 2 ulp in speed off the engine on some
+seed or field even with the flag off (10105 seed 2 plain at tick 442, 10312
+seed 1 high-stamina at tick 910, 10404, 10810, 10908, 10506, 10511, 10607
+and 10205 similar); a pre-existing base-physics gap outside this wave, kept
+out of the gated scene set.
 
 The retail lane keeps its refusal, now with the architectural reason: the
 three systems draw live from the shared solver stream whose positions follow
@@ -2022,18 +2063,19 @@ placed there. The reason text is "experimentalLaterStaminaMechanics draws
 from a live solver stream the retail kernel resolves host-side".
 
 For activation evidence the kernel counts, per race, keep sets, compete
-activations, secure activations and keep's gate stops (scratch words 24096 to
-24099, mirrored into runner 0's status slots 15 to 18, status runner stride
-17 to 20, surfaced as `ClassicGpu::later_stats`; never part of a reply).
-`tests/wave13a_later_stamina.rs` runs seven seeds: the v77 field (1..3) and a
-nine-horse high-stamina variant without skills (1, 2, 3 and 6) where the keep
-HP gate closes early so the two section-window systems run. Frames are
-bit-exact against the CPU engine and full replies byte-equal on all seven;
-flag-off controls keep zero counters; the battery totals are keep 62, compete
-4, secure 1 and gate stops 38,844, and every flagged scene moves the physics
-(first divergence 34.7 to 84.3 s). `tests/wave12c_modes.rs` moved the
-named-fallback row to the 2400 m course 10108, and `facade_gate` accepts the
-flag at 2000 m and quotes the fallback at 2400 m.
+activations, secure activations, keep's gate stops and staminasyoubu fires
+(scratch words 24096 to 24100, mirrored into runner 0's status slots 15 to
+19, status runner stride 20, surfaced as `ClassicGpu::later_stats`; never
+part of a reply). `tests/wave13a_later_stamina.rs` runs seven seeds on the
+2100 m course: the v77 field (1..3) and a nine-horse high-stamina variant
+without skills (1, 2, 3 and 6) where the keep HP gate closes early so the
+two section-window systems run. Frames are bit-exact against the CPU engine
+and full replies byte-equal on all seven; flag-off controls keep zero
+counters; the battery totals are keep 62, compete 4, secure 1 and gate stops
+38,844 with no staminasyoubu fires at 2100 m, and every flagged scene moves
+the physics (first divergence 34.7 to 84.3 s). `tests/wave12c_modes.rs` and
+`facade_gate` answer the 2400 m flagged request on the GPU lane with no
+fallback.
 
 ## Wave 13b: grid full replies, classic grid starts, the 144-horse cap
 

@@ -95,6 +95,10 @@ pub const F_NIGECNT: usize = 60;
 pub const F_SPOTP: usize = 61;
 // The start position, 0.0 outside grid mode. The kernel seeds DF_POS from it.
 pub const F_POS0: usize = 62;
+// The raw stamina seed: wire stamina times the mood coefficient, with the
+// constructor-pass kind 2 bumps folded in (race_solver_builder.rs:278-298,
+// race_solver.rs:2558). The kernel seeds DF_RAWST from it.
+pub const F_RAWST: usize = 63;
 
 pub const CLS_ST_STRIDE: usize = 16 + 20 * CLS_MAXR;
 pub const S_FALLBACK: usize = 0;
@@ -126,12 +130,14 @@ pub const S_SPURTD: usize = 10;
 pub const S_TEMPT: usize = 12;
 pub const S_RSCNT: usize = 13;
 pub const S_SPURTTICK: usize = 14;
-// Diagnostic activation counts for the flag-only competition systems:
-// stamina-keep, compete-before-spurt, secure-lead and keep's gate stops.
+// Diagnostic activation counts for the flag-only competition systems and the
+// injected staminasyoubu: stamina-keep, compete-before-spurt, secure-lead,
+// keep's gate stops and staminasyoubu fires.
 pub const S_STAT_KEEP: usize = 15;
 pub const S_STAT_CMP: usize = 16;
 pub const S_STAT_SEC: usize = 17;
 pub const S_STAT_GATE: usize = 18;
+pub const S_STAT_SYB: usize = 19;
 
 pub const CLS_RP_COMPLEN: usize = 0;
 pub const CLS_RP_PHRCOUNT: usize = 1;
@@ -398,27 +404,6 @@ pub fn classic_gate_reason(request: &str) -> Option<String> {
     }
 }
 
-/// The classic lane refuses the flag-only stamina systems only above 2100 m,
-/// where the engine injects the synthetic staminasyoubu skill
-/// (race_solver_builder.rs:819). None means answerable.
-pub fn later_stamina_refusal(request: &str) -> Option<String> {
-    let root = json::parse(request).ok()?;
-    if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) != Some(true) {
-        return None;
-    }
-    let course_id = root.get_i64("courseId").ok()?;
-    let courses = initialization::engine_json("data/course_data.json").ok()?;
-    let distance = courses.get(&course_id.to_string())?.get_f64("distance").ok()?;
-    if distance > 2100.0 {
-        Some(LATER_STAMINA_ABOVE_2100.to_string())
-    } else {
-        None
-    }
-}
-
-const LATER_STAMINA_ABOVE_2100: &str =
-    "staminasyoubu, injected above 2100 m, stays outside the classic kernel";
-
 fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<Prepared, String> {
     let root = json::parse(request)?;
     let course_id = root.get_i64("courseId")? as i32;
@@ -463,14 +448,11 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         // needs the retail runtime, so quote its text, not a GPU-only reason.
         return Ok(flagged(n, "traceConservePower requires experimentalRetailRuntime".into()));
     }
+    // Later stamina mechanics is ported: the three timed systems run in the
+    // kernel and the >2100 m staminasyoubu injection is packed per runner
+    // like the engine's construction hook (race_solver_builder.rs:817-848).
     let later_stamina =
         root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool).unwrap_or(false);
-    if later_stamina && course.distance > 2100.0 {
-        // The engine injects the synthetic staminasyoubu skill above 2100 m
-        // (race_solver_builder.rs:819). The classic kernel models the three
-        // timed systems but not that construction hook.
-        return Ok(flagged(n, LATER_STAMINA_ABOVE_2100.into()));
-    }
     // singleMode is ported: the +400 lands inside the stats_reference chain
     // (race_solver_builder.rs:304-321). A non-boolean flag is ignored, like
     // the engine (lib.rs:342).
@@ -507,7 +489,11 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
     // The asitame injection arms on the adjusted raw power, which only the
     // stats authority knows (race_solver_builder.rs:802, :295), so the plan
     // runs one stats pass first. The main loop re-runs it per runner.
-    let mut extras = crate::skills_compile::ClassicExtras { raw_power: Vec::new(), strategy: Vec::new() };
+    let mut extras = crate::skills_compile::ClassicExtras {
+        raw_power: Vec::new(),
+        strategy: Vec::new(),
+        later_stamina,
+    };
     for (r, horse) in horses.iter().enumerate() {
         let strategy = strategy_id(horse.get_str("strategy")?)?;
         let stapt = aptitude_id(horse.get_str("strategyAptitude")?)?;
@@ -610,6 +596,12 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         }
         let [mut speed, mut stamina, mut power, mut guts, mut wisdom] = stats.adjusted_f64();
         let mut kakari_chance = 0.0f64;
+        // The raw stamina seed the staminasyoubu gate and value read: the
+        // wire stat times the mood coefficient (race_solver_builder.rs:279,
+        // :290, mood clamped at lib.rs:508). Constructor kind 2 bumps move
+        // it beside the adjusted stat, each clamped at 1 (race_solver.rs:2558).
+        let moodc = stats_case.mood.clamp(-2, 2) as f64;
+        let mut raw_stamina = raws[r][1] * (1.0 + 0.02 * moodc);
 
         // The per-runner seeding chain, the engine draw order kept exact:
         // builder pair, hp seed, goroshi and pace, gate roll, random lot,
@@ -664,7 +656,10 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
             let _ = b;
             match kind {
                 1 => speed = (speed + modifier).max(1.0),
-                2 => stamina = (stamina + modifier).max(1.0),
+                2 => {
+                    stamina = (stamina + modifier).max(1.0);
+                    raw_stamina = (raw_stamina + modifier).max(1.0);
+                }
                 3 => power = (power + modifier).max(1.0),
                 4 => guts = (guts + modifier).max(1.0),
                 5 => wisdom = (wisdom + modifier).max(1.0),
@@ -730,6 +725,7 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         rd[db + F_POS0] = start_pos;
         rd[db + F_SPEED_STAT] = speed;
         rd[db + F_STAMINA] = stamina;
+        rd[db + F_RAWST] = raw_stamina;
         rd[db + F_POWER] = power;
         rd[db + F_GUTS] = guts;
         rd[db + F_WISDOM] = wisdom;
@@ -819,10 +815,11 @@ pub struct ClassicGpu {
     pub tempt_all: Vec<u32>,
     pub rscore_all: Vec<u32>,
     pub spurt_tick_all: Vec<u32>,
-    /// Activation counts for the flag-only competition systems:
-    /// [stamina-keep, compete-before-spurt, secure-lead, keep gate stops].
-    /// Diagnostics only, never part of a reply.
-    pub later_stats: [u32; 4],
+    /// Activation counts for the flag-only competition systems and the
+    /// injected staminasyoubu:
+    /// [stamina-keep, compete-before-spurt, secure-lead, keep gate stops,
+    /// staminasyoubu fires]. Diagnostics only, never part of a reply.
+    pub later_stats: [u32; 5],
     pub comp: Vec<u32>,
     pub phr: Vec<u32>,
     /// Unified skillEvents stream in engine push order, tag-word records:
@@ -968,7 +965,7 @@ impl ClassicContext {
                 tempt_all: Vec::new(),
                 rscore_all: Vec::new(),
                 spurt_tick_all: Vec::new(),
-                later_stats: [0; 4],
+                later_stats: [0; 5],
                 comp: Vec::new(),
                 phr: Vec::new(),
                 skev: Vec::new(),
@@ -1034,6 +1031,7 @@ impl ClassicContext {
                         st[S_FIN0 + S_STAT_CMP],
                         st[S_FIN0 + S_STAT_SEC],
                         st[S_FIN0 + S_STAT_GATE],
+                        st[S_FIN0 + S_STAT_SYB],
                     ];
                     let rp = &rp_records[(slot - 1) * CLS_RP_STRIDE..][..CLS_RP_STRIDE];
                     let clen = (rp[CLS_RP_COMPLEN] as usize).min(CLS_RP_COMP_CAP);

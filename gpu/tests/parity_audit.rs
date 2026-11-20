@@ -485,6 +485,7 @@ fn every_merged_skill_compiles_or_refuses_by_name_classic() {
     let extras = skills_compile::ClassicExtras {
         raw_power: vec![1200.0; 9],
         strategy: vec![1; 9],
+        later_stamina: false,
     };
     let mut compiled = 0usize;
     let mut refusals: BTreeSet<String> = BTreeSet::new();
@@ -572,24 +573,6 @@ fn gate_reasons_enumerates_exactly_the_documented_fallbacks() {
             Some(accepted()),
         ),
         (
-            "classic later stamina above 2100 m",
-            r#"{"courseId":10108,"experimentalLaterStaminaMechanics":true,"horses":[{}]}"#.into(),
-            Some(accepted()),
-        ),
-        (
-            "classic unknown skill",
-            {
-                let mut request = json::parse(&classic_request(1, 10504, None)).expect("classic v77");
-                let Value::Object(map) = &mut request else { unreachable!() };
-                map.insert("skillData".into(), merged_skill_data());
-                let Value::Array(horses) = map.get_mut("horses").expect("horses") else { unreachable!() };
-                let Value::Object(row) = &mut horses[0] else { unreachable!() };
-                row.insert("skills".into(), json::arr(vec![Value::String("999999999".into())]));
-                encode(&request)
-            },
-            Some(accepted()),
-        ),
-        (
             "classic roster past 120",
             format!(r#"{{"courseId":10504,"horses":[{}]}}"#, vec!["{}"; 121].join(",")),
             Some(accepted()),
@@ -629,8 +612,6 @@ fn gate_reasons_enumerates_exactly_the_documented_fallbacks() {
         "experimentalRetailStartup must be a boolean",
         "retail runtime belongs to the retail lane",
         "traceConservePower requires experimentalRetailRuntime",
-        "staminasyoubu, injected above 2100 m, stays outside the classic kernel",
-        "skillData has no entry for skill 999999999",
         "roster size outside the kernel's range",
         "non-grid fields above 24 runners are outside the validated lane band",
         "non-retail runtime",

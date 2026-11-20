@@ -487,13 +487,11 @@ fn gate_reasons_names_every_refusal() {
         Some("retail runtime belongs to the retail lane")
     );
     // A skilled classic race is no longer blanket-refused. The gate answers
-    // with the same compiler prepare() uses, so the refusal names the skill
-    // the compiler cannot lower.
+    // with the same compiler prepare() uses. A skill id missing from the
+    // request's skillData is an engine build error it drops and answers
+    // (lib.rs:726-739), so the gate accepts and the kernel drops too.
     let classic_skills = classic_v77_with_skills(&["999999999"]);
-    assert_eq!(
-        facade::gate_reasons(&classic_skills, Some(&accepted)).as_deref(),
-        Some("skillData has no entry for skill 999999999")
-    );
+    assert_eq!(facade::gate_reasons(&classic_skills, Some(&accepted)), None);
     let classic_grid = format!(
         "{{\"courseId\":10504,\"experimentalGrid\":{{\"columns\":20,\"rowSpacing\":3}},\"horses\":[{}]}}",
         vec!["{}"; 21].join(",")
@@ -505,16 +503,13 @@ fn gate_reasons_names_every_refusal() {
         facade::gate_reasons(classic_trace, Some(&accepted)).as_deref(),
         Some("traceConservePower requires experimentalRetailRuntime")
     );
-    // The flag-only systems are ported to the classic lane up to 2100 m, so
-    // the gate accepts; above 2100 m the staminasyoubu injection falls back.
+    // The flag-only systems and the above-2100 m staminasyoubu injection are
+    // ported to the classic lane, so the gate accepts both.
     let classic_stamina = r#"{"courseId":10504,"experimentalLaterStaminaMechanics":true,"horses":[{}]}"#;
     assert_eq!(facade::gate_reasons(classic_stamina, Some(&accepted)), None);
     let classic_stamina_far =
         r#"{"courseId":10108,"experimentalLaterStaminaMechanics":true,"horses":[{}]}"#;
-    assert_eq!(
-        facade::gate_reasons(classic_stamina_far, Some(&accepted)).as_deref(),
-        Some("staminasyoubu, injected above 2100 m, stays outside the classic kernel")
-    );
+    assert_eq!(facade::gate_reasons(classic_stamina_far, Some(&accepted)), None);
     // singleMode is ported on the classic lane: the +400 fold runs in the
     // adjusted stats, so the gate accepts it.
     let classic_single = r#"{"courseId":10504,"singleMode":true,"horses":[{}]}"#;

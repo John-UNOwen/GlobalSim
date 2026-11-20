@@ -92,6 +92,9 @@
 #define F_NIGECNT 60
 #define F_SPOTP 61
 #define F_POS0 62
+// The raw stamina seed: wire stamina times the mood coefficient, before the
+// stat adjustment (race_solver_builder.rs:278-298).
+#define F_RAWST 63
 
 // Status words, one block per race: fallback, ticks, loop end, per runner
 // finish times as raw f64 bits.
@@ -117,6 +120,7 @@
 #define S_STAT1 16
 #define S_STAT2 17
 #define S_STAT3 18
+#define S_STAT4 19
 
 // Reply record streams, one region per race: competition starts as
 // (tick, kind, runner) triples in engine push order (lib.rs:899-918) and
@@ -221,6 +225,7 @@
 #define U_STAT_CMP 24097
 #define U_STAT_SEC 24098
 #define U_STAT_GATE 24099
+#define U_STAT_SYB 24100
 // Compiled skill table, then the classic skill runtime state (all per race).
 #define CLS_SK_TABLE 24400
 #define CLS_SKD (CLS_SK_TABLE + SK_STRIDE)
@@ -241,6 +246,10 @@
 #define SK_FLAG_ASITAME 32768
 #define SK_FLAG_DYN 131072
 #define SK_FLAG_UNIQUE 65536
+// The injected staminasyoubu conserve skill (race_solver_builder.rs:817-848):
+// the scan gate reads live raw stamina and speed, and the TargetSpeed effect
+// carries its live activation value.
+#define SK_FLAG_SYOUBU 262144
 // Instance token words: global effect table index (below 65536), the
 // runner-local skill slot, the activation perspective, the source-side Noop
 // placeholder, and the natural-deceleration flag.
@@ -403,6 +412,10 @@
 #define DF_SECM 111
 #define DF_SECT 112
 #define DF_SECCL 113
+// The raw stamina the engine keeps beside the adjusted stat: it seeds the
+// staminasyoubu gate and value, and kind 2 effects move it live
+// (race_solver.rs:2558).
+#define DF_RAWST 114
 
 typedef struct cc_ctx {
     __global unsigned int* su;
@@ -2250,6 +2263,7 @@ static void cc_prepare(Cc* c, __global const unsigned int* ri) {
         d[DF_SPURTTICK] = 0.0;
         d[DF_SPEEDST] = rd[db + F_SPEED_STAT];
         d[DF_STAMINA] = rd[db + F_STAMINA];
+        d[DF_RAWST] = rd[db + F_RAWST];
         d[DF_GUTS] = rd[db + F_GUTS];
         d[DF_SPOTP] = rd[db + F_SPOTP];
         d[DF_DISTAPT] = (double)(int)ri[rb + R_DISTAPT];
@@ -2264,6 +2278,7 @@ static void cc_prepare(Cc* c, __global const unsigned int* ri) {
     c->su[U_STAT_CMP] = 0u;
     c->su[U_STAT_SEC] = 0u;
     c->su[U_STAT_GATE] = 0u;
+    c->su[U_STAT_SYB] = 0u;
     c->su[U_EIM] = ri[CLS_RI_FLAGS] & 1u;
     c->su[U_DUELON] = ri[CLS_RI_DUELON] & 1u;
     c->su[U_PMVALID] = 0u;
@@ -2462,7 +2477,10 @@ static void cc_sk_init(Cc* c) {
                 c->rp_over = 1;
             }
             (void)prev_rec;
-            if (rd[0] != last_sid) {
+            // The staminasyoubu record shares the sid 0 sentinel with the
+            // asitame record but keys its own cooldown slot in the engine
+            // (race_solver.rs:2437), so it always opens a fresh slot.
+            if (rd[0] != last_sid || (rd[2] & SK_FLAG_SYOUBU) != 0u) {
                 last_sid = rd[0];
                 slot++;
             }
@@ -2851,10 +2869,17 @@ static void cc_sk_refresh(Cc* c, const int r) {
 // (recovery included: the engine lands it before hp init, which then
 // re-seeds full hp, so it is net zero).
 static void cc_sk_apply_effect(Cc* c, const int r, const int eff,
-    const int slot, const int fieldless, const int own, const double dur) {
+    const int slot, const int fieldless, const int own, const double dur,
+    const unsigned int rec_flags) {
     const __global unsigned int* ef = SKEF(eff);
     const int kind = (int)ef[0];
-    const double mod = cc_sk_f64(ef + 6);
+    double mod = cc_sk_f64(ef + 6);
+    // The staminasyoubu wire modifier 0 is replaced at activation by the
+    // live formula (race_solver.rs:2496-2498, race_solver_builder.rs:181-184):
+    // the packed factor times sqrt(raw stamina - 1200) times 0.0085.
+    if (kind == 27 && (rec_flags & SK_FLAG_SYOUBU) != 0u) {
+        mod = (sqrt(fmax(SR(DF_RAWST) - 1200.0, 0.0)) * 0.0085) * mod;
+    }
     const unsigned int tok = SKT_E(eff) | SKT_S(slot) | (own ? 0u : SKT_PERSP);
     if (fieldless) {
         if (kind == 1 || kind == 2 || kind == 3 || kind == 4 || kind == 5 ||
@@ -2896,6 +2921,9 @@ static void cc_sk_apply_effect(Cc* c, const int r, const int eff,
             SR(DF_SPEEDST) = fmax(SR(DF_SPEEDST) + mod, 1.0);
         } else if (kind == 2) {
             SR(DF_STAMINA) = fmax(SR(DF_STAMINA) + mod, 1.0);
+            // The engine moves the raw stat beside the adjusted one
+            // (race_solver.rs:2558), feeding the staminasyoubu gate and value.
+            SR(DF_RAWST) = fmax(SR(DF_RAWST) + mod, 1.0);
         } else if (kind == 3) {
             SR(DF_POWER) = fmax(SR(DF_POWER) + mod, 1.0);
         } else if (kind == 4) {
@@ -3100,7 +3128,7 @@ static void cc_sk_fire(Cc* c, const int r, const int rec, const int fieldless) {
             }
             continue;
         }
-        cc_sk_apply_effect(c, r, eff_base + e, slot, fieldless, 1, dur);
+        cc_sk_apply_effect(c, r, eff_base + e, slot, fieldless, 1, dur, flags);
     }
     // The hook runs with the post-apply state (race_solver.rs:2673 fires
     // after the whole effect list), and asitame never carries skill events.
@@ -3337,17 +3365,24 @@ static int cc_sk_prereq(Cc* c, const int r, const __global unsigned int* rd,
     return 0;
 }
 
-// process_pending_armed (race_solver.rs:2131-2182) for one runner: armed
-// records in wire (creation) order, the same visit order the full scan nets
-// by walking the reversed pending list from the back (race_solver.rs:2200),
-// trigger-end consumption, the fire gate, and the cooldown parking. fieldless
-// is the constructor pass, where only all-self-target records fire.
+// process_pending_armed (race_solver.rs:2131-2182) for one runner: the armed
+// queue runs in descending sequence order (race_solver.rs:2142-2145), so the
+// staminasyoubu record, created last, is gated before any wire record of the
+// same tick, then the wire records in wire (creation) order, the order the
+// full scan nets by walking the reversed pending list from the back
+// (race_solver.rs:2200). trigger-end consumption, the fire gate, and the
+// cooldown parking. fieldless is the constructor pass, where only
+// all-self-target records fire.
 static void cc_sk_scan(Cc* c, const int r, const int fieldless) {
     const int nrec = cc_sk_nrec(c);
     const double pos = fieldless ? 0.0 : SR(DF_POS);
+    for (int pass = 0; pass < 2; pass++) {
     for (int rec = 0; rec < nrec; rec++) {
         const __global unsigned int* rd = SKRD(rec);
         if ((int)rd[1] != r || (rd[2] & SK_FLAG_DEAD) != 0u) {
+            continue;
+        }
+        if (((rd[2] & SK_FLAG_SYOUBU) != 0u) != (pass == 0)) {
             continue;
         }
         // The watch runs ahead of the trigger gate, exactly like the engine's
@@ -3408,7 +3443,17 @@ static void cc_sk_scan(Cc* c, const int r, const int fieldless) {
         if ((rd[2] & SK_FLAG_ASITAME) != 0u && !SU(UR_SPURT)) {
             continue;
         }
+        // The staminasyoubu extra condition (race_solver_builder.rs:833):
+        // raw stamina past 1200 and the current speed at or over the last
+        // spurt speed, both read live at the scan.
+        if ((rd[2] & SK_FLAG_SYOUBU) != 0u &&
+            (SR(DF_RAWST) <= 1200.0 || SR(DF_SPEED) < SR(DF_LSS))) {
+            continue;
+        }
         cc_sk_fire(c, r, rec, fieldless);
+        if ((rd[2] & SK_FLAG_SYOUBU) != 0u) {
+            c->su[U_STAT_SYB] += 1u;
+        }
         const double cd = cc_sk_f64(rd + 13);
         if (cd <= 0.0) {
             c->su[CLS_SKD_CONS + rec] = 1u;
@@ -3416,6 +3461,7 @@ static void cc_sk_scan(Cc* c, const int r, const int fieldless) {
         } else {
             SKCOOL(r, slot) = SR(DF_ACCUM) + cd * c->cd[D_DISTANCE] / 1000.0;
         }
+    }
     }
 }
 
@@ -3455,7 +3501,7 @@ static void cc_sk_flush(Cc* c) {
         }
         const int kind = (int)SKEF(eff)[0];
         const double queued_dur = c->sd[UDB_SKQDUR + head - 1];
-        cc_sk_apply_effect(c, dst, eff, slot, 0, src == dst ? 1 : 0, queued_dur);
+        cc_sk_apply_effect(c, dst, eff, slot, 0, src == dst ? 1 : 0, queued_dur, 0u);
         if (kind == 1 || kind == 2 || kind == 3 || kind == 4 || kind == 5) {
             cc_sk_refresh(c, dst);
         }
@@ -3665,6 +3711,7 @@ static void cc_run(Cc* c, __global const unsigned int* ri,
             st[rb + S_STAT1] = c->su[U_STAT_CMP];
             st[rb + S_STAT2] = c->su[U_STAT_SEC];
             st[rb + S_STAT3] = c->su[U_STAT_GATE];
+            st[rb + S_STAT4] = c->su[U_STAT_SYB];
         }
     }
     st[S_TICKS] = (unsigned int)ticks;

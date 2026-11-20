@@ -690,10 +690,10 @@ an already round value re-rounds to itself), and the hp context recaptures
 recomputes the retail minimum and the phase-2 spurt before any consumer can
 read them (`race_solver_retail.rs:961,1007-1034`), and the only pre-phase-2
 reader of the spurt speed is the staminasyoubu hook's region-gated extra
-condition (`race_solver_builder.rs:819-843`), which is not in the ported
-set. `base_accel` is dead too: the retail acceleration chain recomputes from
-power, untouched by kinds 1 and 5. `sk_stat_refresh` (`retail_core.cl`)
-mirrors the three live writes. Cross SpeedUp additionally repatches the
+condition (`race_solver_builder.rs:819-843`), a classic-lane injection the
+retail lane refuses. `base_accel` is dead too: the retail acceleration chain
+recomputes from power, untouched by kinds 1 and 5. `sk_stat_refresh`
+(`retail_core.cl`) mirrors the three live writes. Cross SpeedUp additionally repatches the
 cached spurt maximum from the bumped speed, the value the engine's plan
 closure recomputes from the live field at the next spurt decision.
 GutsUp, self (behind the same phase gate as WisdomUp) or cross, moves the
@@ -751,6 +751,9 @@ tokens per race, and 16 candidates per reservation pass (an overflow raises the
 `FB_SKILL_SEQ` fallback, not a wrong
 fold). Overflow
 is a host `flagged("skill table overflow ...")`, never a kernel fault.
+Constructor injections share the same budget: an injected asitame or
+staminasyoubu record that does not fit names itself, "skill table overflow:
+asitame injection" or "skill table overflow: staminasyoubu injection".
 
 ## Non-retail runtime physics: wave-11 port-scope survey
 

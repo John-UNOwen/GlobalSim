@@ -117,35 +117,27 @@ fn classic_engine_errors_quote_the_engine_text() {
     }
 }
 
-/// A mode the engine answers: the named host fallback carries the exact
-/// reason on both the classic kernel and the app gate, and the engine oracle
-/// proves it really answers (so the fallback is a GPU gap, never a mask over
-/// an engine error).
+/// Wave 16 closed the last named classic host fallback: above 2100 m the
+/// engine injects staminasyoubu (race_solver_builder.rs:819), answers the
+/// flagged request, and so do the kernel and the app gate, with no fallback.
+/// Wave 13a's long-course gate holds the bit-exact answer.
 #[test]
-fn classic_engine_answers_carry_named_host_fallbacks() {
+fn classic_long_course_later_stamina_answers_without_fallback() {
     register_geometry(COURSE);
-    // Later stamina above 2100 m is the only named classic fallback left:
-    // the engine answers, the injection stays outside the kernel.
-    for (label, extra, want) in [
-        (
-            "later stamina above 2100 m",
-            vec![
-                ("experimentalLaterStaminaMechanics", Value::Bool(true)),
-                ("courseId", json::num(10108.0)),
-            ],
-            "staminasyoubu, injected above 2100 m, stays outside the classic kernel",
-        ),
-    ] {
-        let request = classic_request(1, &extra, None);
-        assert!(engine_oracle(&request, 1).is_ok(), "{label}: the engine answers");
-        let out = classic_exec::run(&[(request.clone(), 1i64)]).expect("classic run");
-        assert_eq!(out.races[0].fallback.as_deref(), Some(want), "{label}: named fallback");
-        assert_eq!(
-            facade::gate_reasons(&request, Some(&device_facts())).as_deref(),
-            Some(want),
-            "{label}: the app gate names it"
-        );
-    }
+    register_geometry(10108);
+    let extra = vec![
+        ("experimentalLaterStaminaMechanics", Value::Bool(true)),
+        ("courseId", json::num(10108.0)),
+    ];
+    let request = classic_request(1, &extra, None);
+    assert!(engine_oracle(&request, 1).is_ok(), "the engine answers the long course");
+    let out = classic_exec::run(&[(request.clone(), 1i64)]).expect("classic run");
+    assert_eq!(out.races[0].fallback, None, "the kernel answers without a fallback");
+    assert_eq!(
+        facade::gate_reasons(&request, Some(&device_facts())),
+        None,
+        "the app gate accepts the long-course flag"
+    );
 }
 
 /// singleMode is ported to the classic kernel: the +400 fold lands in the

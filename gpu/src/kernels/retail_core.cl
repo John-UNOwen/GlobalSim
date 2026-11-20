@@ -4622,8 +4622,8 @@ static double phys_legacy_base_target_speed(const double distance, const int str
 // through the init-plus-spend re-round and the hp context recaptures wisdom.
 // The min_speed and last_spurt_speed rewrites are dead in retail: the step
 // head recomputes both before any consumer (race_solver_retail.rs:961 and
-// 1007-1034), and the legacy last_spurt_speed carries an f64 guts powf whose
-// only pre-phase-2 reader is the unmodeled staminasyoubu gate.
+// 1007-1034). The staminasyoubu gate, the only pre-phase-2 reader of the
+// legacy spurt speed, is a classic-lane injection the retail lane refuses.
 static void sk_stat_refresh(__global const uint* si, __global double* sd,
     __global double* shl, __global float* sf, const double distance, const int r) {
     const double speed = fmin(fmax((double)(float)sd[SD_HPS + r], 1.0), 2000.0);

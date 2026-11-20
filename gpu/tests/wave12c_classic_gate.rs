@@ -445,6 +445,35 @@ fn sampled_condition_build_errors_drop_the_skill_like_the_engine() {
     assert!(problems.is_empty(), "{} problems:\n{}", problems.len(), problems.join("\n"));
 }
 
+/// A horse skill with no entry in the request's skillData is the same engine
+/// build error the classic lane answers by dropping it
+/// (race_solver_builder.rs:496, lib.rs:726-739). The kernel drops it too:
+/// the real-leaf battery answers bit-exact, 900351 still fires on some seed,
+/// and the dropped id never appears in the event stream.
+#[test]
+fn a_missing_skill_data_entry_drops_and_answers_like_the_engine() {
+    register_geometry(COURSE);
+    let mut hosts: Vec<(usize, Vec<i64>)> =
+        REAL_HOSTS.iter().map(|(h, ids)| (*h, ids.to_vec())).collect();
+    hosts[8].1.push(999999999);
+    let host_refs: Vec<(usize, &[i64])> =
+        hosts.iter().map(|(h, ids)| (*h, ids.as_slice())).collect();
+    let mut problems: Vec<String> = Vec::new();
+    let mut saw_900351 = false;
+    for seed in REAL_SEEDS {
+        let request = field_real(seed, &host_refs);
+        let fired = gate_scene("missing entry battery", &request, seed, &mut problems);
+        if fired.iter().any(|&(_, _, s, _)| s == 900351) {
+            saw_900351 = true;
+        }
+        if fired.iter().any(|&(_, _, s, _)| s == 999999999) {
+            problems.push(format!("seed {seed}: the kernel ran the skill the engine dropped"));
+        }
+    }
+    assert!(saw_900351, "900351 never activated, the drop disturbed the survivor");
+    assert!(problems.is_empty(), "{} problems:\n{}", problems.len(), problems.join("\n"));
+}
+
 // Front B battery: live-state leaves in a twelve-runner field. The fired side
 // uses thresholds the readers must satisfy (the engine's constructor pass
 // fires the ungated hp_per and clock leaves at t=0, the field-guarded ones

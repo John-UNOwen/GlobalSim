@@ -107,6 +107,11 @@ pub const SK_FLAG_UNIQUE: u32 = 65536;
 /// The record gates at least one live condition leaf the classic kernel can
 /// read, so the classic scan runs the arm membership and program gate.
 pub const SK_FLAG_DYN: u32 = 131072;
+/// The classic lane's injected staminasyoubu conserve skill: the scan gate
+/// reads live raw stamina and speed, and the TargetSpeed effect replaces its
+/// wire modifier 0 with the live formula at activation
+/// (race_solver_builder.rs:817-848, race_solver.rs:2496-2498).
+pub const SK_FLAG_SYOUBU: u32 = 262144;
 
 pub const SK_TERM_ALL_CORNER: u32 = 0;
 pub const SK_TERM_STRAIGHT: u32 = 1;
@@ -272,10 +277,13 @@ pub fn plan_classic(root: &Value, course: &Value) -> SkillsPlan {
 /// request: the adjusted raw power per runner (initialization::stats_reference)
 /// and the resolved strategy ids. The course distance type comes from the
 /// course json. With extras, the compiler injects the engine's asitame record
-/// for every runner past the 1200 power arm (race_solver_builder.rs:786-815).
+/// for every runner past the 1200 power arm (race_solver_builder.rs:786-815),
+/// and the engine's staminasyoubu record for every runner when the request
+/// flagged later stamina on a course past 2100 m (lib.rs:546-547).
 pub struct ClassicExtras {
     pub raw_power: Vec<f64>,
     pub strategy: Vec<i32>,
+    pub later_stamina: bool,
 }
 
 pub fn plan_classic_with(root: &Value, course: &Value, extras: &ClassicExtras) -> SkillsPlan {
@@ -308,7 +316,18 @@ fn plan_lane(root: &Value, course: &Value, lane: Lane, extras: Option<&ClassicEx
     };
     let skill_data = match root.get("skillData") {
         Some(v) => v,
-        None => return c.finish(),
+        None => {
+            // The construction hooks run per builder regardless of skillData,
+            // so the injected records land on a skillData-free request too
+            // (lib.rs:545-547, race_solver_builder.rs:940-942).
+            let runners = root
+                .get("horses")
+                .and_then(Value::as_array)
+                .map(|a| a.len())
+                .unwrap_or(0);
+            c.classic_injections(course, extras, runners);
+            return c.finish();
+        }
     };
     let horses = match root.get("horses") {
         Some(v) => v,
@@ -412,28 +431,7 @@ fn plan_lane(root: &Value, course: &Value, lane: Lane, extras: Option<&ClassicEx
     }
     // A cross debuff is delivered by the kernel, which drops the same-team
     // receivers exactly like race_field.rs:458-461, so no roster gate remains.
-    if lane == Lane::Classic {
-        if let Some(extras) = extras {
-            let distance = match course.get_f64("distance") {
-                Ok(v) => v,
-                Err(why) => {
-                    c.unsupported(format!("course distance: {why}"));
-                    return c.finish();
-                }
-            };
-            let distance_type = course.get_i64("distanceType").unwrap_or(0) as i32;
-            for r in 0..entries.len() {
-                let raw_power = extras.raw_power.get(r).copied().unwrap_or(0.);
-                if raw_power > 1200.0 {
-                    let strategy = extras.strategy.get(r).copied().unwrap_or(0);
-                    c.pack_asitame(r, raw_power, strategy, distance_type, distance);
-                    if c.reason.is_some() {
-                        return c.finish();
-                    }
-                }
-            }
-        }
-    }
+    c.classic_injections(course, extras, entries.len());
     c.finish()
 }
 
@@ -1225,7 +1223,21 @@ impl Compiler {
         let def = match skill_data.get(sid) {
             Some(d) => d,
             None => {
-                self.unsupported(format!("skillData has no entry for skill {sid}"));
+                // The retail config errors first at the init lookup
+                // (retail_initialization.rs:222), classic at the builder
+                // (race_solver_builder.rs:496) and drops (lib.rs:726-739).
+                let retail = [
+                    "experimentalRetailInitialization",
+                    "experimentalRetailSections",
+                    "experimentalRetailRuntime",
+                ]
+                .iter()
+                .any(|k| root.get(k).and_then(Value::as_bool) == Some(true));
+                if retail {
+                    self.unsupported(format!("Missing retail initialization field {sid}"));
+                } else {
+                    self.engine_error(format!("bad skill ID {sid}"));
+                }
                 return;
             }
         };
@@ -2410,6 +2422,137 @@ impl Compiler {
         self.nrec += 1;
     }
 
+    /// The engine's two construction hooks, replayed after the wire skills:
+    /// asitame for every runner past the 1200 raw power arm, and staminasyoubu
+    /// for every runner when the request flagged later stamina on a course
+    /// past 2100 m (lib.rs:545-547, race_solver_builder.rs:817-848).
+    fn classic_injections(
+        &mut self,
+        course: &Value,
+        extras: Option<&ClassicExtras>,
+        runners: usize,
+    ) {
+        if self.lane != Lane::Classic {
+            return;
+        }
+        let Some(extras) = extras else {
+            return;
+        };
+        let distance = match course.get_f64("distance") {
+            Ok(v) => v,
+            Err(why) => {
+                self.unsupported(format!("course distance: {why}"));
+                return;
+            }
+        };
+        let distance_type = course.get_i64("distanceType").unwrap_or(0) as i32;
+        for r in 0..runners {
+            let raw_power = extras.raw_power.get(r).copied().unwrap_or(0.);
+            if raw_power > 1200.0 {
+                let strategy = extras.strategy.get(r).copied().unwrap_or(0);
+                self.pack_asitame(r, raw_power, strategy, distance_type, distance);
+                if self.reason.is_some() {
+                    return;
+                }
+            }
+        }
+        if extras.later_stamina && distance > 2100.0 {
+            for r in 0..runners {
+                self.pack_staminasyoubu(r, distance);
+                if self.reason.is_some() {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The engine's staminasyoubu hook: one record per runner on a course
+    /// past 2100 m, trigger chain [phase 2 start, distance] and one TargetSpeed
+    /// effect. The wire modifier 0 is replaced at activation by the live
+    /// raw-stamina formula (race_solver.rs:2496-2498), so the compiled
+    /// modifier word carries the distance factor alone and the kernel applies
+    /// sqrt(raw stamina - 1200) * 0.0085 to it at the fire
+    /// (race_solver_builder.rs:181-184, :167-179).
+    fn pack_staminasyoubu(&mut self, runner: usize, distance: f64) {
+        if self.nrec >= SK_RMAX {
+            self.unsupported("skill table overflow: too many records".to_string());
+            return;
+        }
+        if self.nreg + 1 > SK_GMAX || self.nprog + 1 > SK_PMAX || self.narm + 1 > SK_AMAX
+            || self.neff + 1 > SK_EMAX
+        {
+            self.unsupported("skill table overflow: staminasyoubu injection".to_string());
+            return;
+        }
+        let region = self.nreg;
+        let at = SK_REGIONS + SK_GSTRIDE * self.nreg;
+        let w = f64_words(distance * 2.0 / 3.0);
+        self.words[at] = w[0];
+        self.words[at + 1] = w[1];
+        let w = f64_words(distance);
+        self.words[at + 2] = w[0];
+        self.words[at + 3] = w[1];
+        self.nreg += 1;
+        let prog = self.nprog;
+        self.words[SK_PROGRAMS + SK_PSTRIDE * self.nprog] = OP_TRUE;
+        self.nprog += 1;
+        let arm = self.narm;
+        let at = SK_ARMS + SK_ASTRIDE * self.narm;
+        self.words[at] = 1;
+        self.words[at + 1] = prog as u32;
+        self.words[at + 2] = 0;
+        self.words[at + 3] = 0;
+        self.words[at + 4] = 1;
+        self.words[at + 5] = region as u32;
+        self.words[at + 6] = 0;
+        self.words[at + 7] = u32::MAX;
+        self.narm += 1;
+        let effect = self.neff;
+        let at = SK_EFFECTS + SK_ESTRIDE * self.neff;
+        self.words[at] = 27;
+        self.words[at + 1] = 1;
+        self.words[at + 2] = 1;
+        self.words[at + 3] = 1;
+        self.words[at + 4] = 0;
+        self.words[at + 5] = 0;
+        let w = f64_words(stamina_syoubu_distance_factor(distance));
+        self.words[at + 6] = w[0];
+        self.words[at + 7] = w[1];
+        let w = f64_words(9999.0);
+        self.words[at + 8] = w[0];
+        self.words[at + 9] = w[1];
+        self.neff += 1;
+        let at = SK_RECORDS + SK_RSTRIDE * self.nrec;
+        self.words[at] = 0;
+        self.words[at + 1] = runner as u32;
+        self.words[at + 2] = SK_FLAG_RETAIN | SK_FLAG_PRIMARY | SK_FLAG_SYOUBU;
+        self.words[at + 3] = 0;
+        self.words[at + 4] = 1;
+        self.words[at + 5] = 1;
+        self.words[at + 6] = effect as u32;
+        self.words[at + 7] = 1;
+        self.words[at + 8] = prog as u32;
+        self.words[at + 9] = 0;
+        self.words[at + 10] = u32::MAX;
+        self.words[at + 11] = 0;
+        self.words[at + 12] = 0;
+        self.words[at + 13] = 0;
+        self.words[at + 14] = 0;
+        self.words[at + 15] = 0;
+        self.words[at + 16] = 0;
+        self.words[at + 17] = 1.0f32.to_bits();
+        self.words[at + 18] = 1;
+        self.words[at + 19] = region as u32;
+        self.words[at + 20] = 1;
+        self.words[at + 21] = arm as u32;
+        self.words[at + 22] = 0;
+        self.words[at + 23] = 0;
+        self.words[at + 24] = 0;
+        self.words[at + 25] = 0;
+        self.words[at + 26] = 0;
+        self.nrec += 1;
+    }
+
     /// The blocked-side timer is solver state, so the kernel's live reader
     /// serves it in a condition term and in a precondition alike. The eight
     /// field-backed readers stay condition-only, RegionDyn leaves stay refused.
@@ -2561,6 +2704,22 @@ fn asitame_release_modifier(power: f64, strategy: i32, distance_type: i32) -> f6
     let arg = ((power as f32 - 1200.0_f32) * 130.0_f32).max(0.);
     let root = (arg as f64).sqrt() as f32;
     (root as f64 * 0.001_f32 as f64 * coef as f32 as f64) as f32 as f64
+}
+
+/// `stamina_syoubu_distance_factor` (race_solver_builder.rs:167-179): the
+/// course-distance tier of the staminasyoubu activation value.
+fn stamina_syoubu_distance_factor(distance: f64) -> f64 {
+    if distance < 2101.0 {
+        0.0
+    } else if distance < 2201.0 {
+        0.5
+    } else if distance < 2401.0 {
+        1.0
+    } else if distance < 2601.0 {
+        1.2
+    } else {
+        1.5
+    }
 }
 
 // Source-pinned mirrors of the vendored stat chain the team totals and the

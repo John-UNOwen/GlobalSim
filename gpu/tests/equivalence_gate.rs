@@ -205,6 +205,32 @@ fn engine_rejected_request_shapes_quote_their_error_texts() {
     shape_quotes_the_engine("grid with a 121 roster", &[("experimentalGrid", grid(20.0, 3.0))], Some(121));
 }
 
+/// A skill id the request's skillData has no entry for is an engine build
+/// error. The retail config errors first at the init lookup
+/// (retail_initialization.rs:222) and answers the request with that text;
+/// the retail kernel refusal quotes it. The classic lane hits the builder
+/// error (race_solver_builder.rs:496) and retries after dropping the skill
+/// (lib.rs:726-739), so the classic compiler drops it and answers too,
+/// pinned by `classic_folds::a_classic_build_error_drops_only_that_skill`
+/// and `wave12c_classic_gate::a_missing_skill_data_entry_drops_and_answers_like_the_engine`.
+#[test]
+fn a_missing_skill_data_entry_quotes_the_engine_error() {
+    register_geometry(10504);
+    let mut root = v77_value();
+    {
+        let Value::Object(map) = &mut root else { unreachable!() };
+        map.insert("skillData".into(), merged_skill_data());
+        let Value::Array(entries) = map.get_mut("horses").expect("horses") else { unreachable!() };
+        let Value::Object(horse) = &mut entries[0] else { unreachable!() };
+        horse.insert("skills".into(), json::arr(vec![Value::String("999999999".into())]));
+    }
+    let request = text_of(&root);
+    let engine = engine_error(&request);
+    assert_eq!(engine, "Missing retail initialization field 999999999", "the engine's error text");
+    let (kernel, _) = kernel_refusals(&request);
+    assert_eq!(kernel, engine, "the retail kernel quotes the engine text");
+}
+
 /// Wave 15 puts the kernel cap back at the grid-mode 120. Rosters past it
 /// no longer run: 121, 128, 144 and 145 non-grid refuse by size from the
 /// run gate and `gate_reasons` alike, compact and full, while the engine
