@@ -16,7 +16,7 @@ use crate::{race_exec, replay_packet};
 pub use crate::json;
 
 /// One request's answer. The compact lanes set `meta` and `packet` together,
-/// the full lane sets `reply`; a race that stays on the CPU lane carries
+/// the full lane sets `reply`. A race that stays on the CPU lane carries
 /// `fallback` and nothing else.
 pub struct BatchOutcome {
     pub meta: Option<String>,
@@ -331,6 +331,17 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
                 .into(),
         );
     }
+    // Parse-time shapes the engine rejects, and engine-supported modes the
+    // kernel does not port. Same texts prepare() flags with.
+    if root.get("experimentalLaterStaminaMechanics").is_some_and(|v| v.as_bool().is_none()) {
+        return Some("experimentalLaterStaminaMechanics must be a boolean.".into());
+    }
+    if root.get("traceConservePower").is_some_and(|v| v.as_bool().is_none()) {
+        return Some("traceConservePower must be a boolean".into());
+    }
+    if root.get("experimentalRetailStartup").is_some_and(|v| v.as_bool().is_none()) {
+        return Some("experimentalRetailStartup must be a boolean".into());
+    }
     if root.get("experimentalRetailRuntime").and_then(Value::as_bool) != Some(true) {
         return Some("non-retail runtime".into());
     }
@@ -339,6 +350,12 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
         return Some(
             "World geometry requires the experimental runtime and standard starting grid".into(),
         );
+    }
+    if root.get("singleMode").and_then(Value::as_bool) == Some(true) {
+        return Some("singleMode is outside the GPU lane".into());
+    }
+    if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) == Some(true) {
+        return Some("experimentalLaterStaminaMechanics is outside the GPU lane".into());
     }
     if (1..=race_exec::RACE_MAXR).contains(&horse_count) {
         None

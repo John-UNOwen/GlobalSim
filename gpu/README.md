@@ -1751,7 +1751,62 @@ as flat word streams, one header word per channel.
 The full lane refuses, by name at `full_reply::build` and by gate before the
 run: `singleMode`, `traceConservePower`, `experimentalLaterStaminaMechanics`
 and grid-mode races (the staggered roster ranks the snapshots read are
-grid-aware and stay compact-only).
+grid-aware and stay compact-only; wave 11 moved the `singleMode` and
+`experimentalLaterStaminaMechanics` refusals onto both lanes and ported the
+compact `traceConservePower` ignore, see "Wave-11 equivalence closures").
+
+## Wave-11 equivalence closures
+
+`tests/equivalence_gate.rs` pairs every GPU refusal with what the CPU engine
+does on the same request, so each refusal names the same construct the engine
+sees, and an engine error text appears verbatim in the gate.
+
+Effect kinds 33 and 34 have no `SkillType` variant: the engine's retail
+builder errors (`race_solver_builder.rs:513`, run error `skill 669331 detail
+0: unsupported effect type 33`), and the kernel refuses with a reason naming
+that missing variant (`skills_compile.rs:1018-1021`), on both lanes.
+
+Request shapes the engine itself errors on now get its text byte-equal from
+`prepare()` and `facade::gate_reasons`: non-boolean
+`experimentalRetailStartup`, `experimentalLaterStaminaMechanics` and
+`traceConservePower` (`lib.rs:343-349`), and every invalid `experimentalGrid`
+key. A 121-horse roster without a grid key is not an engine error: the engine
+runs it, the kernel refuses on its own capacity (`roster size outside the
+kernel's range`).
+
+The four wave-10 named refusals, each classified against the engine:
+
+- `singleMode` is an engine mode: the adjusted stats gain +400
+  (`race_solver_builder.rs:304-320`, `build_adjusted_stats_for_mode`) and the
+  reply gains `singleModeVersion` (`lib.rs:1127`), so the flag changes the
+  answer. A non-boolean value is ignored at parse (`lib.rs:342`), and that
+  ignore is ported: the full lane answers a `singleMode: 1.0` request
+  byte-equal to the engine. The `true` form is now refused on both lanes
+  ("singleMode is outside the GPU lane"); the compact lane had answered it
+  with the flag-off result, which the gate shows is not the engine's answer.
+- `traceConservePower` is an engine mode that only adds reply diagnostics:
+  `conservePowerDiagnosticVersion` and `conservePowerDiagnostics`
+  (`lib.rs:1115-1123`), and the rest of the engine reply is unchanged, so the
+  physics are identical. The engine also requires the retail runtime with it
+  on (`api.rs:58-59`) and errors on a non-boolean value (`lib.rs:349`), both
+  quoted in the gate. The compact lane accepts the flag as the ignore port
+  (those keys never reach the compact output; meta and packet equal the
+  flag-off output byte for byte), and the full lane refuses it by name.
+- `experimentalLaterStaminaMechanics` is an engine mode: it enables the
+  stamina keep, compete-before-spurt and secure-lead per-tick systems
+  (`race_solver.rs:2767,2948,2998`, `update_competition_mechanics:2746`) and
+  the reply echoes the flag (`lib.rs:1071`). The kernel models none of it, so
+  the `true` form is refused by name on both lanes.
+- Grid mode is engine-supported end to end: a 21-horse grid request runs and
+  the engine answers full, with `experimentalGridVersion` (`lib.rs:1137`).
+  The kernel runs grid compact bit-exactly and refuses only the full reply,
+  naming the staggered snapshot ranks.
+
+`gpu/SKILLS_DESIGN.md` gained "Non-retail runtime physics: wave-11 port-scope
+survey": a system-by-system diff of the engine's `step_all` classic path
+against the retail path the kernel ports, with authorities and cost. The
+verdict is a second solver, not a flag swap, so the non-retail refusal stays
+and the port needs a dedicated wave.
 
 Two engine rules surfaced while chasing byte equality and both were ports of
 the engine, not the engine's behavior changing:
@@ -1805,9 +1860,15 @@ The skill-side lists live in `SKILLS_DESIGN.md`.
   Settled by wave 10: the engine's whole non-compact reply carries no ground
   channel beyond that set, and the reply lane matches it byte for byte
 - Requests outside the full-reply lane, refused by name in
-  `full_reply::build` and gated before the kernel run: `singleMode`,
-  `traceConservePower` and `experimentalLaterStaminaMechanics`
-  (see "Wave-10 full replies")
+  `full_reply::build`: `traceConservePower` (the engine mode only adds reply
+  diagnostics, so the compact lane accepts it, see "Wave-11 equivalence
+  closures"). `singleMode: true` and `experimentalLaterStaminaMechanics:
+  true` are refused on both lanes by the run gate, and the `false` or
+  absent forms, which the engine runs identically to the ported retail mode,
+  answer normally
+- Non-retail runtime requests ("non-retail runtime"). Wave 11 scoped the
+  delta: it is a second solver, not a flag swap, so the port is deferred to a
+  dedicated wave (see `SKILLS_DESIGN.md`, "Non-retail runtime physics")
 
 
 ## Grid mode

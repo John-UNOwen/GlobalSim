@@ -736,3 +736,92 @@ tokens per race, and 16 candidates per reservation pass (an overflow raises the
 `FB_SKILL_SEQ` fallback, not a wrong
 fold). Overflow
 is a host `flagged("skill table overflow ...")`, never a kernel fault.
+
+## Non-retail runtime physics: wave-11 port-scope survey
+
+The kernel answers `experimentalRetailRuntime: true` requests only (the
+"non-retail runtime" refusal, `race_exec.rs`). A wave-11 survey scoped the
+engine's non-retail tick path against the retail path the kernel implements.
+The delta is not a set of formula swaps behind shared control flow: the
+non-retail lane is a second solver. `RaceField::step_all` branches on the
+retail config (`race_field.rs:291-295`) into `step_all_retail`
+(`race_field_retail.rs:182-346`), whose pass order (lane caches, duel
+proximity, skill-priority passes, blocking samples, movement with a shared
+roster, overlap commit, duel commit, field conditions) shares nothing with the
+classic pass order (per-runner `step_forward`, field `update`, lateral, field
+conditions, `race_field.rs:296-318`). `step_forward` itself branches at
+`race_solver.rs:1176`. The port needs a dedicated wave, and the kernel ships
+no partial non-retail lane.
+
+System-by-system diff, engine authority on each side, kernel site for the
+retail row (device code, `gpu/src/kernels/`):
+
+| system | retail (kernel implements) | non-retail (not implemented) | same or differs |
+| --- | --- | --- | --- |
+| tick order | `race_field_retail.rs:182-346`, kernel `race.cl` loop, `field_update` `retail_core.cl:2585` | `race_field.rs:291-318` | differs (different passes, shared-state timing) |
+| dt and time chain | 0.0666 f32, `lib.rs:581,939`, kernel `race_exec::loop_end` | `DT = 1/15` f64, `lib.rs:66,581,939` | differs |
+| visited set | every runner every tick (`lib.rs:876`) | only runners not finished and under the cap (`lib.rs:876`) | differs |
+| start lane | `starting_grid::retail_starting_lane:9` | `starting_grid::starting_lane:5` | differs |
+| frame 0 | captured (`lib.rs:855-864`) | none | differs |
+| forward integration | `step_forward_retail_with_roster` (`race_solver_retail.rs:976`), f32 observed-speed path | trapezoidal halfv with accel, pacer step, start-dash exit at 0.85 base speed with a -24 accel kick, min-speed floor (`race_solver.rs:1177-1223`) | differs |
+| max speed | `retail_current_speed` (`race_solver_retail.rs:729`), kernel `phys_maximum_spurt_speed` `retail_core.cl:721` | `get_max_speed` (`race_solver.rs:1156`) | differs |
+| target speed | `retail_physics::target_speed_with_late_terms` 371-402, kernel `phys_target_speed` `retail_core.cl:808` | `update_target_speed` (`race_solver.rs:1657-1688`): phase-table base plus section modifier, uphill/divide-power and downhill terms, lane-skill bonus, hp-empty override, clamp 13..30 | differs |
+| acceleration | `retail_physics::acceleration` 457-483, kernel `phys_base_acceleration`/`phys_acceleration_from_base` `retail_core.cl:841,855` | `apply_forces` (`race_solver.rs:1690-1701`): hp-empty -1.2, `PHASE_DECELERATION` [-1.2,-0.8,-1.0] (:90), `BASE_ACCEL`/`UPHILL_BASE_ACCEL` (:79-80) into the `base_accel` table (`calc_base_accel` :82, built at :1065 and :1334) | differs |
+| phase | init `phase` plus `retail_physics::phase_boundaries:9` (kernel `phys_phase_of_section` `retail_core.cl:765`) | `update_phase` (`race_solver.rs:1743-1751`) via `course_data::phase_start`, capped at 2 | differs |
+| last spurt | `retail_spurt::choose` (`retail_spurt.rs:53`), kernel `spurt_choose` `retail_core.cl:1301`, capture `race.cl:259-270` | `update_last_spurt_state` (`race_solver.rs:1639`) with the closed-form `hp_policy::get_last_spurt_pair` else-branch (`hp_policy.rs:301-330`) | differs |
+| HP | `retail_physics::initial_hp` 404, `hp_state_rate` 411, `hp_per_second` 429 (kernel `hp_state_rate` `retail_core.cl:1201`, `hp_tick` `retail_core.cl:1246`) | `hp_policy.rs:212` init (`0.8 * strategy coefficient * stamina + distance`), `get_status_modifier` 218-229, quadratic `hp_per_second` 231-242, f64 `recover`/`spend` :264 and :273 | differs |
+| hills | `retail_states::SlopeState/DownhillState` (kernel `slope_update`/`downhill_update` `retail_core.cl:1032,1168`) | `init_hills`/`update_hills`/`downhill_check` (`race_solver.rs:1129,1703-1741`) with one `hill_rng` Rule30CA stream per hill | differs |
+| rushing | `retail_states::RushingState` (kernel `rushing_choose_mode`/`rushing_step` `retail_core.cl:1084,1115`), mode drawn by init lottery | `update_kakari` (`race_solver.rs:1452-1466`): one roll at `kakari_start`, `rushing::select_mode` | differs |
+| position keep | `retail_position_keep.rs:245` (kernel `pace_update` `retail_core.cl:1440`) | `update_position_keep` with `PaceUpEx`, front-runner and non-nige variants and its own cooldown/interval clocks (`race_solver.rs:1468-1638`) | differs |
+| blocking | retail sampling pass `race_field_retail.rs:8-137` (kernel `lane_blocking_sample` `retail_core.cl:2415`), no speed cap (`race_solver.rs:1251`) | `update_blocking` (`race_solver.rs:1236-1263`) with the classic `front_blocker` scan and the `(0.988 + 0.012 * gap / 2)` current-speed cap | differs |
+| lane machine | `retail_lane.rs` machine (kernel `lane_*` `retail_core.cl:1579-2415`) | `update_lane`/`update_lane_target` (`race_solver.rs:1342,1272`) on `lane_selection.rs` (`collect_targets:11`, `passing_lane:34`) | differs |
+| near-lane timers | shared code `update_near_lane_timers` (`race_solver.rs:1416`) | same function, but its inputs (near counts, lanes) come from the classic field | same code, different inputs |
+| duel and spot | retail arms: `prepare_retail_duel_start:3045`, `activate_retail_duel:3194-3214`, retail `duel_low_hp` (`race_solver.rs:3045-3056`) | classic arms of the same functions (f64 guts formulas at `race_solver.rs:3205-3206`) | differs at the branches |
+| overtake timers | `retail_overtake_times_for` (`race_field.rs:321`) | `next_overtake_times` (`race_field.rs:339`) | differs |
+| finish | `pos > distance`, `retail_physics::finish_time:124` (kernel `phys_finish_time` `retail_core.cl:788`), `lib.rs:926-930` | `pos >= distance`, linear interpolation of the crossing step (`lib.rs:931-935`) | differs |
+| reply shape | version keys per runtime (`lib.rs:1127-1137`) | no `postFinishMovementVersion`, `singleModeVersion` only with single mode | differs |
+| condition reads | `parse_with_retail_runtime` picks the retail variants (`condition_parser.rs:170-183`), retail state reads in `activation_conditions.rs` | classic `Condition` reads of `s.phase`, `s.hp`, `s.visible` fields | differs (same condition names, different values) |
+| sampled triggers | retail initialization emits them and the parser consumes them (`condition_parser.rs:200-231`) | none exist | differs (sampled conditions must refuse) |
+| skill numbers | `retail_skill_value` and f32 duration (`race_solver_builder.rs:404-418`) | `modifier / 10000 * multiplier` and f64 duration (same lines, else branch) | differs |
+| skill pass | `process_skill_priority` with the retail field order (`race_field_retail.rs:230`) | `cache_skill_activations` per tick (`race_field.rs:318`) | differs (timing and order) |
+| rng | `RetailRandom` per-runner RUN substreams (`lib.rs:797`, kernel `rng_core.cl`) | shared `Rule30CARng` plus per-hill `hill_rng` streams (kernel already ports both streams, `rng_core.cl`, but not the classic draw schedule) | same engine, different schedule |
+
+What each block would need:
+
+- Solver core: a second tick driver mirroring `race_field.rs:296-318` plus a
+  classic forward pass (`race_solver.rs:1177-1223`), acceleration and target
+  speed (`:1657-1701`), phase (`:1743`), spurt transition (`:1639`), hills
+  (`:1703-1741`), kakari (`:1452`) and position keep (`:1468-1638`). Every
+  one of these is a different formula family from the retail equivalent the
+  kernel already ships, and the classic lane runs in f64 where the kernel's
+  physics is f32, so no kernel function is reusable as written.
+- HP: the classic `hp_policy` state (init `:212`, quadratic
+  `hp_per_second` `:231-242`, status table `:218-229`, f64 `recover`/`spend`
+  `:264` and `:273`) and the classic `get_last_spurt_pair` closed form
+  (`hp_policy.rs:301-330`).
+- Lane and field: the `lane_selection.rs` machine and target rules
+  (`race_solver.rs:1272-1415`) and the classic blocking scan with its speed
+  cap, replacing the retail `retail_lane.rs` sampling the kernel ports.
+- Skill domain: the classic effect-value chain (`race_solver_builder.rs:414,
+  416` else-branches), the non-retail condition reads for `phase`,
+  `distance_rate`, `remain_distance`, `furlong`, `corner` and `slope`
+  (`condition_parser.rs:170-183`), a refusal policy for sampled-trigger
+  conditions (no sampler exists), and the classic duel/spot arms
+  (`race_solver.rs:3045-3056,3205-3206`).
+- Host and domain: non-retail dt `1/15` with its finish interpolation
+  (`lib.rs:931-935`), the visited-set loop (`lib.rs:876`), classic start
+  lanes (`starting_grid::starting_lane:5`), no frame 0, and the classic reply
+  keys. Domain gates would invert: the retail flag refuses instead.
+- Gates: every construct gate (waves 1 to 10) re-instantiated on the classic
+  lane, since none of them exercises non-retail bytes today.
+
+Cost: the retail core is `retail_core.cl` (5,523 lines) plus `race.cl` (1,431)
+plus the init and rng domains, delivered across waves 2 through 10. The
+non-retail port is a solver of the same order of magnitude with the same test
+surface on top, roughly the effort of waves 4 through 10 again, and it lands
+independent of the retail core. One dedicated wave cannot close it honestly,
+so the refusal stays and this section is the wave-11 deliverable.
+
+Zero-skill and geometry requests inherit the same verdict: the physics and
+lane rows above carry them too.
+

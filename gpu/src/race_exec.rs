@@ -701,6 +701,19 @@ fn prepare(
     if horses.is_empty() || horses.len() > RACE_MAXR {
         return flagged("roster size outside the kernel's range");
     }
+    // The engine rejects non-boolean values for the two experimental keys at
+    // parse time, ahead of every runtime check (lib.rs:343-349). Quoting its
+    // messages keeps a shape it rejects flagged here with byte-equal text.
+    if let Some(value) = root.get("experimentalLaterStaminaMechanics") {
+        if value.as_bool().is_none() {
+            return flagged("experimentalLaterStaminaMechanics must be a boolean.");
+        }
+    }
+    if let Some(value) = root.get("traceConservePower") {
+        if value.as_bool().is_none() {
+            return flagged("traceConservePower must be a boolean");
+        }
+    }
     // The engine enables the startup pass when the flag is true and the
     // runtime is retail (lib.rs:1507-1513). The kernel replays it as one dt=0
     // tick ahead of the frame-0 capture. A non-boolean flag errors the CPU.
@@ -717,6 +730,15 @@ fn prepare(
     // The engine refuses geometry with grid starts (api.rs:68-71).
     if grid && root.get("experimentalRetailGeometry").and_then(Value::as_bool) == Some(true) {
         return flagged("World geometry requires the experimental runtime and standard starting grid");
+    }
+    // Engine-supported modes the kernel does not port (single-mode +400 stat
+    // bonus, later-stamina per-tick mechanics, race_solver.rs:2751-2756).
+    // Refusing names them, so no compact race gets a flag-off answer.
+    if root.get("singleMode").and_then(Value::as_bool) == Some(true) {
+        return flagged("singleMode is outside the GPU lane");
+    }
+    if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) == Some(true) {
+        return flagged("experimentalLaterStaminaMechanics is outside the GPU lane");
     }
     let mut ri = vec![0u32; RI_STRIDE];
     let mut pd = vec![0f64; RIL_STRIDE];
