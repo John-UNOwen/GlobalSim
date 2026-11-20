@@ -1912,8 +1912,8 @@ The skill-side lists live in `SKILLS_DESIGN.md`.
   answer normally
 - Non-retail (classic) requests the classic kernel does not port, each refused
   by name in `classic_exec::prepare` and in `facade::gate_reasons`: any
-  non-empty `skills` ("skills belong to the retail kernel lane", classic skills
-  land in wave 12b), `experimentalGrid` starts, `singleMode`,
+  non-empty `skills` ("the classic kernel does not run skills"),
+  `experimentalGrid` starts, `singleMode`,
   `experimentalLaterStaminaMechanics`, `traceConservePower`, the legacy
   `retailRuntime` key, `experimentalRetailGeometry`, a roster beyond
   `CLS_MAXR` (120), a course with more than `CLS_MAX_SLOPES` (16) slopes, and a
@@ -1922,6 +1922,16 @@ The skill-side lists live in `SKILLS_DESIGN.md`.
   GPU lane. The classic refusals that need the course table (slope count,
   adjusted raw power) run at prepare time, so `gate_reasons` alone does not
   name them
+
+Wave 12b landed the classic compiler profile (`skills_compile::plan_classic`):
+the classic effect-value chain (`modifier / 10000 * multiplier`) and duration
+(`base_duration / 10000`), and the refusal of sampled triggers and live-state
+condition leaves by name, gated in `tests/classic_folds.rs`. The classic kernel
+skill pass (the priority walk, cooldown and window bookkeeping, the classic duel
+and spot skill arms), the classic `skillEvents`, detail, target and additional
+event arrays, and the asitame conserve-power release (the release scan, its
+release clock and the `conservePowerEvents` channel) are not in the classic
+kernel, so classic skills and asitame rosters stay refused end to end.
 
 
 ## Grid mode

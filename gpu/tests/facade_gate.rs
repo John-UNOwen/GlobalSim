@@ -489,7 +489,7 @@ fn gate_reasons_names_every_refusal() {
     let classic_skills = r#"{"courseId":10504,"horses":[{"skills":[1]}]}"#;
     assert_eq!(
         facade::gate_reasons(classic_skills, Some(&accepted)).as_deref(),
-        Some("skills belong to the retail kernel lane")
+        Some("the classic kernel does not run skills")
     );
     let classic_grid = format!(
         "{{\"courseId\":10504,\"experimentalGrid\":{{\"columns\":20,\"rowSpacing\":3}},\"horses\":[{}]}}",

@@ -371,7 +371,7 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         return Ok(flagged(n, "conserve-power tracing is not in the classic kernel".into()));
     }
     if horses.iter().any(|h| h.get("skills").and_then(Value::as_array).is_some_and(|s| !s.is_empty())) {
-        return Ok(flagged(n, "skills belong to the retail kernel lane".into()));
+        return Ok(flagged(n, "the classic kernel does not run skills".into()));
     }
     if n == 0 || n > CLS_MAXR {
         return Ok(flagged(n, "roster size outside the kernel's range".into()));
@@ -454,7 +454,7 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         // The injected asitame arms on the mood and rank adjusted power, not on
         // the request's power field (race_solver_builder.rs:802 and :295).
         if f64::from_bits(stats.raw_power) > 1200.0 {
-            return Ok(flagged(n, "asitame release (adjusted raw power above 1200) lands in wave 12b".into()));
+            return Ok(flagged(n, "asitame release (adjusted raw power above 1200) needs the classic conserve-power release scan".into()));
         }
         let [speed, stamina, power, guts, wisdom] = stats.adjusted_f64();
 

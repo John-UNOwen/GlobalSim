@@ -11,6 +11,17 @@
 
 use crate::json::Value;
 
+/// Which runtime the table targets. The classic runtime has no sampled-term
+/// sampler and its kernel carries no live-state condition readers, so the
+/// classic profile keeps the constant and course-region leaves, takes the
+/// classic effect-value chain, and refuses a live-state or sampled leaf by name.
+/// The table layout is shared across both lanes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    Retail,
+    Classic,
+}
+
 pub const SK_STRIDE: usize = 55872;
 
 pub const SK_NREC: usize = 0;
@@ -190,6 +201,17 @@ pub struct SkillsPlan {
 }
 
 pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
+    plan_lane(root, course, Lane::Retail)
+}
+
+/// Compile against the classic (non-retail) runtime profile: the classic
+/// effect-value chain and durations, with sampled and live-state condition
+/// leaves refused by name.
+pub fn plan_classic(root: &Value, course: &Value) -> SkillsPlan {
+    plan_lane(root, course, Lane::Classic)
+}
+
+fn plan_lane(root: &Value, course: &Value, lane: Lane) -> SkillsPlan {
     let mut c = Compiler {
         words: vec![0; SK_STRIDE],
         tags: Vec::new(),
@@ -203,6 +225,7 @@ pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
         nterm: 0,
         narm: 0,
         team_stats: Vec::new(),
+        lane,
     };
     let skill_data = match root.get("skillData") {
         Some(v) => v,
@@ -298,6 +321,7 @@ struct Compiler {
     // The engine's per-runner team stat totals (lib.rs PreparedRoster::new,
     // the retail_runtime branch), read by the value_usage 3 to 7 tier fold.
     team_stats: Vec<[f64; 5]>,
+    lane: Lane,
 }
 
 fn f64_words(v: f64) -> [u32; 2] {
@@ -568,6 +592,9 @@ impl Compiler {
                     return;
                 }
             };
+            if self.lane == Lane::Classic && self.classic_refuses_leaf(sid, &terms, &leaves) {
+                return;
+            }
             if leaves.iter().any(|l| leaf_feat(l) == FEAT_VREMAIN) {
                 self.words[SK_VIDX] = statics.viewer.unwrap_or(0) as u32;
             }
@@ -603,6 +630,11 @@ impl Compiler {
                             return;
                         }
                     };
+                if self.lane == Lane::Classic
+                    && self.classic_refuses_leaf(sid, &pre_terms, &pre_leaves)
+                {
+                    return;
+                }
                 if pre_leaves.iter().any(|l| matches!(l, Leaf::Sampled)) {
                     self.unsupported(format!(
                         "skill {sid} precondition random term is not ported"
@@ -957,12 +989,15 @@ impl Compiler {
                 return;
             }
             let eff_base = self.neff;
-            // The engine keeps the raw scaled value in f64 and rounds to f32 only
-            // where the duration is consumed, so the table stores the f64 product.
-            // race_solver_builder.rs:416-418 retail branch: the ms conversion
-            // runs in f32 with the rounded 0.0001 constant.
+            // Retail folds the ms conversion in f32 with the rounded 0.0001
+            // constant (race_solver_builder.rs:416-418 retail branch). The
+            // classic else-branch scales the raw ms in plain f64 (:418 else).
             let base_ms = alt.get("baseDuration").and_then(Value::as_f64).unwrap_or(0.);
-            let base_duration = ((base_ms as f32) * 0.0001_f32) as f64;
+            let base_duration = if self.lane == Lane::Classic {
+                base_ms / 10000.0
+            } else {
+                ((base_ms as f32) * 0.0001_f32) as f64
+            };
             // The engine's `as f64 as i32` cast, so a wire value past i32 reads
             // the same tier on both sides (src/lib.rs:179-187). duration_usage
             // 4 extends the running instance on an overtake (race_solver.rs:2655).
@@ -1092,7 +1127,12 @@ impl Compiler {
                     Some(Some(m)) => m,
                     _ => level_multiplier(kind, level),
                 };
-                let modifier = self.value_fold(runner, horse, value_usage, retail_skill_value(raw, multiplier));
+                let base_value = if self.lane == Lane::Classic {
+                    classic_skill_value(raw, multiplier)
+                } else {
+                    retail_skill_value(raw, multiplier)
+                };
+                let modifier = self.value_fold(runner, horse, value_usage, base_value);
                 // Mid-race guts fires move the live accumulator and field, and
                 // every guts-derived powf term (the spurt maximum, the duel and
                 // spot entry words) then recomputes from the field at read
@@ -1240,6 +1280,30 @@ impl Compiler {
         }
     }
 
+    /// The classic runtime has no sampled-term sampler and its kernel reads
+    /// only constant and course-region condition state, so a sampled or
+    /// live-state leaf refuses the skill by name. Returns true when a reason
+    /// was set.
+    fn classic_refuses_leaf(&mut self, sid: &str, terms: &[Term], leaves: &[Leaf]) -> bool {
+        for (t, leaf) in terms.iter().zip(leaves) {
+            if matches!(leaf, Leaf::Sampled) {
+                self.unsupported(format!(
+                    "skill {sid} condition term '{}' is a sampled trigger: no sampler exists in the classic runtime",
+                    t.name
+                ));
+                return true;
+            }
+            if matches!(leaf, Leaf::Dynamic { .. } | Leaf::RegionDyn(..)) {
+                self.unsupported(format!(
+                    "skill {sid} condition term '{}' reads live runtime state with no reader in the classic kernel",
+                    t.name
+                ));
+                return true;
+            }
+        }
+        false
+    }
+
     /// `prepare()`'s value_usage tiers (race_solver_builder.rs:908-939),
     /// folded into the level-resolved modifier. Every compiled race runs with
     /// runtime_phase true (the host flags the rest), so the f32 round trip and
@@ -1315,6 +1379,13 @@ fn retail_skill_value(raw: f64, multiplier: f64) -> f64 {
         multiplier as f32
     };
     ((raw as f32 * 0.0001_f32) * coefficient) as f64
+}
+
+/// The classic (non-retail) `build_skill_effects` else-branch
+/// (race_solver_builder.rs:415): the master coefficient scales the raw value
+/// through the multiplier in plain f64, no f32 round trip.
+fn classic_skill_value(raw: f64, multiplier: f64) -> f64 {
+    raw / 10000.0 * multiplier
 }
 
 // Source-pinned mirrors of the vendored stat chain the team totals and the

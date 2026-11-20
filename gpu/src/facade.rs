@@ -10,7 +10,7 @@
 //!
 //! Two kernel lanes share this facade. A request carrying any retail flag runs
 //! the retail kernel, the rest run the classic kernel, which takes zero-skill
-//! races and refuses skills until wave 12b.
+//! races and refuses skills until its own skill pass lands.
 
 use crate::json::Value;
 use crate::{classic_exec, race_exec, replay_packet};
@@ -595,7 +595,7 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
                 })
             });
         if skilled {
-            return Some("skills belong to the retail kernel lane".into());
+            return Some("the classic kernel does not run skills".into());
         }
         if (1..=classic_exec::CLS_MAXR).contains(&horse_count) {
             None
