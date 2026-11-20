@@ -708,11 +708,18 @@ construct (for example `'lane_type' is not ported`, or `skill 200333
 duration_usage 4 extends type 12's per-fire aux entry, which the kernel keeps as
 one presence cell per runner`). The kernel never sees a table it cannot run.
 
-One limit is measured rather than refused: a cross-target `additionalActivate`
-fan that several hosts refan at once drifts off the engine, on two of the three
-seeds the scene runs and from tick 525 on, while the single-fire fan shapes stay
-bit-exact. See `fan_churn_tracks_the_engine` in `tests/wave9_gate.rs`, kept
-ignored as a standing reproduction until the drift is pinned.
+The cross-target `additionalActivate` fan follows the engine's prepare order in
+two ways the single-fire shapes never reach. Retail delivery is inline
+(`race_field.rs:472-477`) and runs inside the host's own prepare pass, so a
+receiver whose roster index is above the host's has not yet stepped its timers
+that tick: `aa_apply` gives such a copy its first f32 timer step at delivery
+(`race_field_retail.rs:221-225`, `race_solver_retail.rs:825-827`), and the copy
+expires one tick before an identical copy delivered to a lower-indexed
+receiver. The three-delivery cap is per running instance: the fire path zeroes
+`SKR_AA_COUNT` when it creates the instance, mirroring the fresh `delayed`
+counters each activation builds (`race_solver.rs:2474, 2525`).
+`fan_churn_tracks_the_engine` in `tests/wave9_gate.rs` and the ten-seed sweep
+in `tests/wave9_fan_trace.rs` pin both.
 
 ## Bounds (enforced host-side before launch)
 

@@ -25,7 +25,8 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     // Wave 9c grew the record state 20 to 24 words per record (plus 3840),
     // the double block 2 more stat columns (plus 1920) and the record double
     // block 148 to 276 for four-arm window chains (plus 122880).
-    assert_eq!(re::SCR_U_WORDS, 483636);
+    // The fan hunt journal adds 16384 words plus the tick mirror (plus 16385).
+    assert_eq!(re::SCR_U_WORDS, 500021);
     assert_eq!(re::SRL_WORDS, 356840);
     // Input and status strides track RACE_MAXR.
     assert_eq!(re::RI_STRIDE, 1592);

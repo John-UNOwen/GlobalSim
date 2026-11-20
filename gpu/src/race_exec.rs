@@ -39,7 +39,10 @@ const SK_RUNN: usize = 8;
 const SK_AAP: usize = SK_STAGED + 2 * SK_RMAX;
 const SK_RUN: usize = SK_AAP + SK_AAPN * SK_AAPW;
 const SK_VVAL: usize = SK_RUN + RACE_MAXR * (1 + SK_RUNN);
-pub const SCR_U_WORDS: usize = SK_VVAL + SK_RMAX * 16;
+// Diagnostics mirror of the kernel's free-form additionalActivate journal.
+pub const SK_JRN0: usize = SK_VVAL + SK_RMAX * 16;
+pub const SK_JRN_N: usize = 16384;
+pub const SCR_U_WORDS: usize = SK_JRN0 + SK_JRN_N + 1;
 pub const SRL_SKD: usize = SRL_HP_OUT_L + RACE_MAXR * OOL;
 pub const SRL_WORDS: usize = SRL_SKD + SK_RMAX * SKD_STRIDE;
 pub const DT: f32 = 0.0666;
@@ -236,6 +239,8 @@ pub struct RaceGpu {
 pub struct SkillScratch {
     pub skd: Vec<f64>,
     pub sks: Vec<u32>,
+    /// Raw ten-word journal records, the kernel's SK_JRN window contents.
+    pub journal: Vec<u32>,
 }
 
 pub struct RaceRun {
@@ -1392,9 +1397,12 @@ impl RaceContext {
                 if race.debug_scratch {
                     let d = (slot - 1) * SRL_WORDS + SRL_SKD;
                     let u = (slot - 1) * SCR_U_WORDS + SCR_SK;
+                    let j = (slot - 1) * SCR_U_WORDS + SK_JRN0;
+                    let jc = (sks_all[j] as usize).min(SK_JRN_N - 9);
                     out.debug_sk = Some(SkillScratch {
                         skd: skd_all[d..d + SK_RMAX * SKD_STRIDE].to_vec(),
                         sks: sks_all[u..u + SK_RMAX * SKR_STRIDE].to_vec(),
+                        journal: sks_all[j + 1..j + 1 + jc].to_vec(),
                     });
                 }
                 out.finish_step = read_f64(st, ST_FINISH0);

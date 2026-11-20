@@ -415,6 +415,8 @@ static int race_tick(__global uint* scr, __global uint* si, __global float* sf,
     const uint snap, const int tick, const double course_distance,
     const float dist_f, const double section_length, const float pace_end_f,
     const float pm_range, const int pm_notfwd, const float dt) {
+    // Diagnostics mirror: the journal helper stamps events with this tick.
+    scr[SK_JRN_T] = (uint)tick;
     // Rows over the pre-movement state: the last-straight flags feed the
     // duel collect and the duel entry test.
     uint any_straight = 0u;
@@ -1156,6 +1158,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
     // their duration timers take the tick-0 step. Records armed in the loop's
     // first pass run every effect duration one tick long.
     if (sk_on) {
+        scr[SK_JRN_T] = 0u;
         skills_scan(skt, sks, skd, scr, si, sd, shl, rs, pd, sf,
             course_distance, 1, n, dist_f, 1, ev, st, bank, paired);
         skills_scan(skt, sks, skd, scr, si, sd, shl, rs, pd, sf,

@@ -18,6 +18,10 @@ pub struct CpuRace {
     /// Skill activations as the reply reports them: (horse, skillId,
     /// detailIndex, t). t is the accumulatetime at the fire pass.
     pub detail_events: Vec<(usize, i64, i64, f64)>,
+    /// Engine-side `additionalTargetEvents`: one entry per own-perspective
+    /// additionalActivate application, (horse, skillId, t, per-effect
+    /// receiver lists). The reply records the receivers the delivery took.
+    pub additional_events: Vec<(usize, i64, f64, Vec<Vec<usize>>)>,
 }
 
 /// The engine's own binary-lane output for one race: the full reply text as
@@ -112,5 +116,40 @@ pub fn run_cpu_race(request: &str, seed: i64) -> Result<CpuRace, String> {
     let finishers = decoded
         .last()
         .map_or(0, |last| last.iter().filter(|row| row[0] >= distance).count());
-    Ok(CpuRace { frames: decoded, runners, finishers, finish_times, detail_events })
+    let additional_events = json::parse(&reply)?
+        .get_array("additionalTargetEvents")?
+        .iter()
+        .map(|row| {
+            let targets = row
+                .get_array("abilityTargets")?
+                .iter()
+                .filter_map(|selection| match selection {
+                    json::Value::Array(indices) => Some(
+                        indices
+                            .iter()
+                            .map(|index| {
+                                index.as_f64().ok_or_else(|| "target index is not a number".to_string())
+                                    .map(|value| value as usize)
+                            })
+                            .collect::<Result<Vec<usize>, String>>(),
+                    ),
+                    _ => None,
+                })
+                .collect::<Result<Vec<Vec<usize>>, String>>()?;
+            Ok((
+                row.get_f64("horseIndex")? as usize,
+                row.get_f64("skillId")? as i64,
+                row.get_f64("t")?,
+                targets,
+            ))
+        })
+        .collect::<Result<Vec<(usize, i64, f64, Vec<Vec<usize>>)>, String>>()?;
+    Ok(CpuRace {
+        frames: decoded,
+        runners,
+        finishers,
+        finish_times,
+        detail_events,
+        additional_events,
+    })
 }

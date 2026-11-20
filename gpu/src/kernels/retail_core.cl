@@ -444,7 +444,14 @@
 // One f64 per effect slot of every record: the value each queued application
 // registered, the number every fold reads.
 #define SK_VVAL (SCR_SK_WORDS)
-#define SCR_U_WORDS (SK_VVAL + SK_RMAX * 16)
+// Diagnostics only, free-form per wave: the additionalActivate traffic
+// journal (word 0 the used word count, then ten-word records) plus the tick
+// mirror race_tick writes. No layout meaning beyond the scratch total that
+// tests/layout.rs pins.
+#define SK_JRN (SK_VVAL + SK_RMAX * 16)
+#define SK_JRN_N 16384
+#define SK_JRN_T (SK_JRN + SK_JRN_N)
+#define SCR_U_WORDS (SK_JRN_T + 1)
 
 // Per-race scratch f64, one RACE_MAXR-wide column per slot (field base +
 // runner index). Array fields keep RACE_MAXR slots per element:
@@ -3794,6 +3801,37 @@ static void aa_remove(__global uint* scr, const int r, const int slot) {
     list[0] = (uint)(len - 1);
 }
 
+// Journal one additionalActivate pool event: op tag, the tick mirror, four
+// uint fields, two f64 fields. Appends stop silently once the fixed window
+// is full, so diagnostics never change a race or a fallback.
+#define SK_JRN_FIRE 1u   // a=rec b=runner c=n_eff d=aa_any|2*ext4, e1=run timer e2=clock
+#define SK_JRN_FAN 2u    // a=pidx b=host c=recv d=meta, e1=value e2=timer
+#define SK_JRN_DIE 3u    // a=pidx b=holder (all when none) c=kind, e1=timer
+#define SK_JRN_RETIRE 4u // a=rec b=runner, e1=run timer
+#define SK_JRN_FLIP 5u   // a=rec b=runner, e1=cooldown timer
+#define SK_JRN_EXT 6u    // a=pidx b=owner c=take, e1=new timer
+static void sk_jrn(__global uint* scr, const uint op, const uint a, const uint b,
+    const uint c, const uint d, const double e1, const double e2) {
+    const uint w = scr[SK_JRN];
+    if (w + 11u > (uint)SK_JRN_N) {
+        return;
+    }
+    __global uint* at = scr + SK_JRN + 1u + w;
+    at[0] = op;
+    at[1] = scr[SK_JRN_T];
+    at[2] = a;
+    at[3] = b;
+    at[4] = c;
+    at[5] = d;
+    const ulong v1 = as_ulong(e1);
+    const ulong v2 = as_ulong(e2);
+    at[6] = (uint)v1;
+    at[7] = (uint)(v1 >> 32);
+    at[8] = (uint)v2;
+    at[9] = (uint)(v2 >> 32);
+    scr[SK_JRN] = w + 10u;
+}
+
 // retire_finished_running_skills over one runner, scanning the same way the
 // engine's index loop does while removals shift the tail.
 static int aa_retire(__global const uint* sk, __global uint* sks,
@@ -3819,6 +3857,8 @@ static int aa_retire(__global const uint* sk, __global uint* sks,
             si[SI_AANU + r] -= 1u;
             rs[SKR_AA_UNAPPLIED] = 0u;
         }
+        sk_jrn(scr, SK_JRN_RETIRE, (uint)rec, (uint)r, 0xFFFFFFFFu, 0xFFFFFFFFu,
+            skd[SKD_STRIDE * rec + SKD_RUN_T], 0.0);
         aa_remove(scr, r, k);
         retired = 1;
     }
@@ -3830,7 +3870,7 @@ static int aa_retire(__global const uint* sk, __global uint* sks,
 // cooldown once the instance duration ran out and no running activation of
 // it is still open (race_solver.rs:2418-2435).
 static void aa_flip(__global const uint* sk, __global uint* sks,
-    __global double* skd, const int r, const float dist_f) {
+    __global double* skd, __global uint* scr, const int r, const float dist_f) {
     const int nrec = (int)sk[SK_NREC];
     for (int rec = 0; rec < nrec; rec++) {
         __global uint* rs = sks + SKR_STRIDE * rec;
@@ -3848,6 +3888,8 @@ static void aa_flip(__global const uint* sk, __global uint* sks,
         const double cd = as_double((ulong)rd[13] | ((ulong)rd[14] << 32));
         wd[SKD_COOLDOWN] = -(double)(convert_float_rte(cd) * (dist_f / 1000.0f));
         rs[SKR_STATE] = (uint)SK_S_COOLDOWN;
+        sk_jrn(scr, SK_JRN_FLIP, (uint)rec, (uint)r, 0xFFFFFFFFu, 0xFFFFFFFFu,
+            wd[SKD_COOLDOWN], 0.0);
     }
 }
 
@@ -3874,7 +3916,7 @@ static int sk_targets(__global const uint* si, __global const uint* rs,
 static void aa_apply(__global const uint* sk, __global uint* scr, __global uint* si,
     __global const uint* rs, __global double* sd, __global uint* st, __global uint* bank,
     const int paired, const int n, const int r, const int rec, const int slot,
-    const double duration) {
+    const double duration, const float dt) {
     __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
     const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * ((int)rd[6] + slot);
     const int kind = (int)ef[0];
@@ -3910,9 +3952,19 @@ static void aa_apply(__global const uint* sk, __global uint* scr, __global uint*
     // new_skill_timer rounds the override to f32 first and maps a negative
     // duration to the permanent sentinel.
     const double d = (double)convert_float_rte(duration);
-    const ulong tbits = as_ulong(d < 0.0 ? -INFINITY : -d);
     for (int q = 0; q < nrecv; q++) {
         const int j = outs[q];
+        double t = d < 0.0 ? -INFINITY : -d;
+        if (j > r) {
+            // Retail delivery lands in the receiver's timer map while the
+            // host's own history runs (race_field.rs:472-477). A receiver
+            // with a higher roster index has not had its prepare pass step
+            // that map yet this tick, so the copy takes its first f32 timer
+            // step on the delivery tick itself (race_field_retail.rs:221-225,
+            // race_solver_retail.rs:825-827).
+            t = (double)(convert_float_rte((float)t) + dt);
+        }
+        const ulong tbits = as_ulong(t);
         const int pidx = aa_pool_alloc(scr);
         if (pidx < 0) {
             st[ST_FALLBACK] = 1u;
@@ -3930,6 +3982,9 @@ static void aa_apply(__global const uint* sk, __global uint* scr, __global uint*
             pool[0] = 0u;
             st[ST_FALLBACK] = 1u;
             st[ST_ARG] = FB_SKILL_SEQ;
+        } else {
+            sk_jrn(scr, SK_JRN_FAN, (uint)pidx, (uint)r, (uint)j,
+                SK_TOK_EFF((uint)rec, (uint)slot), modifier, t);
         }
     }
 }
@@ -3940,7 +3995,7 @@ static void aa_apply(__global const uint* sk, __global uint* scr, __global uint*
 static void aa_event1(__global const uint* sk, __global uint* sks,
     __global double* skd, __global uint* scr, __global uint* si, __global const uint* rs,
     __global double* sd, __global uint* st, __global uint* bank, const int paired,
-    const int n, const int r) {
+    const int n, const int r, const float dt) {
     __global uint* list = scr + SK_RUN + r * (1 + SK_RUNN);
     const int len = (int)list[0];
     int a_rec[16];
@@ -3977,7 +4032,8 @@ static void aa_event1(__global const uint* sk, __global uint* sks,
         }
     }
     for (int a = 0; a < na; a++) {
-        aa_apply(sk, scr, si, rs, sd, st, bank, paired, n, r, a_rec[a], a_slot[a], a_dur[a]);
+        aa_apply(sk, scr, si, rs, sd, st, bank, paired, n, r, a_rec[a], a_slot[a], a_dur[a],
+            dt);
     }
 }
 
@@ -4043,10 +4099,13 @@ static void aa_turns(__global const uint* sk, __global uint* sks,
         }
     }
     for (int a = 0; a < na; a++) {
-        aa_apply(sk, scr, si, rs, sd, st, bank, paired, n, r, a_rec[a], a_slot[a], a_dur[a]);
+        // Turn deliveries run after every runner's prepare pass for the tick,
+        // so no receiver's timer map is still un-stepped in front of them.
+        aa_apply(sk, scr, si, rs, sd, st, bank, paired, n, r, a_rec[a], a_slot[a], a_dur[a],
+            0.0f);
     }
     if (aa_retire(sk, sks, skd, si, scr, sd, r)) {
-        aa_flip(sk, sks, skd, r, dist_f);
+        aa_flip(sk, sks, skd, scr, r, dist_f);
     }
 }
 
@@ -4073,8 +4132,18 @@ static void aa_pool_step(__global uint* scr, const float dt, const int n) {
             continue;
         }
         const int kind = (int)pool[1];
+        int gone = 0;
         for (int j = 0; j < n; j++) {
-            sk_seq_remove(sk_seq(scr, kind) + j * SK_SEQN, tok);
+            if (sk_seq_find(sk_seq(scr, kind) + j * SK_SEQN, tok) >= 0) {
+                sk_seq_remove(sk_seq(scr, kind) + j * SK_SEQN, tok);
+                sk_jrn(scr, SK_JRN_DIE, (uint)p, (uint)j, (uint)kind, 0xFFFFFFFFu,
+                    t, 0.0);
+                gone = 1;
+            }
+        }
+        if (gone == 0) {
+            sk_jrn(scr, SK_JRN_DIE, (uint)p, 0xFFFFFFFFu, (uint)kind, 0xFFFFFFFFu,
+                t, 0.0);
         }
         pool[0] = 0u;
     }
@@ -4161,6 +4230,8 @@ static void aa_extend(__global const uint* sk, __global uint* sks,
                         const ulong bits = as_ulong(t);
                         pool[4] = (uint)bits;
                         pool[5] = (uint)(bits >> 32);
+                        sk_jrn(scr, SK_JRN_EXT, (uint)pidx, (uint)r, (uint)take,
+                            0xFFFFFFFFu, t, 0.0);
                     }
                 } else {
                     __global double* ewd = skd + SKD_STRIDE * er;
@@ -4272,11 +4343,11 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
         aa_retire(sk, sks, skd, si, scr, sd, r);
         si[SI_PENDN + r] = 0u;
         for (int q = 0; q < np; q++) {
-            aa_event1(sk, sks, skd, scr, si, rs, sd, st, bank, paired, n, r);
+            aa_event1(sk, sks, skd, scr, si, rs, sd, st, bank, paired, n, r, dt);
         }
     }
     for (int r = 0; r < n; r++) {
-        aa_flip(sk, sks, skd, r, dist_f);
+        aa_flip(sk, sks, skd, scr, r, dist_f);
     }
 }
 
@@ -4736,11 +4807,21 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
         // behind with a delayed effect or a duration_usage 4 effect, and it
         // carries its own timer, which an overtake extends
         // (race_solver.rs:2650-2660).
-        sks[SKR_STRIDE * rec + SKR_AA_RUN] = 1u;
+        __global uint* rs = sks + SKR_STRIDE * rec;
+        rs[SKR_AA_RUN] = 1u;
+        // Each new instance carries fresh zero delivery counters, so the cap
+        // applies per instance and the counters must be zeroed here, the one
+        // point where the kernel knows the record belongs to this runner
+        // (race_solver.rs:2474, 2525).
+        for (int w = SKR_AA_COUNT; w < SKR_STRIDE; w++) {
+            rs[w] = 0u;
+        }
         if (!aa_push(scr, r, rec)) {
             st[ST_FALLBACK] = 1u;
             st[ST_ARG] = FB_SKILL_SEQ;
         }
+        sk_jrn(scr, SK_JRN_FIRE, (uint)rec, (uint)r, (uint)n_eff,
+            (uint)(aa_any + 2 * ext4), wd[SKD_RUN_T], sd[SD_CLOCK + r]);
     }
     const int phase = (int)si[SI_PHASE + r];
     if (phase == 0) {

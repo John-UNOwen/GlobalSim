@@ -1437,19 +1437,19 @@ fan under du4), each beside a 669141 carrier that lifts the field; 669201 to
 behind and visible windows and the same-team drop; 669301 to 669305 for
 `value_usage` 15, 0, 16, -2 and 2147483647.
 
-`wave9_gate` also holds one ignored scene, `fan_churn_tracks_the_engine`: six
-hosts refanning one cross-target `additionalActivate` 1 effect every 9 s. It
-diverges from the CPU engine on two of the gate's three seeds, at tick 525
-runner 6 (seed 1) and tick 1086 runner 4 (seed 3), `pos` 3.7e-4 m and 2.4e-4 m
-apart, while every single-fire fan shape above stays bit-exact. A scratch sweep
-over seeds 1 to 5 of the same field showed four of five diverging. The cause is
-not pinned. Two candidate mechanisms were checked and are not it: the pool's f32
-rounding of the registered value (it matches `register(token, modifier as f32)`,
-`retail_physics.rs:549`) and the entry order of a receiver's list (both sides
-append and compact stably). What is left standing is one copy's expiry landing a
-tick apart from the engine's and the 128-entry pool arena reused across
-overlapping receivers. Treat a cross-target `additionalActivate` fan that several
-hosts refan at once as unverified until that scene goes green.
+`wave9_gate` also holds `fan_churn_tracks_the_engine`: six hosts refanning one
+cross-target `additionalActivate` 1 effect on short cooldowns, over a pool that
+holds one entry per receiver per delivery. The scene pins two pool semantics
+the single-fire shapes never exercise. Retail delivery is inline
+(`race_field.rs:472-477`) inside the host's own prepare pass, so a receiver
+whose roster index is above the host's has not yet stepped its timers that
+tick: the kernel gives such a copy its first f32 timer step at delivery
+(`race_field_retail.rs:221-225`, `race_solver_retail.rs:825-827`), and the copy
+expires one tick before an identical copy delivered to a lower-indexed
+receiver. The three-delivery cap counts per running instance, so the fire path
+zeroes the delivery counters when it creates the instance, mirroring the fresh
+`delayed` counters each activation builds (`race_solver.rs:2474, 2525`). A
+ten-seed frame sweep of the same field runs in `tests/wave9_fan_trace.rs`.
 
 Sharp edges: the demerit classification of a turn's fan reads the wire modifier
 (`race_solver.rs:2482`) while the direct-fire path classifies from the drawn

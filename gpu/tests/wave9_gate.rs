@@ -499,16 +499,16 @@ fn wave9_value_usage_passthrough_bit_exact() {
     );
 }
 
-/// Six hosts refanning one cross-target additionalActivate 1 effect every nine
-/// seconds. The pool holds one entry per receiver per delivery, so a receiver
-/// carries dozens at once. The kernel and the engine then part ways on four of
-/// the five seeds this scene was run over, first within 28 s of race time (seed
-/// 1 tick 525 runner 6 pos, 3.7e-4 m apart), while the single-fire fan shapes
-/// above stay bit-exact. The cause is not pinned: the entry order in a
-/// receiver's list and the timing of one copy's expiry are the candidates left
-/// standing. Un-ignore to re-check after any change to the pool.
+/// Six hosts refanning one cross-target additionalActivate 1 effect on short
+/// cooldowns. The pool holds one entry per receiver per delivery, so a
+/// receiver carries dozens at once. The scene pins two pool semantics the
+/// single-fire shapes cannot reach: retail delivery reaches a receiver with a
+/// higher roster index than the host before that receiver's prepare pass
+/// steps its timers, so the copy takes its first timer step on the delivery
+/// tick and expires a tick before a copy to a lower-indexed receiver, and the
+/// three-delivery cap resets with every new running instance. The ten-seed
+/// sweep of this scene lives in `wave9_fan_trace::fan_churn_ten_seeds_bit_exact`.
 #[test]
-#[ignore = "the fan pool drifts off the engine once several hosts refan at once"]
 fn fan_churn_tracks_the_engine() {
     register_geometry(10504);
     let mut skill_data = merged_skill_data();
