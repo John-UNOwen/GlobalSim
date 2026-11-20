@@ -31,6 +31,8 @@
 #define US_CSS1 8
 #define US_CSS2 9
 #define US_CSS3 10
+// IM_STATS: the singleMode flag (build_adjusted_stats_for_mode's +400).
+#define US_SINGLE 11
 // IM_INIT per-runner block, slot 16 + IIS_STRIDE * r.
 #define US_R0 16
 #define IIS_STRIDE 3
@@ -250,10 +252,11 @@ static double engine_log10(double x) {
 // the zeroing of the output slots belongs to it; each function writes only
 // the slots its mode documents.
 
-// build_base_stats_with_team_rank then build_adjusted_stats_for_mode
-// with single_mode=false, the retail path in race_solver_builder.rs.
+// build_base_stats_with_team_rank then build_adjusted_stats_for_mode with
+// the US_SINGLE flag, the retail path in race_solver_builder.rs.
 static void im_stats(__global const uint* ib, __global const ulong* ilb,
     __global uint* ob, __global ulong* olb) {
+        const double single_bonus = ib[US_SINGLE] != 0u ? 400.0 : 0.0;
         const int mood = (int)ib[US_A];
         const int rank = (int)ib[US_B];
         const int surface = (int)ib[US_C];
@@ -328,13 +331,13 @@ static void im_stats(__global const uint* ib, __global const ulong* ilb,
         // Each combination rounds once, in f32, only where Rust stores a float.
         const float csf = convert_float_rte(race_course_modifier);
         const double adj_speed = clamp_1_2000(convert_float_rte(
-            (double)convert_float_rte(values[1]) * (double)csf + gspd[surface][ground] + 0.0));
-        const double adj_stamina = clamp_1_2000(values[2] + 0.0);
-        const double adj_power = clamp_1_2000(values[3] + gpow[surface][ground] + 0.0);
-        const double adj_guts = clamp_1_2000(values[4] + 0.0);
+            (double)convert_float_rte(values[1]) * (double)csf + gspd[surface][ground] + single_bonus));
+        const double adj_stamina = clamp_1_2000(values[2] + single_bonus);
+        const double adj_power = clamp_1_2000(values[3] + gpow[surface][ground] + single_bonus);
+        const double adj_guts = clamp_1_2000(values[4] + single_bonus);
         const float wisdom_coef = (float)strategy_t[strategy_apt] * 0.0001f;
         const double adj_wisdom = clamp_1_2000(convert_float_rte(
-            convert_float_rte(values[5]) * (double)wisdom_coef + 0.0));
+            convert_float_rte(values[5]) * (double)wisdom_coef + single_bonus));
         olb[7] = as_ulong(adj_speed);
         olb[8] = as_ulong(adj_stamina);
         olb[9] = as_ulong(adj_power);

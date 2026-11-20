@@ -546,7 +546,6 @@ fn snapshot_and_spurt_columns_answer_the_result_fields() {
 fn requests_outside_the_full_lane_stay_refused() {
     register_geometry(10504);
     for (key, expect) in [
-        ("singleMode", "singleMode"),
         ("traceConservePower", "traceConservePower"),
         ("experimentalLaterStaminaMechanics", "experimentalLaterStaminaMechanics"),
     ] {

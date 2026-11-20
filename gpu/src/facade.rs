@@ -598,8 +598,10 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
         if root.get("experimentalGrid").is_some() {
             return Some("experimentalGrid belongs to the retail lane".into());
         }
-        if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) == Some(true) {
-            return Some("later stamina mechanics are not in the classic kernel".into());
+        // The three flag-only systems are ported; only the >2100 m
+        // staminasyoubu injection still falls back.
+        if let Some(reason) = classic_exec::later_stamina_refusal(request) {
+            return Some(reason);
         }
         let skilled = root
             .get("horses")
@@ -630,11 +632,11 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
                 "World geometry requires the experimental runtime and standard starting grid".into(),
             );
         }
-        if root.get("singleMode").and_then(Value::as_bool) == Some(true) {
-            return Some("singleMode is outside the GPU lane".into());
-        }
         if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) == Some(true) {
-            return Some("experimentalLaterStaminaMechanics is outside the GPU lane".into());
+            return Some(
+                "experimentalLaterStaminaMechanics draws from a live solver stream \
+                 the retail kernel resolves host-side".into(),
+            );
         }
         if (1..=race_exec::RACE_MAXR).contains(&horse_count) {
             None

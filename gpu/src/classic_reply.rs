@@ -250,11 +250,6 @@ pub fn build(request: &str, seed: i64, race: &ClassicGpu) -> Result<String, Stri
     if root.get("experimentalGrid").is_some() {
         return Err("experimentalGrid is outside the classic lane".to_string());
     }
-    for key in ["experimentalLaterStaminaMechanics"] {
-        if root.get(key).and_then(Value::as_bool) == Some(true) {
-            return Err(format!("{key} is outside the classic full lane"));
-        }
-    }
     // A classic trace is an engine error (lib.rs:1504-1506), quoted verbatim.
     if root.get("traceConservePower").and_then(Value::as_bool) == Some(true) {
         return Err("traceConservePower requires experimentalRetailRuntime".to_string());
@@ -395,7 +390,9 @@ pub fn build(request: &str, seed: i64, race: &ClassicGpu) -> Result<String, Stri
         ("skillReplayDurationVersion", json::num(1.0)),
         ("pacingModeVersion", json::num(2.0)),
         ("currentSpeedReceiverVersion", json::num(1.0)),
-        ("experimentalLaterStaminaMechanics", Value::Bool(false)),
+        ("experimentalLaterStaminaMechanics",
+            Value::Bool(root.get("experimentalLaterStaminaMechanics")
+                .and_then(Value::as_bool).unwrap_or(false))),
         ("movementVersion", json::num(1.0)),
         ("laneSelectionVersion", json::num(4.0)),
         ("competitionMechanicsVersion", json::num(1.0)),

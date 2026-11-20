@@ -41,7 +41,7 @@
 #define RI_GEOM_ON 7         // 1 = experimentalRetailGeometry
 #define RI_HOST_FLAG 8       // nonzero: the host already knows this race needs
                              // a fallback (skills, startup, no geometry)
-#define RI_HOST_ARG 9        // which domain the host flag stands for
+#define RI_SINGLE 9          // singleMode: the +400 fold in the adjusted stats
 #define RI_NSLOPES 10
 #define RI_NSTR 11           // straights present
 #define RI_NCOR 12           // corners present

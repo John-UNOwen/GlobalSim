@@ -77,6 +77,8 @@ pub const RI_PAIRED: usize = 5;
 pub const RI_STARTUP: usize = 6;
 pub const RI_GEOM_ON: usize = 7;
 pub const RI_HOST_FLAG: usize = 8;
+// Slot 9: the singleMode flag, read by the kernel's im_stats pre-pass.
+pub const RI_SINGLE: usize = 9;
 pub const RI_NSLOPES: usize = 10;
 pub const RI_NSTR: usize = 11;
 pub const RI_NCOR: usize = 12;
@@ -731,15 +733,19 @@ fn prepare(
     if grid && root.get("experimentalRetailGeometry").and_then(Value::as_bool) == Some(true) {
         return flagged("World geometry requires the experimental runtime and standard starting grid");
     }
-    // Engine-supported modes the kernel does not port (single-mode +400 stat
-    // bonus, later-stamina per-tick mechanics, race_solver.rs:2751-2756).
-    // Refusing names them, so no compact race gets a flag-off answer.
-    if root.get("singleMode").and_then(Value::as_bool) == Some(true) {
-        return flagged("singleMode is outside the GPU lane");
-    }
+    // The three later-stamina systems draw live from the shared solver
+    // stream (race_solver.rs:2767-3043). The retail runtime kernel carries no
+    // live stream consumer; its randomness is host-resolved reservations, so
+    // the draws cannot be placed there (retail_core.cl SI_RESRV).
     if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) == Some(true) {
-        return flagged("experimentalLaterStaminaMechanics is outside the GPU lane");
+        return flagged(
+            "experimentalLaterStaminaMechanics draws from a live solver stream \
+             the retail kernel resolves host-side",
+        );
     }
+    // singleMode is ported: the +400 lands inside the im_stats clamps
+    // (race_solver_builder.rs:304-321). A non-boolean flag is ignored (lib.rs:342).
+    let single_mode = root.get("singleMode").and_then(Value::as_bool).unwrap_or(false);
     let mut ri = vec![0u32; RI_STRIDE];
     let mut pd = vec![0f64; RIL_STRIDE];
     let mut stats_cases: Vec<StatsCase> = Vec::new();
@@ -784,6 +790,7 @@ fn prepare(
     ri[RI_PAIRED] =
         (root.get("pairedRandomStreams").and_then(Value::as_bool) == Some(true)) as u32;
     ri[RI_STARTUP] = startup as u32;
+    ri[RI_SINGLE] = single_mode as u32;
     ri[RI_NSLOPES] = nslopes as u32;
     let temptation = group(group(globals, "parameters")?, "Temptation")?;
     ri[RI_LOT_MIN] = temptation.get_i64("TemptationLotSectionMin")? as u32;
@@ -877,7 +884,7 @@ fn prepare(
             strategy_apt: ri[b + RR_STAPT] as i32,
             ground,
             css: css.clone(),
-            single_mode: false,
+            single_mode,
         });
     }
     Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, live_guts: sk_plan.live_guts, debug_scratch: false, grid, full: false })

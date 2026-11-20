@@ -1,8 +1,9 @@
 // Classic (non-retail) physics core. The float arithmetic mirrors the engine
 // line for line (race_solver.rs, race_field.rs, hp_policy.rs, lane_selection.rs,
 // overtaking.rs, starting_grid.rs cited inline). Construction (stats, rng
-// seeding, section and duel constants) is host side in classic_exec.rs, so this
-// kernel runs no powf or log10.
+// seeding, section and duel constants) is host side in classic_exec.rs; the
+// flag-only competition systems run here on the prepended powf and log10
+// ports.
 
 #define CLS_MAXR 120
 #define CLS_MAX_TICKS 6144
@@ -55,6 +56,8 @@
 #define D_LASTCORNER_START 6
 #define D_BASESPEED 7
 #define D_GROUNDMOD 9
+// The experimentalLaterStaminaMechanics switch (race_solver.rs:2751-2756).
+#define D_LATER 10
 #define CLS_RD_SLOPES (16 + 64 * CLS_MAXR)
 #define CLS_RD_STRIDE (CLS_RD_SLOPES + 48)
 #define F_LANE0 0
@@ -91,12 +94,12 @@
 
 // Status words, one block per race: fallback, ticks, loop end, per runner
 // finish times as raw f64 bits.
-#define CLS_ST_STRIDE (16 + 17 * CLS_MAXR)
+#define CLS_ST_STRIDE (16 + 20 * CLS_MAXR)
 #define S_FALLBACK 0
 #define S_TICKS 1
 #define S_END 2
 #define CLS_ST_RUN0 16
-#define CLS_ST_RUN_STRIDE 17
+#define CLS_ST_RUN_STRIDE 20
 #define S_FIN0 16
 // Full-reply exports: last-spurt transition, the actual last-spurt start
 // pair (race_solver.rs:1652-1653), temptation and rushing-score counts
@@ -107,6 +110,12 @@
 #define S_TEMPT 12
 #define S_RSCNT 13
 #define S_SPURTTICK 14
+// Diagnostic activation counts for the flag-only competition systems, mirror
+// of the scratch counters at runner 0.
+#define S_STAT0 15
+#define S_STAT1 16
+#define S_STAT2 17
+#define S_STAT3 18
 
 // Reply record streams, one region per race: competition starts as
 // (tick, kind, runner) triples in engine push order (lib.rs:899-918) and
@@ -191,6 +200,12 @@
 #define UR_PREVPH 68
 #define UR_PREVFIGHT 69
 #define UR_PREVSPOT 70
+// The three flag-only competition latches (race_solver.rs:634, 631-635), one
+// bit each in the one free runner slot.
+#define UR_KEEP 71
+#define UR_KEEP_KEEP 1u
+#define UR_KEEP_CMP 2u
+#define UR_KEEP_SEC 4u
 #define U_TGTMAP 9168
 #define U_BLOCK 23568
 #define U_TLIST 23696
@@ -199,6 +214,12 @@
 // style-group leader scan (stadium_score.rs:20-30).
 #define U_TICKRANK 23952
 #define U_GLEADER 24080
+// Per-race activation counts for the flag-only competition systems (host
+// diagnostics, never part of a reply).
+#define U_STAT_KEEP 24096
+#define U_STAT_CMP 24097
+#define U_STAT_SEC 24098
+#define U_STAT_GATE 24099
 // Compiled skill table, then the classic skill runtime state (all per race).
 #define CLS_SK_TABLE 24400
 #define CLS_SKD (CLS_SK_TABLE + SK_STRIDE)
@@ -209,7 +230,9 @@
 #define CLS_SKD_SLEN (CLS_SKD + 3856)
 #define CLS_SKD_SEQ (CLS_SKD + 4456)
 #define CLS_SKD_QMETA (CLS_SKD + 23656)
-#define CLS_SU_STRIDE (CLS_SKD + 25704)
+// Per-record prerequisite latches, set once the engine's per-tick watch holds.
+#define CLS_SKD_PRE (CLS_SKD + 25704)
+#define CLS_SU_STRIDE (CLS_SKD + 26664)
 #define SK_PEND_SLOT 8
 #define SK_CAT 32
 #define SK_QMAX 2048
@@ -260,7 +283,7 @@
 #define UDB_SPURTV 31072
 #define UDB_SPURTN 31584
 #define CLS_SD_RUN0 41216
-#define CLS_SD_RUN_STRIDE 112
+#define CLS_SD_RUN_STRIDE 120
 // Skill runtime regions. Per-record windows plus the merged trigger and the
 // runner-local skill slot, then per-slot cooldown clocks, per-instance timer
 // values, the pending skillEvents pairs, and the flush queue durations.
@@ -371,6 +394,14 @@
 // 107, not 106: sharing SPOTP's slot zeroes the spot duration for any
 // runner whose distance aptitude reads as zero.
 #define DF_DISTAPT 107
+// The flag-only competition systems' per-runner state (race_solver.rs:2948-
+// 3043): the captured target modifier, the countdown and the reuse wait.
+#define DF_CMPM 108
+#define DF_CMPT 109
+#define DF_CMPCL 110
+#define DF_SECM 111
+#define DF_SECT 112
+#define DF_SECCL 113
 
 typedef struct cc_ctx {
     __global unsigned int* su;
@@ -1438,6 +1469,10 @@ static void cc_sweep(Cc* c, const int r, const double d) {
     SR(DF_DOWNHT) += d;
     SR(DF_KTIMER) += d;
     SR(DF_SPOTT) += d;
+    SR(DF_CMPT) += d;
+    SR(DF_CMPCL) += d;
+    SR(DF_SECT) += d;
+    SR(DF_SECCL) += d;
     for (int cat = 0; cat < SKC_COUNT; cat++) {
         const int len = (int)SKSLEN(r, cat);
         for (int k = 0; k < len; k++) {
@@ -1447,8 +1482,9 @@ static void cc_sweep(Cc* c, const int r, const double d) {
 }
 
 // step_forward (race_solver.rs:1175-1224). Timers swept here are
-// accumulatetime, downhill, kakari and spot (race_solver.rs:978-984, the
-// rest belong to skills). Returns the effective moving dt.
+// accumulatetime, downhill, kakari, spot and the compete and secure lead
+// clocks (race_solver.rs:978-982; the rest belong to skills).
+// Returns the effective moving dt.
 static double cc_step_forward(Cc* c, const int r, double dt) {
     if (SR(DF_ACCUM) < SR(DF_DELAY)) {
         const double partial_frame = SR(DF_DELAY) - SR(DF_ACCUM);
@@ -1492,11 +1528,196 @@ static void cc_step_lateral(Cc* c, const int r, const double dt) {
     cc_update_lane(c, r, dt);
 }
 
+// competition_distance_coefficient (race_solver.rs:142-156), shared by both
+// stamina-cost formulas.
+static double cc_competition_dist_coef(const double distance) {
+    if (distance < 1801.0) {
+        return 0.3;
+    }
+    if (distance < 2101.0) {
+        return 0.5;
+    }
+    if (distance < 2201.0) {
+        return 0.8;
+    }
+    if (distance < 2401.0) {
+        return 1.0;
+    }
+    if (distance < 2601.0) {
+        return 1.1;
+    }
+    return 1.2;
+}
+
+// is_solo_front_runner (race_field.rs:694-704): true when no other runner
+// carries a Nige-family strategy.
+static int cc_solo_front(Cc* c, const int r) {
+    for (int j = 0; j < c->n; j++) {
+        if (j == r) {
+            continue;
+        }
+        const int s = cc_strategy(c, j);
+        if (s == 1 || s == 5) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// update_stamina_keep (race_solver.rs:2767-2781). The doc's own author calls
+// this activation formula speculative; the port only mirrors it.
+static void cc_stamina_keep(Cc* c, const int r, const double dt) {
+    if ((SU(UR_KEEP) & UR_KEEP_KEEP) != 0u || c->cd[D_DISTANCE] <= 0.0) {
+        return;
+    }
+    const double remaining_frac =
+        fmax((c->cd[D_DISTANCE] - SR(DF_POS)) / c->cd[D_DISTANCE], 0.0);
+    if (fmax(SR(DF_HP) / SR(DF_MAXHP), 0.0) >= remaining_frac * 1.04) {
+        return;
+    }
+    const double wisdom = fmax(SR(DF_WISDOM), 1.0);
+    const double pct = 30.0 * (wisdom / 1000.0 + gs_pow(wisdom, 0.03));
+    const double per_tick =
+        1.0 - gs_pow(1.0 - fmin(pct, 100.0) / 100.0, dt / 2.0);
+    if (cc_random(&SU(UR_SOLVER_HI), &SU(UR_SOLVER_LO)) < per_tick) {
+        SU(UR_KEEP) |= UR_KEEP_KEEP;
+        c->su[U_STAT_KEEP] += 1u;
+    }
+}
+
+// update_compete_before_spurt (race_solver.rs:2948-2992). The near_count
+// window mirrors race_field.rs:878-891, the leader gap race_field.rs:511-515.
+static void cc_compete_before_spurt(Cc* c, const int r, const double dt) {
+    if ((SU(UR_KEEP) & UR_KEEP_CMP) != 0u) {
+        if (SR(DF_CMPT) >= 0.0) {
+            SU(UR_KEEP) &= ~UR_KEEP_CMP;
+            SR(DF_CMPCL) = -1.0;
+            cc_add(&SR(DF_TSA), &SR(DF_TSE), -SR(DF_CMPM));
+        }
+        return;
+    }
+    const double section = SR(DF_SECTION);
+    const double pos = SR(DF_POS);
+    if (!(section * 10.0 <= pos && pos < section * 15.0) || SR(DF_CMPCL) < 0.0) {
+        return;
+    }
+    if ((SU(UR_KEEP) & UR_KEEP_KEEP) != 0u) {
+        c->su[U_STAT_GATE] += 1u;
+        return;
+    }
+    const int strategy = (int)SU(UR_STRATEGY);
+    const double threshold = (strategy == 1 || strategy == 5) ? 0.0
+        : (strategy == 2 ? 2.5 : (strategy == 3 ? 5.0 : 10.0));
+    const int leader = (int)c->su[U_ORDER];
+    const double leader_pos = leader == r ? pos : SO(DF_POS, leader);
+    const int far = fmax(leader_pos - pos, 0.0) > threshold;
+    const double lane = SR(DF_LANE);
+    const double tol = (double)(float)0.16666;
+    int near = 0;
+    for (int j = 0; j < c->n; j++) {
+        if (j == r) {
+            continue;
+        }
+        if (fabs(SO(DF_POS, j) - pos) <= 3.0 && fabs(SO(DF_LANE, j) - lane) <= tol) {
+            near = 1;
+        }
+    }
+    if (!(far || near)) {
+        return;
+    }
+    // roll_competition_wisdom (race_solver.rs:1534-1538) draws either way.
+    const double wisdom = fmax(SR(DF_WISDOM), 1.0);
+    const double pct = fmax(15.0 * engine_log10(wisdom * 0.1), 0.0);
+    const double per_tick =
+        1.0 - gs_pow(1.0 - fmin(pct, 100.0) / 100.0, dt / 2.0);
+    if (!(cc_random(&SU(UR_SOLVER_HI), &SU(UR_SOLVER_LO)) < per_tick)) {
+        return;
+    }
+    const double strat_coef = strategy == 5 ? 0.2 : (strategy == 1 ? 0.8 : 1.0);
+    double solo_bonus = 1.0;
+    if ((strategy == 1 || strategy == 5) && cc_solo_front(c, r)) {
+        solo_bonus = strategy == 5 ? 2.0 : 1.1;
+    }
+    const double modifier = (gs_pow(fmax(SR(DF_POWER), 0.0) / 1500.0, 0.5) * 2.0
+        + gs_pow(fmax(SR(DF_GUTS), 0.0) / 3000.0, 0.2))
+        * 0.1 * strat_coef * solo_bonus;
+    const double stamina_strat_coef = strategy == 5 ? 1.5 : (strategy == 1 ? 1.2 : 1.0);
+    const double near_factor = (near && !far) ? 0.5 : 0.0;
+    const double stamina_cost = 20.0
+        * (stamina_strat_coef * cc_competition_dist_coef(c->cd[D_DISTANCE]) + near_factor)
+        * 2.0;
+    SU(UR_KEEP) |= UR_KEEP_CMP;
+    c->su[U_STAT_CMP] += 1u;
+    SR(DF_CMPM) = modifier;
+    SR(DF_CMPT) = -2.0;
+    cc_add(&SR(DF_TSA), &SR(DF_TSE), modifier);
+    SR(DF_HP) = fmin(fmax(SR(DF_HP) - stamina_cost, 0.0), SR(DF_MAXHP));
+}
+
+// update_secure_lead (race_solver.rs:2998-3043), flat lead coefficient.
+static void cc_secure_lead(Cc* c, const int r, const double dt) {
+    if ((SU(UR_KEEP) & UR_KEEP_SEC) != 0u) {
+        if (SR(DF_SECT) >= 0.0) {
+            SU(UR_KEEP) &= ~UR_KEEP_SEC;
+            SR(DF_SECCL) = -1.0;
+            cc_add(&SR(DF_TSA), &SR(DF_TSE), -SR(DF_SECM));
+        }
+        return;
+    }
+    const double section = SR(DF_SECTION);
+    const double pos = SR(DF_POS);
+    if (!(section * 10.0 <= pos && pos < section * 15.0) || SR(DF_SECCL) < 0.0) {
+        return;
+    }
+    if ((SU(UR_KEEP) & UR_KEEP_KEEP) != 0u) {
+        c->su[U_STAT_GATE] += 1u;
+        return;
+    }
+    const double gap_behind = cc_distance_to_behind(c, r);
+    if (gap_behind < 0.0) {
+        return;
+    }
+    const double desirable = 3.0 + 0.0003 * (c->cd[D_DISTANCE] + 1000.0);
+    if (gap_behind >= desirable) {
+        return;
+    }
+    if (cc_random(&SU(UR_SOLVER_HI), &SU(UR_SOLVER_LO)) >= 0.20 * (dt / 2.0)) {
+        return;
+    }
+    const int strategy = (int)SU(UR_STRATEGY);
+    const double strat_coef = strategy == 5 ? 0.2
+        : (strategy == 3 ? 0.8 : 1.0);
+    double solo_bonus = 1.0;
+    if ((strategy == 1 || strategy == 5) && cc_solo_front(c, r)) {
+        solo_bonus = strategy == 5 ? 7.0 : 2.0;
+    }
+    const double modifier = gs_pow(fmax(SR(DF_GUTS), 0.0) / 2000.0, 0.5)
+        * 0.3 * strat_coef * solo_bonus;
+    const double stamina_strat_coef = strategy == 5 ? 1.2 : (strategy == 1 ? 1.0 : 0.8);
+    const double stamina_cost = 20.0 * stamina_strat_coef
+        * cc_competition_dist_coef(c->cd[D_DISTANCE]) * 2.0;
+    SU(UR_KEEP) |= UR_KEEP_SEC;
+    c->su[U_STAT_SEC] += 1u;
+    SR(DF_SECM) = modifier;
+    SR(DF_SECT) = -2.0;
+    cc_add(&SR(DF_TSA), &SR(DF_TSE), modifier);
+    SR(DF_HP) = fmin(fmax(SR(DF_HP) - stamina_cost, 0.0), SR(DF_MAXHP));
+}
+
 static void cc_step_field_conditions(Cc* c, const int r, const double dt) {
     cc_update_near_lane_timers(c, r, dt);
-    // update_competition_mechanics (race_solver.rs:2746-2758) with the
-    // stamina keep and compete gates off: spot struggle, then duel.
+    // update_competition_mechanics (race_solver.rs:2746-2758). The engine
+    // gates the three stamina systems on the request flag, spot and duel
+    // always run.
+    const int later = c->cd[D_LATER] != 0.0;
+    if (later) {
+        cc_stamina_keep(c, r, dt);
+    }
     cc_update_spot(c, r);
+    if (later) {
+        cc_compete_before_spurt(c, r, dt);
+        cc_secure_lead(c, r, dt);
+    }
     cc_update_dueling(c, r, dt);
 }
 // start_spot_struggle classic (race_solver.rs:2928-2946); the modifier and
@@ -1945,6 +2166,7 @@ static void cc_prepare(Cc* c, __global const unsigned int* ri) {
         u[UR_PREVPH] = 0u;
         u[UR_PREVFIGHT] = 0u;
         u[UR_PREVSPOT] = 0u;
+        u[UR_KEEP] = 0u;
         u[UR_SOLVER_HI] = ri[rb + R_SOLVER_HI];
         u[UR_SOLVER_LO] = ri[rb + R_SOLVER_LO];
         u[UR_HP_HI] = ri[rb + R_HP_HI];
@@ -2030,10 +2252,17 @@ static void cc_prepare(Cc* c, __global const unsigned int* ri) {
         d[DF_GUTS] = rd[db + F_GUTS];
         d[DF_SPOTP] = rd[db + F_SPOTP];
         d[DF_DISTAPT] = (double)(int)ri[rb + R_DISTAPT];
+        for (int k = DF_CMPM; k <= DF_SECCL; k++) {
+            d[k] = 0.0;
+        }
     }
     c->rp[CLS_RP_COMPLEN] = 0u;
     c->rp[CLS_RP_PHRCOUNT] = 0u;
     c->su[U_CAP] = 0u;
+    c->su[U_STAT_KEEP] = 0u;
+    c->su[U_STAT_CMP] = 0u;
+    c->su[U_STAT_SEC] = 0u;
+    c->su[U_STAT_GATE] = 0u;
     c->su[U_EIM] = ri[CLS_RI_FLAGS] & 1u;
     c->su[U_DUELON] = ri[CLS_RI_DUELON] & 1u;
     c->su[U_PMVALID] = 0u;
@@ -2203,6 +2432,7 @@ static void cc_sk_init(Cc* c) {
     c->su[CLS_SKD_QLEN] = 0u;
     for (int w = 0; w < SK_RMAX; w++) {
         c->su[CLS_SKD_CONS + w] = 0u;
+        c->su[CLS_SKD_PRE + w] = 0u;
     }
     for (int w = 0; w < CLS_MAXR * SKC_COUNT * SK_CAT; w++) {
         c->sd[UDB_SKMR + w] = 0.0;
@@ -2620,12 +2850,10 @@ static void cc_sk_refresh(Cc* c, const int r) {
 // (recovery included: the engine lands it before hp init, which then
 // re-seeds full hp, so it is net zero).
 static void cc_sk_apply_effect(Cc* c, const int r, const int eff,
-    const int slot, const int fieldless, const int own) {
+    const int slot, const int fieldless, const int own, const double dur) {
     const __global unsigned int* ef = SKEF(eff);
     const int kind = (int)ef[0];
     const double mod = cc_sk_f64(ef + 6);
-    const double base_dur = cc_sk_f64(ef + 8);
-    const double dur = base_dur * (c->cd[D_DISTANCE] / 1000.0);
     const unsigned int tok = SKT_E(eff) | SKT_S(slot) | (own ? 0u : SKT_PERSP);
     if (fieldless) {
         if (kind == 1 || kind == 2 || kind == 3 || kind == 4 || kind == 5 ||
@@ -2655,6 +2883,9 @@ static void cc_sk_apply_effect(Cc* c, const int r, const int eff,
     } else if (kind == 9) {
         SR(DF_HP) = fmax(fmin(SR(DF_MAXHP),
             SR(DF_HP) + SR(DF_MAXHP) * mod), 0.0);
+        // An HP-recovery effect clears Stamina Keep on whoever applies it
+        // (race_solver.rs:2632).
+        SU(UR_KEEP) &= ~UR_KEEP_KEEP;
         if (mod > 0.0 && (int)SU(UR_PHASE) >= 2 && !SU(UR_SPURT)) {
             SR(DF_LSTTRANS) = -1.0;
             cc_update_last_spurt(c, r);
@@ -2752,6 +2983,19 @@ static void cc_sk_hook_activate(Cc* c, const int r, const int slot,
 // Fire one record: the per-effect loop of apply_activation (2458-2641) with
 // the classic value chain compiled in, the cross queue of queue_skill_effect
 // (race_field.rs:465-484), the source-side Noop placeholder, and the hooks.
+// The duration_usage 3 HP tiers (race_solver.rs:283-290): the first bound the
+// frozen ledger value is strictly below, else 4.0.
+static double cc_sk_du3_coeff(const double hp) {
+    if (hp < 2000.0) { return 1.; }
+    if (hp < 2400.0) { return 1.5; }
+    if (hp < 2600.0) { return 2.; }
+    if (hp < 2800.0) { return 2.200000047683716; }
+    if (hp < 3000.0) { return 2.5; }
+    if (hp < 3200.0) { return 3.; }
+    if (hp < 3500.0) { return 3.5; }
+    return 4.0;
+}
+
 static void cc_sk_fire(Cc* c, const int r, const int rec, const int fieldless) {
     const __global unsigned int* rd = SKRD(rec);
     const unsigned int sid = rd[0];
@@ -2760,6 +3004,9 @@ static void cc_sk_fire(Cc* c, const int r, const int rec, const int fieldless) {
     const int eff_base = (int)rd[6];
     const int n_eff = (int)rd[5];
     const int slot = (int)SKW(rec)[SKW_SLOT];
+    // duration_coefficient reads the ledger value the engine freezes before
+    // the effect loop (race_solver.rs:2466).
+    const double act_hp = SR(DF_HP);
     // The wrapper only records DET and TGT events for numeric skill ids
     // (race_solver.rs:2448-2451).
     const int numeric = (flags & SK_FLAG_ASITAME) == 0u && sid != 0u;
@@ -2787,8 +3034,13 @@ static void cc_sk_fire(Cc* c, const int r, const int rec, const int fieldless) {
         const int kind = (int)ef[0];
         const int target = (int)ef[1];
         const int debuff = (int)ef[6];
-        const double dur =
-            cc_sk_f64(ef + 8) * (c->cd[D_DISTANCE] / 1000.0);
+        // The classic branch scales base duration by the tier coefficient and
+        // the course factor in f64 (race_solver.rs:2508), left to right.
+        double dur = cc_sk_f64(ef + 8);
+        if (ef[3] == 3u) {
+            dur *= cc_sk_du3_coeff(act_hp);
+        }
+        dur *= c->cd[D_DISTANCE] / 1000.0;
         int sel[CLS_MAXR];
         int ns = 0;
         // Selection precedes delivery on every caster activation and covers
@@ -2847,7 +3099,7 @@ static void cc_sk_fire(Cc* c, const int r, const int rec, const int fieldless) {
             }
             continue;
         }
-        cc_sk_apply_effect(c, r, eff_base + e, slot, fieldless, 1);
+        cc_sk_apply_effect(c, r, eff_base + e, slot, fieldless, 1, dur);
     }
     // The hook runs with the post-apply state (race_solver.rs:2673 fires
     // after the whole effect list), and asitame never carries skill events.
@@ -2889,6 +3141,7 @@ static double cc_feat_nan(void) {
 // The scan gate's live predicate values, one FEAT_* code per dynamic leaf.
 // hp_per answers the classic ratio branch and accumulatetime the f32-floored
 // clock; both read solver state only, so the fieldless pass evaluates them.
+// The blocked-side timer (activation_conditions.rs:1294) is solver state too.
 static double cc_sk_feat_value(const uint code, Cc* c, const int r, const int fieldless) {
     const uint feat = code >> 3;
     switch (feat) {
@@ -2896,6 +3149,8 @@ static double cc_sk_feat_value(const uint code, Cc* c, const int r, const int fi
         return floor((double)convert_float_rte((float)SR(DF_ACCUM)));
     case FEAT_HP_PER:
         return fmax(SR(DF_HP) / SR(DF_MAXHP), 0.0);
+    case FEAT_BSIDE:
+        return trunc(SR(DF_BSIDE));
     case FEAT_ORDER:
     case FEAT_ORDER_RATE:
         if (fieldless != 0) {
@@ -3065,6 +3320,22 @@ static int cc_sk_live_ok(Cc* c, const int r, const __global unsigned int* rd,
     return 0;
 }
 
+// The engine's per-tick prerequisite watch (race_solver.rs:2089-2098), the
+// same fold the retail lane's sk_prereq_check runs: membership in the
+// compiled precondition regions and the precondition program.
+static int cc_sk_prereq(Cc* c, const int r, const __global unsigned int* rd,
+    const double pos, const int fieldless) {
+    const int npre = (int)rd[22];
+    for (int g = 0; g < npre; g++) {
+        const __global const unsigned int* rg = SKREGF((int)rd[23] + g);
+        if (cc_sk_f64(rg) <= pos && pos < cc_sk_f64(rg + 2)) {
+            return cc_sk_prog(c, r, c->su + CLS_SK_TABLE + SK_PROGRAMS +
+                SK_PSTRIDE * (int)rd[25], (int)rd[24], fieldless);
+        }
+    }
+    return 0;
+}
+
 // process_pending_armed (race_solver.rs:2131-2182) for one runner: armed
 // records in wire (creation) order, the same visit order the full scan nets
 // by walking the reversed pending list from the back (race_solver.rs:2200),
@@ -3078,6 +3349,13 @@ static void cc_sk_scan(Cc* c, const int r, const int fieldless) {
         if ((int)rd[1] != r || (rd[2] & SK_FLAG_DEAD) != 0u) {
             continue;
         }
+        // The watch runs ahead of the trigger gate, exactly like the engine's
+        // prerequisite loop, and latches once for the record's lifetime.
+        if (rd[22] != 0u && c->su[CLS_SKD_CONS + rec] == 0u &&
+            c->su[CLS_SKD_PRE + rec] == 0u &&
+            cc_sk_prereq(c, r, rd, pos, fieldless) != 0) {
+            c->su[CLS_SKD_PRE + rec] = 1u;
+        }
         __global double* wd = SKW(rec);
         const double trig0 = wd[SKW_TRIG0];
         const double trig1 = wd[SKW_TRIG1];
@@ -3089,6 +3367,9 @@ static void cc_sk_scan(Cc* c, const int r, const int fieldless) {
         }
         if (pos >= trig1) {
             c->su[CLS_SKD_CONS + rec] = 1u;
+            continue;
+        }
+        if (rd[22] != 0u && c->su[CLS_SKD_PRE + rec] == 0u) {
             continue;
         }
         const int slot = (int)wd[SKW_SLOT];
@@ -3172,7 +3453,8 @@ static void cc_sk_flush(Cc* c) {
             slot = 0;
         }
         const int kind = (int)SKEF(eff)[0];
-        cc_sk_apply_effect(c, dst, eff, slot, 0, src == dst ? 1 : 0);
+        const double queued_dur = c->sd[UDB_SKQDUR + head - 1];
+        cc_sk_apply_effect(c, dst, eff, slot, 0, src == dst ? 1 : 0, queued_dur);
         if (kind == 1 || kind == 2 || kind == 3 || kind == 4 || kind == 5) {
             cc_sk_refresh(c, dst);
         }
@@ -3377,6 +3659,12 @@ static void cc_run(Cc* c, __global const unsigned int* ri,
         st[rb + S_TEMPT] = SUO(UR_TEMPT, r);
         st[rb + S_RSCNT] = SUO(UR_RSCNT, r);
         st[rb + S_SPURTTICK] = (unsigned int)SO(DF_SPURTTICK, r);
+        if (r == 0) {
+            st[rb + S_STAT0] = c->su[U_STAT_KEEP];
+            st[rb + S_STAT1] = c->su[U_STAT_CMP];
+            st[rb + S_STAT2] = c->su[U_STAT_SEC];
+            st[rb + S_STAT3] = c->su[U_STAT_GATE];
+        }
     }
     st[S_TICKS] = (unsigned int)ticks;
     cc_bits(st, S_END, t);

@@ -1891,13 +1891,14 @@ impl Compiler {
             // 4 extends the running instance on an overtake (race_solver.rs:2655).
             let duration_usage =
                 alt.get("durationUsage").and_then(Value::as_f64).unwrap_or(1.0) as i32;
-            // The classic kernel models the du 1 constant coefficient only. The
-            // other tiers read live HP or leader gap, and du 4 extends running
-            // instances on an overtake, which the classic lane never enters.
-            if self.lane == Lane::Classic && duration_usage != 1 {
+            // The classic kernel folds the du 1 constant and the du 3 HP tiers
+            // (race_solver.rs:283-290) at activation. du 2 reads the live
+            // leader gap and du 4 extends running instances on an overtake,
+            // which the classic lane never enters.
+            if self.lane == Lane::Classic && !matches!(duration_usage, 1 | 3) {
                 self.unsupported(format!(
-                    "skill {sid} duration_usage {duration_usage} reads live HP, live leader \
-                     gap, or the overtake extend, none of which the classic runtime models"
+                    "skill {sid} duration_usage {duration_usage} reads the live leader gap, \
+                     other HP tiers, or the overtake extend, which the classic runtime does not model"
                 ));
                 return;
             }
@@ -2408,12 +2409,9 @@ impl Compiler {
         self.nrec += 1;
     }
 
-    /// The classic kernel carries live readers for eight runtime feats, so a
-    /// condition leaf over one of them compiles live. RegionDyn leaves (a
-    /// static filter and a live read in one term), every live read in a
-    /// precondition (the engine evaluates those at runtime, and the kernel
-    /// folds preconditions statically) and reads the kernel has no reader for
-    /// stay refused by name. Returns true when a reason was set.
+    /// The blocked-side timer is solver state, so the kernel's live reader
+    /// serves it in a condition term and in a precondition alike. The eight
+    /// field-backed readers stay condition-only, RegionDyn leaves stay refused.
     fn classic_refuses_leaf(
         &mut self,
         sid: &str,
@@ -2431,19 +2429,20 @@ impl Compiler {
                 _ => None,
             };
             let Some(feat) = feat else { continue };
-            let reader_ported = live_ok
-                && matches!(leaf, Leaf::Dynamic { .. })
-                && matches!(
-                    feat,
-                    FEAT_CLOCK
-                        | FEAT_HP_PER
-                        | FEAT_ORDER
-                        | FEAT_ORDER_RATE
-                        | FEAT_NEAR
-                        | FEAT_NEARIF
-                        | FEAT_SURR
-                        | FEAT_VISN
-                );
+            let reader_ported = matches!(leaf, Leaf::Dynamic { .. })
+                && (feat == FEAT_BSIDE
+                    || (live_ok
+                        && matches!(
+                            feat,
+                            FEAT_CLOCK
+                                | FEAT_HP_PER
+                                | FEAT_ORDER
+                                | FEAT_ORDER_RATE
+                                | FEAT_NEAR
+                                | FEAT_NEARIF
+                                | FEAT_SURR
+                                | FEAT_VISN
+                        )));
             if reader_ported {
                 continue;
             }

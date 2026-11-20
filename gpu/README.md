@@ -1803,8 +1803,9 @@ The four wave-10 named refusals, each classified against the engine:
 - `experimentalLaterStaminaMechanics` is an engine mode: it enables the
   stamina keep, compete-before-spurt and secure-lead per-tick systems
   (`race_solver.rs:2767,2948,2998`, `update_competition_mechanics:2746`) and
-  the reply echoes the flag (`lib.rs:1071`). The kernel models none of it, so
-  the `true` form is refused by name on both lanes.
+  the reply echoes the flag (`lib.rs:1071`). Wave 11 refused the `true` form
+  by name on both lanes; wave 13a ports it to the classic lane up to 2100 m
+  and keeps the retail refusal, see "Wave 13a" in the wave history above.
 - Grid mode is engine-supported end to end: a 21-horse grid request runs and
   the engine answers full, with `experimentalGridVersion` (`lib.rs:1137`).
   The kernel runs grid compact bit-exactly and refuses only the full reply,
@@ -1913,16 +1914,29 @@ The skill-side lists live in `SKILLS_DESIGN.md`.
 - Requests outside the full-reply lane, refused by name in
   `full_reply::build`: `traceConservePower` (the engine mode only adds reply
   diagnostics, so the compact lane accepts it, see "Wave-11 equivalence
-  closures"). `singleMode: true` and `experimentalLaterStaminaMechanics:
-  true` are refused on both lanes by the run gate, and the `false` or
-  absent forms, which the engine runs identically to the ported retail mode,
-  answer normally
+  closures"). `experimentalLaterStaminaMechanics: true` is refused on the
+  retail lane by the run gate (the draws need a live solver stream, see wave
+  13a), the classic lane answers it up to 2100 m, and the `false` or absent
+  forms, which the engine runs identically to the ported modes, answer
+  normally. `singleMode`
+  is ported on both lanes (wave 13a): the +400 fold lands inside the
+  adjusted-stats clamps (`race_solver_builder.rs:304-321`), in the host
+  `stats_reference` chain on the classic side and in the kernel's `im_stats`
+  pre-pass on the retail side, and a true flag tags the full reply with
+  `singleModeVersion` like the engine (`lib.rs:1125-1129`). Gated in
+  `wave12c_modes` (frames bit-exact, replies byte-equal, the fold proven to
+  move the physics) and `equivalence_gate` (retail reply with the tag, the
+  ignored non-boolean form byte-equal)
 - Non-retail (classic) requests the classic kernel does not port, each refused
   by name in `classic_exec::prepare` and in `facade::gate_reasons`:
-  `experimentalGrid` starts, `singleMode`,
-  `experimentalLaterStaminaMechanics`, `traceConservePower`, the legacy
+  `experimentalGrid` starts,
+  `experimentalLaterStaminaMechanics` above 2100 m (the staminasyoubu
+  injection, `race_solver_builder.rs:819`; at most 2100 m it answers, wave
+  13a), `traceConservePower`, the legacy
   `retailRuntime` key, `experimentalRetailGeometry`, a roster beyond
   `CLS_MAXR` (120), and a course with more than `CLS_MAX_SLOPES` (16) slopes.
+  `singleMode` answers: the +400 fold runs in the host stats chain (wave 12c,
+  gated in `wave12c_modes::classic_single_mode_answers_bit_exact`).
   Skills now run on the GPU lane (Wave-12b). The slope-count refusal needs the
   course table, so it runs at prepare time and `gate_reasons` alone does not
   name it
@@ -1960,11 +1974,86 @@ raised. Duplicate skill ids on one runner answer from the kernel (the shared
 sampler cache and cooldown key mirror the kernel slot merge), the classic arm
 cap of one sampled term is retail-only, and the live-state runtime reads
 (`hp_per`, `order_rate`, `accumulatetime` and siblings) stay refused by name
-until the kernel carries per-arm programs. Gated in `tests/classic_folds.rs`
+until the kernel carries per-arm programs, except `blocked_side_continuetime`,
+which wave 13a ported (next paragraph). Gated in `tests/classic_folds.rs`
 and `tests/wave12c_classic_gate.rs`: every sampled name solo and eighteen on
 one horse over seeds 1..3, frames bit-exact, full replies byte-equal, each
 skill seen firing, duplicate reuse, and drop parity for eight engine-error
 shapes.
+
+Wave 13a also closed two classic skill runtime leaves. The compiler's
+`blocked_side_continuetime` leaf (`FEAT_BSIDE`) is reader-ported: the classic
+kernel already accumulates the blocked-side clock in its blocking update
+(`DF_BSIDE`), `cc_sk_feat_value` reads it for the arm program, and a
+prerequisite latch per record (`CLS_SKD_PRE`) opens when the compiled
+prerequisite first holds, gating the fire like the engine's
+stateful-prerequisite records. The live host 900351 (condition
+`is_finalcorner==1&corner==0&order<=5`, prerequisite `is_finalcorner==1&
+blocked_side_continuetime>=2`) now answers on the GPU lane. `duration_usage` 3 is likewise compiled and folded in
+the kernel: `cc_sk_du3_coeff` mirrors the engine's HP-tier table
+(`race_solver.rs:283-290`) reading the ledger value the engine freezes before
+the effect loop (`race_solver.rs:2466`), and the caster-frozen duration rides
+the delivery queue (`UDB_SKQDUR`) exactly like the engine's
+`duration_override` (`race_solver.rs:2509`); `duration_usage` 1 is unchanged,
+du 2 stays refused (it scales on the live leader gap) and du 4 stays refused
+(it extends running instances on an overtake, which the classic lane never
+enters).
+The live host 120131 (du 3, condition `distance_rate>=50&order_rate<=40`)
+answers: at the 2000 m course its engine event duration 15.0 is the base 5.0
+times the 1.5 HP tier (hp in [2000, 2400) at activation) times the distance
+factor 2.0, and rarity wire 3..=5 maps to Unique (`race_solver_builder.rs:
+574,606`) so the evolution term is exactly 1.0. Both hosts ride the real-host
+gate `wave12c_classic_gate::real_live_leaf_ids_answer_bit_exact`: fired at
+least once on six seeds, frames and full replies bit-exact on all six.
+
+Wave 13a ported `experimentalLaterStaminaMechanics` to the classic lane. The
+flag turns on three per-tick systems (`update_competition_mechanics`
+`race_solver.rs:2746-2758`): stamina keep (`:2767-2781`, HP-ratio gate, one
+solver-stream draw once open), compete before spurt (`:2948-2992`, section
+window `[section*10, section*15)`, cooldown, a far-gap or same-lane-nearby
+gate, a `roll_competition_wisdom(15.0, dt)` draw, then a speed modifier into
+the target-speed accumulator plus an HP cost), and secure lead (`:2998-3043`,
+same shape with the `distance_to_behind` gate and a flat `0.20 * (dt/2)`
+draw). The kernel mirrors them at the engine's position inside
+`cc_step_field_conditions`, draws from the runner's solver stream
+(`UR_SOLVER_HI/LO`), computes the wisdom rolls with the prepended `engine_log10`
+and `gs_pow` ports, and ticks the four new clocks in the same `cc_sweep`
+pass as the spot timer (engine registrations `race_solver.rs:979-982`). A
+Recovery effect clears the keep latch on whoever applies it
+(`race_solver.rs:2632`). The latches pack three bits into the one free runner
+word (`UR_KEEP` slot 71); the six doubles (modifier, countdown, reuse wait,
+per system) sit at `DF_CMPM` to `DF_SECCL`, 108 to 113, so the runner double
+stride moved 112 to 120. The classic reply now echoes the real flag
+(`lib.rs:1071`) instead of a fixed false.
+
+The port is scoped by distance, not dropped: above 2100 m the engine also
+injects the synthetic staminasyoubu skill (`race_solver_builder.rs:817-848`),
+a construction hook the classic kernel does not model, so those requests
+carry the named host fallback "staminasyoubu, injected above 2100 m, stays
+outside the classic kernel" from both `classic_exec::prepare` and
+`facade::gate_reasons` (`classic_exec::later_stamina_refusal`).
+
+The retail lane keeps its refusal, now with the architectural reason: the
+three systems draw live from the shared solver stream whose positions follow
+the physics, while the retail runtime kernel carries no live stream consumer
+at all (randomness enters as host-resolved reservations, `SI_RESRV`
+`retail_core.cl:307`, and precomputed sub-streams), so the draws cannot be
+placed there. The reason text is "experimentalLaterStaminaMechanics draws
+from a live solver stream the retail kernel resolves host-side".
+
+For activation evidence the kernel counts, per race, keep sets, compete
+activations, secure activations and keep's gate stops (scratch words 24096 to
+24099, mirrored into runner 0's status slots 15 to 18, status runner stride
+17 to 20, surfaced as `ClassicGpu::later_stats`; never part of a reply).
+`tests/wave13a_later_stamina.rs` runs seven seeds: the v77 field (1..3) and a
+nine-horse high-stamina variant without skills (1, 2, 3 and 6) where the keep
+HP gate closes early so the two section-window systems run. Frames are
+bit-exact against the CPU engine and full replies byte-equal on all seven;
+flag-off controls keep zero counters; the battery totals are keep 62, compete
+4, secure 1 and gate stops 38,844, and every flagged scene moves the physics
+(first divergence 34.7 to 84.3 s). `tests/wave12c_modes.rs` moved the
+named-fallback row to the 2400 m course 10108, and `facade_gate` accepts the
+flag at 2000 m and quotes the fallback at 2400 m.
 
 
 ## Grid mode

@@ -1,8 +1,10 @@
 //! Host lane for the classic (non-retail) physics kernel. Construction runs
 //! here with the engine's own Rust float math (stats, seeding chain, sections,
-//! duel and spot constants), so the kernel carries no powf or log10 and every
-//! constructor value reaches the device exactly as RaceSolver::new computes it.
-//! The kernel runs the tick loop and the per-tick rng consumers.
+//! duel and spot constants), so every constructor value reaches the device
+//! exactly as RaceSolver::new computes it. The kernel runs the tick loop, the
+//! per-tick rng consumers and the flag-only competition systems, whose powf
+//! and log10 come from the prepended rng_core, powf_core and initialization
+//! sources.
 
 use crate::course_data;
 use crate::dep_cpu;
@@ -57,6 +59,7 @@ pub const D_LASTSTR_END: usize = 5;
 pub const D_LASTCORNER_START: usize = 6;
 pub const D_BASESPEED: usize = 7;
 pub const D_GROUNDMOD: usize = 9;
+pub const D_LATER: usize = 10;
 pub const CLS_RD_SLOPES: usize = 16 + 64 * CLS_MAXR;
 pub const CLS_RD_STRIDE: usize = CLS_RD_SLOPES + 48;
 pub const F_LANE0: usize = 0;
@@ -91,14 +94,14 @@ pub const F_STYLECNT: usize = 59;
 pub const F_NIGECNT: usize = 60;
 pub const F_SPOTP: usize = 61;
 
-pub const CLS_ST_STRIDE: usize = 16 + 17 * CLS_MAXR;
+pub const CLS_ST_STRIDE: usize = 16 + 20 * CLS_MAXR;
 pub const S_FALLBACK: usize = 0;
 pub const S_TICKS: usize = 1;
 pub const S_END: usize = 2;
 pub const CLS_ST_RUN0: usize = 16;
-pub const CLS_ST_RUN_STRIDE: usize = 17;
+pub const CLS_ST_RUN_STRIDE: usize = 20;
 
-pub const CLS_SU_STRIDE: usize = 24400 + crate::skills_compile::SK_STRIDE + 25704;
+pub const CLS_SU_STRIDE: usize = 24400 + crate::skills_compile::SK_STRIDE + 26664;
 pub const CLS_SD_STRIDE: usize = 118336;
 
 // The compiled skill table rides the SU channel after the dynamic region the
@@ -115,6 +118,7 @@ pub const CLS_SKD_PENDING: usize = CLS_SKD + 976;
 pub const CLS_SKD_SEQLEN: usize = CLS_SKD + 3856;
 pub const CLS_SKD_SEQ: usize = CLS_SKD + 4456;
 pub const CLS_SKD_QMETA: usize = CLS_SKD + 23656;
+pub const CLS_SKD_PRE: usize = CLS_SKD + 25704;
 
 pub const S_LSTTRANS: usize = 6;
 pub const S_SPURTT: usize = 8;
@@ -122,6 +126,12 @@ pub const S_SPURTD: usize = 10;
 pub const S_TEMPT: usize = 12;
 pub const S_RSCNT: usize = 13;
 pub const S_SPURTTICK: usize = 14;
+// Diagnostic activation counts for the flag-only competition systems:
+// stamina-keep, compete-before-spurt, secure-lead and keep's gate stops.
+pub const S_STAT_KEEP: usize = 15;
+pub const S_STAT_CMP: usize = 16;
+pub const S_STAT_SEC: usize = 17;
+pub const S_STAT_GATE: usize = 18;
 
 pub const CLS_RP_COMPLEN: usize = 0;
 pub const CLS_RP_PHRCOUNT: usize = 1;
@@ -386,6 +396,27 @@ pub fn classic_gate_reason(request: &str) -> Option<String> {
     }
 }
 
+/// The classic lane refuses the flag-only stamina systems only above 2100 m,
+/// where the engine injects the synthetic staminasyoubu skill
+/// (race_solver_builder.rs:819). None means answerable.
+pub fn later_stamina_refusal(request: &str) -> Option<String> {
+    let root = json::parse(request).ok()?;
+    if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let course_id = root.get_i64("courseId").ok()?;
+    let courses = initialization::engine_json("data/course_data.json").ok()?;
+    let distance = courses.get(&course_id.to_string())?.get_f64("distance").ok()?;
+    if distance > 2100.0 {
+        Some(LATER_STAMINA_ABOVE_2100.to_string())
+    } else {
+        None
+    }
+}
+
+const LATER_STAMINA_ABOVE_2100: &str =
+    "staminasyoubu, injected above 2100 m, stays outside the classic kernel";
+
 fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<Prepared, String> {
     let root = json::parse(request)?;
     let course_id = root.get_i64("courseId")? as i32;
@@ -430,8 +461,13 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
     if root.get("experimentalGrid").is_some() {
         return Ok(flagged(n, "experimentalGrid belongs to the retail lane".into()));
     }
-    if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool).unwrap_or(false) {
-        return Ok(flagged(n, "later stamina mechanics are not in the classic kernel".into()));
+    let later_stamina =
+        root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool).unwrap_or(false);
+    if later_stamina && course.distance > 2100.0 {
+        // The engine injects the synthetic staminasyoubu skill above 2100 m
+        // (race_solver_builder.rs:819); the classic kernel models the three
+        // timed systems but not that construction hook.
+        return Ok(flagged(n, LATER_STAMINA_ABOVE_2100.into()));
     }
     // singleMode is ported: the +400 lands inside the stats_reference chain
     // (race_solver_builder.rs:304-321). A non-boolean flag is ignored, like
@@ -528,6 +564,7 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
     rd[D_LASTCORNER_START] = course.last_corner_start.unwrap_or(f64::INFINITY);
     rd[D_BASESPEED] = base_speed(course.distance);
     rd[D_GROUNDMOD] = HP_CONSUMPTION_GROUND_MODIFIER[course.surface as usize][ground as usize];
+    rd[D_LATER] = later_stamina as u8 as f64;
     for (k, &(start, length, slope)) in course.slopes.iter().enumerate() {
         rd[CLS_RD_SLOPES + 3 * k] = start;
         rd[CLS_RD_SLOPES + 3 * k + 1] = start + length;
@@ -764,6 +801,10 @@ pub struct ClassicGpu {
     pub tempt_all: Vec<u32>,
     pub rscore_all: Vec<u32>,
     pub spurt_tick_all: Vec<u32>,
+    /// Activation counts for the flag-only competition systems:
+    /// [stamina-keep, compete-before-spurt, secure-lead, keep gate stops].
+    /// Diagnostics only, never part of a reply.
+    pub later_stats: [u32; 4],
     pub comp: Vec<u32>,
     pub phr: Vec<u32>,
     /// Unified skillEvents stream in engine push order, tag-word records:
@@ -908,6 +949,7 @@ impl ClassicContext {
                 tempt_all: Vec::new(),
                 rscore_all: Vec::new(),
                 spurt_tick_all: Vec::new(),
+                later_stats: [0; 4],
                 comp: Vec::new(),
                 phr: Vec::new(),
                 skev: Vec::new(),
@@ -968,6 +1010,12 @@ impl ClassicContext {
                     out.spurt_tick_all = (0..race.n)
                         .map(|r| st[S_FIN0 + r * CLS_ST_RUN_STRIDE + S_SPURTTICK])
                         .collect();
+                    out.later_stats = [
+                        st[S_FIN0 + S_STAT_KEEP],
+                        st[S_FIN0 + S_STAT_CMP],
+                        st[S_FIN0 + S_STAT_SEC],
+                        st[S_FIN0 + S_STAT_GATE],
+                    ];
                     let rp = &rp_records[(slot - 1) * CLS_RP_STRIDE..][..CLS_RP_STRIDE];
                     let clen = (rp[CLS_RP_COMPLEN] as usize).min(CLS_RP_COMP_CAP);
                     let plen = (rp[CLS_RP_PHRCOUNT] as usize).min(CLS_RP_PHR_CAP);

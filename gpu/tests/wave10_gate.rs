@@ -432,7 +432,8 @@ fn facade_full_batch_answers_every_race() {
             panic!("facade seed {seed}:\n{}", first_difference(reply, &engine));
         }
     }
-    // A single-mode request stays on the CPU lane, the batch's others stay answered.
+    // A single-mode request is answered by the kernel (wave 13a) byte-equal
+    // to the engine, and it joins the batch's single launch.
     let trace = patched_requests(
         &Value::Null,
         &[("singleMode", Value::Bool(true))],
@@ -441,8 +442,9 @@ fn facade_full_batch_answers_every_race() {
     );
     let mixed: Vec<String> = vec![requests[0].clone(), trace[0].0.clone(), requests[1].clone()];
     let outcomes = gpu.run_batch_full(&mixed, &[1, 1, 2]).expect("mixed batch");
-    assert!(outcomes[1].reply.is_none(), "singleMode must not answer on the GPU lane");
-    assert!(outcomes[1].fallback.is_some(), "singleMode carries a fallback reason");
+    assert!(outcomes[1].fallback.is_none(), "singleMode answers on the GPU lane");
+    let want = engine_reply(&trace[0].0, 1);
+    assert_eq!(outcomes[1].reply.as_deref(), Some(want.as_str()), "singleMode answers byte-equal");
     assert!(outcomes[0].reply.is_some() && outcomes[2].reply.is_some());
 }
 

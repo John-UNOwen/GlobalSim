@@ -510,8 +510,11 @@ fn live_state_leaves_answer_both_directions_in_a_field() {
 // The merged table's own ids whose conditions read live state, one white-copy
 // family per band plus the gold and start-up copies: order and order_rate
 // bands at the final corner and the closing straights, a near-count id, the
-// surrounded and clock ids, and the near-count-with-clock pack id. The v77
-// field is 9 horses; every id is hosted. wisdomCheck ids (all but the gold
+// surrounded and clock ids, and the near-count-with-clock pack id, plus the
+// wave 13a closes: 120131 (duration_usage 3 HP tiers, horse 5 so its late
+// speed buff cannot disturb 900351's blocking on horse 8) and 900351
+// (blocked_side_continuetime prerequisite). The v77 field is 9 horses; every
+// id is hosted. wisdomCheck ids (all but the gold
 // copies and the clock ids) lose the per-(horse, seed) lottery on some seeds,
 // so each id must appear in the fired set on at least one of the six seeds.
 const REAL_HOSTS: [(usize, &[i64]); 9] = [
@@ -520,10 +523,10 @@ const REAL_HOSTS: [(usize, &[i64]); 9] = [
     (2, &[900201, 900311]),
     (3, &[900521, 100201, 100521]),
     (4, &[200401, 200481]),
-    (5, &[201591, 201592]),
+    (5, &[201591, 201592, 120131]),
     (6, &[900071, 900251]),
     (7, &[100311, 100061]),
-    (8, &[100071]),
+    (8, &[100071, 900351]),
 ];
 
 const REAL_SEEDS: [i64; 6] = [1, 2, 3, 4, 5, 6];

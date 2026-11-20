@@ -223,11 +223,11 @@ fn roster_121_is_a_kernel_capacity_refusal_not_an_engine_error() {
 
 /// singleMode is a real engine mode: the adjusted stats gain +400
 /// (race_solver_builder.rs:304-320) and the reply carries singleModeVersion
-/// (lib.rs:1125-1128). The retail lane ports neither and refuses by name;
-/// the classic lane folds the +400 into the stats reference. A non-boolean
-/// singleMode is ignored by the engine (lib.rs:342), and
-/// that ignore is ported: the GPU full reply answers it byte-equal to the
-/// engine on seeds 1 through 3.
+/// (lib.rs:1125-1128). Both lanes port the fold: the retail gate here pins
+/// the full reply byte-equal with the tag, and the classic lane pins frames
+/// and reply in `wave12c_modes`. A non-boolean singleMode is ignored by the
+/// engine (lib.rs:342), and that ignore is ported: the GPU full reply
+/// answers it byte-equal to the engine on seeds 1 through 3.
 #[test]
 fn single_mode_is_an_engine_mode_and_the_non_boolean_form_is_ignored() {
     register_geometry(10504);
@@ -243,9 +243,17 @@ fn single_mode_is_an_engine_mode_and_the_non_boolean_form_is_ignored() {
     let engine_off = engine_reply(&base, 1);
     assert_ne!(engine_on, engine_off, "single mode changes the engine's answer");
 
-    let (kernel, gate) = kernel_refusals(&on);
-    assert_eq!(kernel, "singleMode is outside the GPU lane");
-    assert_eq!(gate.as_deref(), Some("singleMode is outside the GPU lane"));
+    // The retail full lane answers the true form byte-equal with the tag.
+    let run = race_exec::run_full(&[(on.clone(), 1i64)]).expect("kernel run");
+    let race = &run.races[0];
+    assert!(race.fallback.is_none(), "the retail full lane accepts singleMode");
+    let gpu = full_reply::build(&on, 1, race).expect("full reply");
+    assert_eq!(gpu, engine_on, "singleMode answers byte-equal");
+    assert_eq!(
+        json::parse(&gpu).expect("reply").get_f64("singleModeVersion").expect("singleModeVersion"),
+        1.0,
+        "the GPU reply carries the engine's tag"
+    );
 
     let non_bool = patched(&[("singleMode", json::num(1.0))], None, 1);
     assert_eq!(engine_reply(&non_bool, 1), engine_off, "the engine ignores a non-boolean singleMode");
@@ -255,6 +263,7 @@ fn single_mode_is_an_engine_mode_and_the_non_boolean_form_is_ignored() {
         let race = &run.races[0];
         assert!(race.fallback.is_none(), "the GPU full lane accepts the ignored form");
         let gpu = full_reply::build(&request, seed, race).expect("full reply");
+        assert!(!gpu.contains("singleModeVersion"), "the ignored form must not tag the reply");
         assert_eq!(gpu, engine_reply(&request, seed), "seed {seed} answers byte-equal");
     }
 }
@@ -318,21 +327,22 @@ fn trace_conserve_power_is_reply_diagnostics_only() {
 /// experimentalLaterStaminaMechanics is a real engine mode: it adds the
 /// stamina keep, compete-before-spurt, and secure-lead per-tick systems
 /// (race_solver.rs:2751-2756) and the reply echoes the flag (lib.rs:1071).
-/// The kernel ports none of it and refuses by name on both lanes.
+/// The classic lane ports them (gpu/tests/wave13a_later_stamina.rs); the
+/// retail lane refuses by name because its kernel resolves randomness on the
+/// host.
 #[test]
 fn later_stamina_mechanics_is_an_engine_mode_refused_by_name() {
     register_geometry(10504);
     let on = patched(&[("experimentalLaterStaminaMechanics", Value::Bool(true))], None, 1);
     let reply = json::parse(&engine_reply(&on, 1)).expect("reply");
     assert_eq!(reply.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool), Some(true));
+    let want = "experimentalLaterStaminaMechanics draws from a live solver stream \
+                the retail kernel resolves host-side";
     let (kernel, gate) = kernel_refusals(&on);
-    assert_eq!(kernel, "experimentalLaterStaminaMechanics is outside the GPU lane");
-    assert_eq!(gate.as_deref(), Some("experimentalLaterStaminaMechanics is outside the GPU lane"));
+    assert_eq!(kernel, want);
+    assert_eq!(gate.as_deref(), Some(want));
     let run = race_exec::run_full(&[(on, 1i64)]).expect("kernel run");
-    assert_eq!(
-        run.races[0].fallback.as_deref(),
-        Some("experimentalLaterStaminaMechanics is outside the GPU lane")
-    );
+    assert_eq!(run.races[0].fallback.as_deref(), Some(want));
 }
 
 /// Grid mode is a fully engine-supported race shape (it even answers full,

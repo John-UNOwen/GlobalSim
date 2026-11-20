@@ -843,6 +843,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         ib[US_CSS1] = rb[RR_CSS1];
         ib[US_CSS2] = rb[RR_CSS2];
         ib[US_CSS3] = rb[RR_CSS3];
+        ib[US_SINGLE] = ri[RI_SINGLE];
         for (int s = 0; s < 121; s++) {
             scr[SCR_STATS_OUT + r * 160 + s] = 0u;
         }

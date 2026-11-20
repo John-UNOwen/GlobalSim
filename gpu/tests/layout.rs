@@ -114,12 +114,13 @@ fn classic_scratch_regions_match_the_kernel_mirrors() {
     assert_eq!(ce::CLS_RD_STRIDE, ce::CLS_RD_SLOPES + 3 * ce::CLS_MAX_SLOPES);
     assert_eq!(ce::CLS_RD_STRIDE, 7744);
     assert_eq!(ce::CLS_ST_STRIDE, ce::CLS_ST_RUN0 + ce::CLS_ST_RUN_STRIDE * ce::CLS_MAXR);
-    assert_eq!(ce::CLS_ST_STRIDE, 16 + 17 * ce::CLS_MAXR);
-    assert_eq!(ce::CLS_ST_STRIDE, 2056);
+    assert_eq!(ce::CLS_ST_STRIDE, 16 + 20 * ce::CLS_MAXR);
+    assert_eq!(ce::CLS_ST_STRIDE, 2416);
     // SU stacks the uint scratch, the compiled skill table, and the classic
-    // skill runtime block (queue, consumption, pending, sequences, meta).
-    assert_eq!(ce::CLS_SU_STRIDE, 24400 + sk::SK_STRIDE + 25704);
-    assert_eq!(ce::CLS_SU_STRIDE, 105976);
+    // skill runtime block (queue, consumption, pending, sequences, meta, the
+    // per-record prerequisite latches).
+    assert_eq!(ce::CLS_SU_STRIDE, 24400 + sk::SK_STRIDE + 26664);
+    assert_eq!(ce::CLS_SU_STRIDE, 106936);
     assert_eq!(ce::CLS_SD_STRIDE, 118336);
     // uint scratch stacking per classic_core.cl: header words 0..512, runner
     // blocks (72 words each, the reply-mirror slots included), target map
@@ -137,6 +138,8 @@ fn classic_scratch_regions_match_the_kernel_mirrors() {
     // queue meta at +23656 spans the 2048-word queue cap.
     assert_eq!(ce::CLS_SKD, 24400 + sk::SK_STRIDE);
     assert_eq!(ce::CLS_SKD_QMETA + 2048 - ce::CLS_SKD, 25704);
+    assert_eq!(ce::CLS_SKD_PRE - ce::CLS_SKD, 25704);
+    assert_eq!(ce::CLS_SKD_PRE + sk::SK_RMAX, ce::CLS_SKD + 26664);
     assert_eq!(ce::CLS_SKD_PENDING - ce::CLS_SKD, 976);
     assert_eq!(ce::CLS_SKD_SEQLEN - ce::CLS_SKD, 3856);
     assert_eq!(ce::CLS_SKD_SEQ - ce::CLS_SKD, 4456);
@@ -147,17 +150,21 @@ fn classic_scratch_regions_match_the_kernel_mirrors() {
     assert_eq!(ce::S_LSTTRANS + 2, ce::S_SPURTT);
     assert_eq!(ce::S_SPURTT + 2, ce::S_SPURTD);
     assert!(ce::S_SPURTTICK + 2 < ce::CLS_ST_RUN_STRIDE);
+    // The activation diagnostics sit right after the tick mirror, in slots
+    // 15..19 of the widened runner block.
+    assert_eq!(ce::S_STAT_KEEP, ce::S_SPURTTICK + 1);
+    assert!(ce::S_STAT_GATE + 1 < ce::CLS_ST_RUN_STRIDE);
     // double scratch stacking: field tables below the runner block (duel park
     // and proximity mirrors each span 120*120), runner blocks, then the skill
     // runtime mirrors in kernel order: record windows, slot cooldown clocks,
     // instance timers, pending pairs, queue durations.
     assert_eq!(14912 + ce::CLS_MAXR * ce::CLS_MAXR, 29312);
-    assert_eq!(41216 + 112 * ce::CLS_MAXR, 54656);
+    assert_eq!(41216 + 120 * ce::CLS_MAXR, 55616);
     assert_eq!(55808 + 40 * 960, 94208);
     assert_eq!(94208 + 960 + 120 * 5 * 32, 114368);
     assert_eq!(114368 + 120 * 8 * 2 + 2048, ce::CLS_SD_STRIDE);
     // The per-race frame buffer matches the kernel capture row stride.
-    assert!(54656 <= ce::CLS_SD_STRIDE);
+    assert!(55616 <= ce::CLS_SD_STRIDE);
 }
 
 #[test]

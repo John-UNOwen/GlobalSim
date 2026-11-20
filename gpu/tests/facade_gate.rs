@@ -507,10 +507,15 @@ fn gate_reasons_names_every_refusal() {
         facade::gate_reasons(classic_trace, Some(&accepted)).as_deref(),
         Some("traceConservePower requires experimentalRetailRuntime")
     );
+    // The flag-only systems are ported to the classic lane up to 2100 m, so
+    // the gate accepts; above 2100 m the staminasyoubu injection falls back.
     let classic_stamina = r#"{"courseId":10504,"experimentalLaterStaminaMechanics":true,"horses":[{}]}"#;
+    assert_eq!(facade::gate_reasons(classic_stamina, Some(&accepted)), None);
+    let classic_stamina_far =
+        r#"{"courseId":10108,"experimentalLaterStaminaMechanics":true,"horses":[{}]}"#;
     assert_eq!(
-        facade::gate_reasons(classic_stamina, Some(&accepted)).as_deref(),
-        Some("later stamina mechanics are not in the classic kernel")
+        facade::gate_reasons(classic_stamina_far, Some(&accepted)).as_deref(),
+        Some("staminasyoubu, injected above 2100 m, stays outside the classic kernel")
     );
     // singleMode is ported on the classic lane: the +400 fold runs in the
     // adjusted stats, so the gate accepts it.

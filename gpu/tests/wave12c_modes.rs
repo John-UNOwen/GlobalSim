@@ -1,14 +1,14 @@
 //! Wave 12c Front C: the classic request modes. The engine's own oracle
 //! classifies each flag under the classic lane (retail flags off): shapes it
 //! errors on (invalid grid, traceConservePower) must be quoted byte-for-byte
-//! by the GPU refusal; modes it answers (singleMode) must be answered by the
-//! classic kernel bit-exact, and the named host fallbacks (later stamina,
-//! grid starts) must carry their exact reason so the app hands those to the
-//! host instead of approximating.
+//! by the GPU refusal; modes it answers (singleMode, later stamina up to
+//! 2100 m) must be answered by the classic kernel bit-exact, and the named
+//! host fallbacks (later stamina above 2100 m, grid starts) must carry their
+//! exact reason so the app hands those to the host instead of approximating.
 
 #![cfg(feature = "race")]
 
-use globalsim_gpu::{classic_exec, classic_reply, dep_cpu, facade, json};
+use globalsim_gpu::{classic_exec, classic_reply, dep_cpu, facade, full_reply, json, race_exec};
 use json::Value;
 
 const COURSE: i32 = 10504;
@@ -132,10 +132,13 @@ fn classic_engine_answers_carry_named_host_fallbacks() {
     // grid starts (lib.rs:274-279), so this refusal is a host fallback by name.
     for (label, extra, n, want) in [
         (
-            "later stamina",
-            vec![("experimentalLaterStaminaMechanics", Value::Bool(true))],
+            "later stamina above 2100 m",
+            vec![
+                ("experimentalLaterStaminaMechanics", Value::Bool(true)),
+                ("courseId", json::num(10108.0)),
+            ],
             None,
-            "later stamina mechanics are not in the classic kernel",
+            "staminasyoubu, injected above 2100 m, stays outside the classic kernel",
         ),
         ("grid starts", vec![("experimentalGrid", grid)], Some(21),
          "experimentalGrid belongs to the retail lane"),
@@ -238,4 +241,92 @@ fn classic_non_boolean_single_mode_is_ignored() {
     assert!(!gpu_reply.contains("singleModeVersion"), "the ignored form must not tag the reply");
     let engine_reply = dep_cpu::run_cpu_binary(&on, 1).expect("cpu binary").reply;
     assert_eq!(gpu_reply, engine_reply, "the ignored form answers byte-equal");
+}
+
+/// The v77 field on the retail lane, the listed mode flags overlaid.
+fn retail_request(seed: i64, extra: &[(&str, Value)]) -> String {
+    let mut value = {
+        let text = std::fs::read_to_string(repo_file("examples/v77-race.jsonl")).expect("request");
+        json::parse(text.lines().next().expect("first line")).expect("v77 parses")
+    };
+    {
+        let Value::Object(map) = &mut value else { unreachable!() };
+        for (k, v) in extra {
+            map.insert((*k).into(), v.clone());
+        }
+        map.insert("seed".into(), Value::Number(seed as f64));
+    }
+    let mut text = String::new();
+    json::to_string_into(&value, &mut text);
+    text
+}
+
+/// singleMode is ported to the retail kernel too: the +400 fold lands inside
+/// the im_stats clamps (race_solver_builder.rs:304-321) and the reply carries
+/// singleModeVersion (lib.rs:1125-1129). Frames bit-exact against the CPU
+/// engine and the full reply byte-equal on every seed; the fold really moved
+/// the physics: frames differ from the flag-off field, and the flag-off
+/// frames equal the untouched v77.
+#[test]
+fn retail_single_mode_answers_bit_exact() {
+    register_geometry(COURSE);
+    let on = retail_request(1, &[("singleMode", Value::Bool(true))]);
+    let off = retail_request(1, &[]);
+    assert_ne!(
+        engine_oracle(&on, 1).expect("engine answers singleMode"),
+        engine_oracle(&off, 1).expect("engine answers the field"),
+        "singleMode changes the engine's answer"
+    );
+    let mut problems: Vec<String> = Vec::new();
+    let mut any_frame_diff = false;
+    for seed in SEEDS {
+        let request = retail_request(seed, &[("singleMode", Value::Bool(true))]);
+        assert!(engine_oracle(&request, seed).is_ok(), "seed {seed}: the engine answers");
+        let out = race_exec::run(&[(request.clone(), seed)]).expect("retail kernel run");
+        let race = &out.races[0];
+        if let Some(reason) = &race.fallback {
+            problems.push(format!("seed {seed}: kernel fallback {reason}"));
+            continue;
+        }
+        let cpu = dep_cpu::run_cpu_race(&request, seed).expect("cpu race");
+        if cpu.frames.len() != race.frames.len() {
+            problems.push(format!("seed {seed}: tick count cpu {} gpu {}", cpu.frames.len(), race.frames.len()));
+            continue;
+        }
+        for (tick, (cpu_frame, gpu_frame)) in cpu.frames.iter().zip(race.frames.iter()).enumerate() {
+            for (runner, (cpu_row, gpu_row)) in cpu_frame.iter().zip(gpu_frame.iter()).enumerate() {
+                for (column, (cpu, gpu)) in cpu_row.iter().zip(gpu_row.iter()).enumerate() {
+                    if cpu.to_bits() != gpu.to_bits() {
+                        problems.push(format!(
+                            "seed {seed}: tick {tick} runner {runner} column {column} cpu {} gpu {}",
+                            cpu.to_bits(),
+                            gpu.to_bits()
+                        ));
+                    }
+                }
+            }
+        }
+        let full = race_exec::run_full(&[(request.clone(), seed)]).expect("retail full run");
+        let full_race = &full.races[0];
+        let gpu_reply = full_reply::build(&request, seed, full_race).expect("full reply build");
+        if gpu_reply != engine_oracle(&request, seed).expect("engine reply") {
+            problems.push(format!("seed {seed}: singleMode retail full reply differs from the engine"));
+        }
+        // Non-vacuity: the +400 must move the physics against flag off.
+        let plain_race = race_exec::run(&[(retail_request(seed, &[]), seed)])
+            .expect("flag-off run")
+            .races
+            .into_iter()
+            .next()
+            .expect("one race");
+        if let (Some(a), Some(b)) = (plain_race.frames.get(100), race.frames.get(100)) {
+            if a[0] == b[0] {
+                problems.push(format!("seed {seed}: tick 100 runner 0 pos identical to flag-off: the +400 did nothing"));
+            } else {
+                any_frame_diff = true;
+            }
+        }
+    }
+    assert!(any_frame_diff, "the +400 fold never changed a retail frame");
+    assert!(problems.is_empty(), "{} problems:\n{}", problems.len(), problems.join("\n"));
 }

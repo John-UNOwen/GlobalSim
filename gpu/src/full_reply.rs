@@ -522,13 +522,14 @@ pub fn build(request: &str, seed: i64, race: &RaceGpu) -> Result<String, String>
     if race.grid {
         return Err("grid mode needs the engine's staggered roster ranks".to_string());
     }
-    for key in ["traceConservePower", "singleMode"] {
-        if root.get(key).and_then(Value::as_bool) == Some(true) {
-            return Err(format!("{key} is outside the full GPU lane"));
-        }
+    if root.get("traceConservePower").and_then(Value::as_bool) == Some(true) {
+        return Err("traceConservePower is outside the full GPU lane".to_string());
     }
     if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) == Some(true) {
-        return Err("experimentalLaterStaminaMechanics is outside the full GPU lane".to_string());
+        return Err(
+            "experimentalLaterStaminaMechanics draws from a live solver stream \
+             the retail kernel resolves host-side".to_string(),
+        );
     }
     let horses = root.get_array("horses")?;
     if horses.len() != n {
@@ -721,6 +722,11 @@ pub fn build(request: &str, seed: i64, race: &RaceGpu) -> Result<String, String>
         map.insert("postFinishMovementVersion".to_string(), json::num(1.0));
         if root.get("pairedRandomStreams").and_then(Value::as_bool) == Some(true) {
             map.insert("pairedRandomStreams".into(), Value::Bool(true));
+        }
+        // The engine tags a single-mode reply (lib.rs:1125-1129); a
+        // non-boolean flag is ignored, so only a true form tags.
+        if root.get("singleMode").and_then(Value::as_bool) == Some(true) {
+            map.insert("singleModeVersion".to_string(), json::num(1.0));
         }
         if let Some(signature) = root.get("dataSignature") {
             map.insert("dataSignature".to_string(), signature.clone());

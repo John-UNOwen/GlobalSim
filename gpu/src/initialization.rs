@@ -59,6 +59,7 @@ const US_CSS0: usize = 7;
 const US_CSS1: usize = 8;
 const US_CSS2: usize = 9;
 const US_CSS3: usize = 10;
+const US_SINGLE: usize = 11;
 const US_R0: usize = 16;
 const IIS_STRIDE: usize = 3;
 
@@ -120,7 +121,7 @@ pub struct StatsCase {
     /// course_set_status entries, at most 4.
     pub css: Vec<i32>,
     /// The singleMode flag adds +400 to every adjusted stat
-    /// (race_solver_builder.rs:304-321); false outside single mode.
+    /// (race_solver_builder.rs:304-321). False outside single mode.
     pub single_mode: bool,
 }
 
@@ -229,6 +230,7 @@ impl Case {
                 w[US_D] = c.strategy_apt as u32;
                 w[US_E] = c.ground as u32;
                 w[US_F] = c.css.len() as u32;
+                w[US_SINGLE] = c.single_mode as u32;
                 for (i, v) in c.css.iter().take(4).enumerate() {
                     w[US_CSS0 + i] = *v as u32;
                 }
