@@ -43,6 +43,8 @@ pub const R_HILL0: usize = 12;
 pub const R_SLOPE_IDX: usize = 44;
 pub const R_INIT_DOWNHILL: usize = 46;
 pub const R_CAPFLAG: usize = 47;
+// Free slot, kept clear of the slope rng bank R_HILL0..R_HILL0+31.
+pub const R_TEAM: usize = 4;
 
 pub const CLS_RD_RUN0: usize = 16;
 pub const CLS_RD_RUN_STRIDE: usize = 64;
@@ -87,6 +89,7 @@ pub const F_SUBPAR: usize = 57;
 pub const F_SLOPE0: usize = 58;
 pub const F_STYLECNT: usize = 59;
 pub const F_NIGECNT: usize = 60;
+pub const F_SPOTP: usize = 61;
 
 pub const CLS_ST_STRIDE: usize = 16 + 17 * CLS_MAXR;
 pub const S_FALLBACK: usize = 0;
@@ -95,8 +98,23 @@ pub const S_END: usize = 2;
 pub const CLS_ST_RUN0: usize = 16;
 pub const CLS_ST_RUN_STRIDE: usize = 17;
 
-pub const CLS_SU_STRIDE: usize = 24400;
-pub const CLS_SD_STRIDE: usize = 54784;
+pub const CLS_SU_STRIDE: usize = 24400 + crate::skills_compile::SK_STRIDE + 25704;
+pub const CLS_SD_STRIDE: usize = 118336;
+
+// The compiled skill table rides the SU channel after the dynamic region the
+// kernel owns, and the classic skill runtime state follows the table. The
+// pending map keeps one word triple per (runner, skill slot): the stored
+// ordinal and the sid plus a unique flag, mirroring the engine's
+// pending_skills entries (lib.rs:676-678, :708-720).
+pub const CLS_SK_TABLE: usize = 24400;
+pub const CLS_SKD: usize = 24400 + crate::skills_compile::SK_STRIDE;
+pub const CLS_SKD_ORD: usize = CLS_SKD;
+pub const CLS_SKD_QLEN: usize = CLS_SKD + 1;
+pub const CLS_SKD_CONSUMED: usize = CLS_SKD + 16;
+pub const CLS_SKD_PENDING: usize = CLS_SKD + 976;
+pub const CLS_SKD_SEQLEN: usize = CLS_SKD + 3856;
+pub const CLS_SKD_SEQ: usize = CLS_SKD + 4456;
+pub const CLS_SKD_QMETA: usize = CLS_SKD + 23656;
 
 pub const S_LSTTRANS: usize = 6;
 pub const S_SPURTT: usize = 8;
@@ -108,13 +126,22 @@ pub const S_SPURTTICK: usize = 14;
 pub const CLS_RP_COMPLEN: usize = 0;
 pub const CLS_RP_PHRCOUNT: usize = 1;
 pub const CLS_RP_SKLEN: usize = 2;
+pub const CLS_RP_DETLEN: usize = 3;
+pub const CLS_RP_TGTLEN: usize = 4;
+pub const CLS_RP_CNSLEN: usize = 5;
 pub const CLS_RP_COMP0: usize = 8;
 pub const CLS_RP_COMP_CAP: usize = 2400;
 pub const CLS_RP_PHR0: usize = CLS_RP_COMP0 + CLS_RP_COMP_CAP;
 pub const CLS_RP_PHR_CAP: usize = 800;
 pub const CLS_RP_SK0: usize = CLS_RP_PHR0 + CLS_RP_PHR_CAP;
-pub const CLS_RP_SK_CAP: usize = 640;
-pub const CLS_RP_STRIDE: usize = CLS_RP_SK0 + CLS_RP_SK_CAP;
+pub const CLS_RP_SK_CAP: usize = 9216;
+pub const CLS_RP_DET0: usize = CLS_RP_SK0 + CLS_RP_SK_CAP;
+pub const CLS_RP_DET_CAP: usize = 2560;
+pub const CLS_RP_TGT0: usize = CLS_RP_DET0 + CLS_RP_DET_CAP;
+pub const CLS_RP_TGT_CAP: usize = 6144;
+pub const CLS_RP_CNS0: usize = CLS_RP_TGT0 + CLS_RP_TGT_CAP;
+pub const CLS_RP_CNS_CAP: usize = 768;
+pub const CLS_RP_STRIDE: usize = CLS_RP_CNS0 + CLS_RP_CNS_CAP;
 
 const HP_STRATEGY_COEFFICIENT: [f64; 6] = [0.0, 0.95, 0.89, 1.0, 0.995, 0.86];
 const HP_CONSUMPTION_GROUND_MODIFIER: [[f64; 5]; 3] = [
@@ -256,6 +283,7 @@ fn starting_lane(gate: usize, track_id: i32, count: usize, grids: &Value) -> f64
 pub(crate) struct Prepared {
     ri: Vec<u32>,
     rd: Vec<f64>,
+    su_table: Vec<u32>,
     n: usize,
     host_fallback: Option<String>,
 }
@@ -330,7 +358,13 @@ fn classic_course(course: &Value) -> Result<ClassicCourse, String> {
 }
 
 fn flagged(n: usize, reason: String) -> Prepared {
-    Prepared { ri: vec![0u32; CLS_RI_STRIDE], rd: vec![0f64; CLS_RD_STRIDE], n, host_fallback: Some(reason) }
+    Prepared {
+        ri: vec![0u32; CLS_RI_STRIDE],
+        rd: vec![0f64; CLS_RD_STRIDE],
+        su_table: vec![0u32; crate::skills_compile::SK_STRIDE],
+        n,
+        host_fallback: Some(reason),
+    }
 }
 
 /// A flagged entry for a request that did not parse, so the facade's batch
@@ -339,14 +373,27 @@ pub(crate) fn stub(reason: String) -> Prepared {
     flagged(0, reason)
 }
 
+/// The gate_reasons mirror of the classic lane's fallback reasons: the same
+/// prepare() the batch runs, so the gate cannot drift from the executor. A
+/// prepare error is a fallback too (the batch stubs with the error text).
+/// None means nothing falls back (or the engine data cannot be read).
+pub fn classic_gate_reason(request: &str) -> Option<String> {
+    let grids = json::parse(&dep_cpu::engine_data("starting_grids.json").ok()?).ok()?;
+    let courses = initialization::engine_json("data/course_data.json").ok()?;
+    match prepare(request, 0, &grids, &courses) {
+        Ok(prepared) => prepared.host_fallback,
+        Err(reason) => Some(reason),
+    }
+}
+
 fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<Prepared, String> {
     let root = json::parse(request)?;
     let course_id = root.get_i64("courseId")? as i32;
     let horses = root.get_array("horses")?;
     let n = horses.len();
-    let course = classic_course(
-        courses.get(&course_id.to_string()).ok_or("course_data.json has no entry for the course")?,
-    )?;
+    let course_json =
+        courses.get(&course_id.to_string()).ok_or("course_data.json has no entry for the course")?;
+    let course = classic_course(course_json)?;
 
     // Domain gates. Each maps to a host fallback, never to an approximation.
     // Any of the four retail flags builds the retail config (lib.rs:1514-1523),
@@ -370,9 +417,6 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
     if root.get("traceConservePower").and_then(Value::as_bool).unwrap_or(false) {
         return Ok(flagged(n, "conserve-power tracing is not in the classic kernel".into()));
     }
-    if horses.iter().any(|h| h.get("skills").and_then(Value::as_array).is_some_and(|s| !s.is_empty())) {
-        return Ok(flagged(n, "the classic kernel does not run skills".into()));
-    }
     if n == 0 || n > CLS_MAXR {
         return Ok(flagged(n, "roster size outside the kernel's range".into()));
     }
@@ -395,6 +439,36 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
     if raws.iter().any(|r| !r.iter().all(|v| v.is_finite())) {
         return Ok(flagged(n, "raw stats beyond the host stats authority".into()));
     }
+
+    // The asitame injection arms on the adjusted raw power, which only the
+    // stats authority knows (race_solver_builder.rs:802, :295), so the plan
+    // needs one stats pass before the compiler runs. The main loop re-runs
+    // the same deterministic reference per runner.
+    let mut extras = crate::skills_compile::ClassicExtras { raw_power: Vec::new(), strategy: Vec::new() };
+    for (r, horse) in horses.iter().enumerate() {
+        let strategy = strategy_id(horse.get_str("strategy")?)?;
+        let stapt = aptitude_id(horse.get_str("strategyAptitude")?)?;
+        let stats_case = StatsCase {
+            raw: raws[r],
+            mood: horse.get_i64("mood")? as i32,
+            rank: horse.get("teamRank").and_then(Value::as_i64).unwrap_or(0) as i32,
+            surface: course.surface,
+            strategy_apt: stapt,
+            ground,
+            css: course.css.clone(),
+        };
+        let stats = initialization::stats_reference(&stats_case);
+        if stats.fallback != 0 {
+            return Ok(flagged(n, "the initialization reference flagged".into()));
+        }
+        extras.raw_power.push(f64::from_bits(stats.raw_power));
+        extras.strategy.push(strategy);
+    }
+    let plan = crate::skills_compile::plan_classic_with(&root, course_json, &extras);
+    if let Some(reason) = plan.reason {
+        return Ok(flagged(n, reason));
+    }
+    let bumps = plan.bumps;
 
     let mut ri = vec![0u32; CLS_RI_STRIDE];
     let mut rd = vec![0f64; CLS_RD_STRIDE];
@@ -451,12 +525,8 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         if stats.fallback != 0 {
             return Ok(flagged(n, "the initialization reference flagged".into()));
         }
-        // The injected asitame arms on the mood and rank adjusted power, not on
-        // the request's power field (race_solver_builder.rs:802 and :295).
-        if f64::from_bits(stats.raw_power) > 1200.0 {
-            return Ok(flagged(n, "asitame release (adjusted raw power above 1200) needs the classic conserve-power release scan".into()));
-        }
-        let [speed, stamina, power, guts, wisdom] = stats.adjusted_f64();
+        let [mut speed, mut stamina, mut power, mut guts, mut wisdom] = stats.adjusted_f64();
+        let mut kakari_chance = 0.0f64;
 
         // The per-runner seeding chain, the engine draw order kept exact:
         // builder pair, hp seed, goroshi and pace, gate roll, random lot,
@@ -472,6 +542,22 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         let _gate_roll = solver.uniform(12252240.0);
         let _random_lot = solver.uniform(100.0);
         let start_delay = 0.1 * solver.random();
+        // The constructor skill pass (race_solver.rs:1008) lands its static
+        // fires between the start-delay draw and everything that reads the
+        // stats, so the compiler-listed bumps move the fields here. The stat
+        // writes carry the engine's max(1.0) clamp per field
+        // (race_solver.rs:695-709), the kakari bonus runs in f64.
+        for (b, kind, modifier) in bumps.iter().filter(|(b, _, _)| *b == r) {
+            let _ = b;
+            match *kind {
+                1 => speed = (speed + modifier).max(1.0),
+                2 => stamina = (stamina + modifier).max(1.0),
+                3 => power = (power + modifier).max(1.0),
+                4 => guts = (guts + modifier).max(1.0),
+                5 => wisdom = (wisdom + modifier).max(1.0),
+                _ => kakari_chance += modifier / 100.0,
+            }
+        }
         let mut hills: Vec<(u32, u32)> = course
             .slopes
             .iter()
@@ -495,7 +581,9 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         }
         let section_length = course.distance / 24.0;
         let mut kakari_start = (2.0 + solver.uniform(7.0) as f64) * section_length;
-        if solver.random() > (0.65 / (0.1 * wisdom + 1.0).log10()).powi(2) {
+        if solver.random()
+            > (0.65 / (0.1 * wisdom + 1.0).log10()).powi(2) + kakari_chance
+        {
             kakari_start = course.distance + 9999.0;
         }
         let r1 = solver.random();
@@ -554,6 +642,7 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         rd[db + F_SPOTM] = (500.0 * guts.max(1.0)).powf(0.6) * 0.0001;
         rd[db + F_SPOTD] = (700.0 * guts.max(1.0)).powf(0.5) * 0.012
             * STRATEGY_PROFICIENCY_MODIFIER_APPROX[stapt];
+        rd[db + F_SPOTP] = STRATEGY_PROFICIENCY_MODIFIER_APPROX[stapt];
         rd[db + F_SUBPAR] = ((15.0 + 0.05 * wisdom) * 1000.0).round();
         rd[db + F_SLOPE0] = slope_per0;
         rd[db + F_STYLECNT] = style_count(strategy) as f64;
@@ -575,8 +664,9 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         }
         ri[rb + R_SLOPE_IDX] = slope_idx;
         ri[rb + R_INIT_DOWNHILL] = init_downhill;
+        ri[rb + R_TEAM] = horse.get("teamId").and_then(Value::as_i64).unwrap_or(0) as u32;
     }
-    Ok(Prepared { ri, rd, n, host_fallback: None })
+    Ok(Prepared { ri, rd, su_table: plan.words, n, host_fallback: None })
 }
 
 /// One race as the classic kernel ran it. Rows carry the six replay columns
@@ -605,7 +695,13 @@ pub struct ClassicGpu {
     pub spurt_tick_all: Vec<u32>,
     pub comp: Vec<u32>,
     pub phr: Vec<u32>,
-    pub kakari: Vec<u32>,
+    /// Unified skillEvents stream in engine push order, tag-word records:
+    /// tag 0 skill (ordinal, runner, sid, unique, t bits, duration bits) and
+    /// tag 1 kakari (runner, t bits, duration bits).
+    pub skev: Vec<u32>,
+    pub skdet: Vec<u32>,
+    pub sktgt: Vec<u32>,
+    pub skcns: Vec<u32>,
 }
 
 pub struct ClassicRun {
@@ -678,7 +774,13 @@ impl ClassicContext {
             }
             let b_ri = read_only(&queue, &ri_all)?;
             let b_rd = read_only(&queue, &rd_all)?;
-            let b_su = read_write(&queue, &vec![0u32; mc * CLS_SU_STRIDE])?;
+            let mut su_all = vec![0u32; mc * CLS_SU_STRIDE];
+            for (slot, &i) in launched[chunk_start..chunk_start + mc].iter().enumerate() {
+                let at = slot * CLS_SU_STRIDE + CLS_SK_TABLE;
+                su_all[at..at + crate::skills_compile::SK_STRIDE]
+                    .copy_from_slice(&prepared[i].su_table);
+            }
+            let b_su = read_write(&queue, &su_all)?;
             let b_sd = read_write(&queue, &vec![0f64; mc * CLS_SD_STRIDE])?;
             let b_frames = read_write(&queue, &vec![0f64; mc * CLS_MAX_TICKS * nmax * CLS_FRAME_COLS])?;
             let b_status = read_write(&queue, &vec![0u32; mc * CLS_ST_STRIDE])?;
@@ -737,7 +839,10 @@ impl ClassicContext {
                 spurt_tick_all: Vec::new(),
                 comp: Vec::new(),
                 phr: Vec::new(),
-                kakari: Vec::new(),
+                skev: Vec::new(),
+                skdet: Vec::new(),
+                sktgt: Vec::new(),
+                skcns: Vec::new(),
             };
             if race.host_fallback.is_none() {
                 let st = &status[slot * CLS_ST_STRIDE..][..CLS_ST_STRIDE];
@@ -796,9 +901,15 @@ impl ClassicContext {
                     let clen = (rp[CLS_RP_COMPLEN] as usize).min(CLS_RP_COMP_CAP);
                     let plen = (rp[CLS_RP_PHRCOUNT] as usize).min(CLS_RP_PHR_CAP);
                     let klen = (rp[CLS_RP_SKLEN] as usize).min(CLS_RP_SK_CAP);
+                    let dlen = (rp[CLS_RP_DETLEN] as usize).min(CLS_RP_DET_CAP);
+                    let tlen = (rp[CLS_RP_TGTLEN] as usize).min(CLS_RP_TGT_CAP);
+                    let cnlen = (rp[CLS_RP_CNSLEN] as usize).min(CLS_RP_CNS_CAP);
                     out.comp = rp[CLS_RP_COMP0..CLS_RP_COMP0 + clen].to_vec();
                     out.phr = rp[CLS_RP_PHR0..CLS_RP_PHR0 + plen].to_vec();
-                    out.kakari = rp[CLS_RP_SK0..CLS_RP_SK0 + klen].to_vec();
+                    out.skev = rp[CLS_RP_SK0..CLS_RP_SK0 + klen].to_vec();
+                    out.skdet = rp[CLS_RP_DET0..CLS_RP_DET0 + dlen].to_vec();
+                    out.sktgt = rp[CLS_RP_TGT0..CLS_RP_TGT0 + tlen].to_vec();
+                    out.skcns = rp[CLS_RP_CNS0..CLS_RP_CNS0 + cnlen].to_vec();
                 }
             }
             races.push(out);

@@ -10,7 +10,7 @@
 
 #![cfg(feature = "race")]
 
-use globalsim_gpu::{classic_exec, dep_cpu, json, race_exec};
+use globalsim_gpu::{classic_exec, classic_reply, dep_cpu, json, race_exec};
 
 const COURSES: [i32; 2] = [10504, 10508];
 const SEEDS: [i64; 3] = [1, 2, 3];
@@ -73,10 +73,10 @@ fn field_request(base: &str, course: i32, seed: i64) -> String {
 }
 
 /// Mood lifts power into the range where the injected asitame arms
-/// (`race_solver_builder.rs:802`), and that release is wave 12b work, so the
-/// lane refuses the race instead of answering without it.
+/// (`race_solver_builder.rs:802`). The classic kernel now runs that release,
+/// so the race answers instead of being refused, bit for bit.
 #[test]
-fn adjusted_raw_power_above_1200_is_refused() {
+fn adjusted_raw_power_above_1200_answers_bit_exact() {
     let mut value = json::parse(&v77_line()).expect("parse v77 line");
     if let json::Value::Object(map) = &mut value {
         for key in [
@@ -97,9 +97,39 @@ fn adjusted_raw_power_above_1200_is_refused() {
     let mut text = String::new();
     json::to_string_into(&value, &mut text);
     let request = race_exec::solo_request(&text, 10504, 1).expect("solo request");
-    let out = classic_exec::run(&[(request, 1)]).expect("classic kernel run");
-    let reason = out.races[0].fallback.clone().expect("refusal expected");
-    assert!(reason.contains("asitame"), "{reason}");
+    let out = classic_exec::run(&[(request.clone(), 1)]).expect("classic kernel run");
+    let race = &out.races[0];
+    if let Some(reason) = &race.fallback {
+        panic!("asitame race refused: {reason}");
+    }
+    let cpu = dep_cpu::run_cpu_race(&request, 1).expect("cpu race");
+    assert_eq!(cpu.frames.len(), race.frames.len(), "tick count");
+    for (tick, (cpu_frame, gpu_frame)) in cpu.frames.iter().zip(race.frames.iter()).enumerate() {
+        for (runner, (cpu_row, gpu_row)) in cpu_frame.iter().zip(gpu_frame.iter()).enumerate() {
+            for (column, (cpu, gpu)) in cpu_row.iter().zip(gpu_row.iter()).enumerate() {
+                assert_eq!(
+                    cpu.to_bits(),
+                    gpu.to_bits(),
+                    "tick {tick} runner {runner} column {column}"
+                );
+            }
+        }
+    }
+    let full = dep_cpu::with_retain_all_frames(&request).expect("retain request");
+    let gpu = classic_reply::build(&full, 1, race).expect("full reply");
+    let engine = dep_cpu::run_cpu_binary(&request, 1).expect("cpu binary").reply;
+    assert_eq!(gpu, engine, "full reply");
+    let engine_events = json::parse(&engine).ok().and_then(|v| {
+        v.get("conservePowerEvents")
+            .and_then(json::Value::as_array)
+            .map(|a| a.len())
+    }).unwrap_or(usize::MAX);
+    assert_eq!(
+        engine_events,
+        race.skcns.len() / 3,
+        "the conserve release must fire and match the engine count"
+    );
+    assert!(engine_events >= 1, "the asitame release never fired");
 }
 
 #[test]

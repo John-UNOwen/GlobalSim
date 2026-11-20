@@ -40,6 +40,8 @@
 #define R_SLOPE_IDX 44
 #define R_INIT_DOWNHILL 46
 #define R_CAPFLAG 47
+// Free slot, kept clear of the slope rng bank R_HILL0..R_HILL0+31.
+#define R_TEAM 4
 
 // Input doubles, one block per race. All constructor values, engine-rounded.
 #define CLS_RD_RUN0 16
@@ -85,6 +87,7 @@
 #define F_SLOPE0 58
 #define F_STYLECNT 59
 #define F_NIGECNT 60
+#define F_SPOTP 61
 
 // Status words, one block per race: fallback, ticks, loop end, per runner
 // finish times as raw f64 bits.
@@ -111,15 +114,25 @@
 #define CLS_RP_COMPLEN 0
 #define CLS_RP_PHRCOUNT 1
 #define CLS_RP_SKLEN 2
+#define CLS_RP_DETLEN 3
+#define CLS_RP_TGTLEN 4
+#define CLS_RP_CNSLEN 5
 #define CLS_RP_COMP0 8
 #define CLS_RP_COMP_CAP 2400
 #define CLS_RP_PHR0 (CLS_RP_COMP0 + CLS_RP_COMP_CAP)
 #define CLS_RP_PHR_CAP 800
 #define CLS_RP_SK0 (CLS_RP_PHR0 + CLS_RP_PHR_CAP)
-// One kakari record per runner at most (latched temptation_count), five
-// words each: runner plus the start and duration double pair.
-#define CLS_RP_SK_CAP 640
-#define CLS_RP_STRIDE (CLS_RP_SK0 + CLS_RP_SK_CAP)
+// Unified skillEvents stream in engine push order. Tag 0 is a skill entry,
+// nine words: tag, ordinal, runner, sid, unique, t bits, duration bits.
+// Tag 1 is a kakari entry, six words: tag, runner, t bits, duration bits.
+#define CLS_RP_SK_CAP 9216
+#define CLS_RP_DET0 (CLS_RP_SK0 + CLS_RP_SK_CAP)
+#define CLS_RP_DET_CAP 2560
+#define CLS_RP_TGT0 (CLS_RP_DET0 + CLS_RP_DET_CAP)
+#define CLS_RP_TGT_CAP 6144
+#define CLS_RP_CNS0 (CLS_RP_TGT0 + CLS_RP_TGT_CAP)
+#define CLS_RP_CNS_CAP 768
+#define CLS_RP_STRIDE (CLS_RP_CNS0 + CLS_RP_CNS_CAP)
 
 // Scratch words per race. Field tables first, then per-runner state, then the
 // next_overtake_times bitmap.
@@ -186,7 +199,41 @@
 // style-group leader scan (stadium_score.rs:20-30).
 #define U_TICKRANK 23952
 #define U_GLEADER 24080
-#define CLS_SU_STRIDE 24400
+// Compiled skill table, then the classic skill runtime state (all per race).
+#define CLS_SK_TABLE 24400
+#define CLS_SKD (CLS_SK_TABLE + SK_STRIDE)
+#define CLS_SKD_ORD CLS_SKD
+#define CLS_SKD_QLEN (CLS_SKD + 1)
+#define CLS_SKD_CONS (CLS_SKD + 16)
+#define CLS_SKD_PEND (CLS_SKD + 976)
+#define CLS_SKD_SLEN (CLS_SKD + 3856)
+#define CLS_SKD_SEQ (CLS_SKD + 4456)
+#define CLS_SKD_QMETA (CLS_SKD + 23656)
+#define CLS_SU_STRIDE (CLS_SKD + 25704)
+#define SK_PEND_SLOT 8
+#define SK_CAT 32
+#define SK_QMAX 2048
+#define SK_WINMAXP 16
+#define SK_FLAG_ASITAME 32768
+#define SK_FLAG_UNIQUE 65536
+// Instance token words: global effect table index (below 65536), the
+// runner-local skill slot, the activation perspective, the source-side Noop
+// placeholder, and the natural-deceleration flag.
+#define SKT_E(e) (((unsigned int)(e)) & 0xffffu)
+#define SKT_S(s) (((((unsigned int)(s)) & 0xfu) << 16))
+#define SKT_GET_E(t) ((int)((t) & 0xffffu))
+#define SKT_GET_S(t) ((int)(((t) >> 16) & 0xfu))
+#define SKT_PERSP ((uint)1 << 20)
+#define SKT_PLACE ((uint)1 << 21)
+#define SKT_NAT ((uint)1 << 22)
+// Skill instance categories, in the engine's expire walk order
+// (race_solver.rs:1949-2000): target, current, accel, lane, aux.
+#define SKC_TGT 0
+#define SKC_CUR 1
+#define SKC_ACC 2
+#define SKC_LAN 3
+#define SKC_AUX 4
+#define SKC_COUNT 5
 // Pos-keep mode codes, PosKeepMode in race_solver.rs.
 #define PK_NONE 0
 #define PK_PACEDOWN 1
@@ -213,7 +260,29 @@
 #define UDB_SPURTN 31584
 #define CLS_SD_RUN0 41216
 #define CLS_SD_RUN_STRIDE 112
-#define CLS_SD_STRIDE 54784
+// Skill runtime regions. Per-record windows plus the merged trigger and the
+// runner-local skill slot, then per-slot cooldown clocks, per-instance timer
+// values, the pending skillEvents pairs, and the flush queue durations.
+#define UDB_SKW 55808
+#define SKW_STRIDE 40
+#define SKW_TRIG0 0
+#define SKW_TRIG1 1
+#define SKW_NWIN 2
+#define SKW_SLOT 3
+#define SKW_WIN0 8
+#define UDB_SKCOOL (55808 + SKW_STRIDE * SK_RMAX)
+#define UDB_SKMR (UDB_SKCOOL + SK_RMAX)
+#define UDB_SKPEND (UDB_SKMR + CLS_MAXR * SKC_COUNT * SK_CAT)
+#define UDB_SKQDUR (UDB_SKPEND + CLS_MAXR * SK_PEND_SLOT * 2)
+#define SKW(rec) (c->sd + UDB_SKW + SKW_STRIDE * (rec))
+#define SKCOOL(r, s) (c->sd[UDB_SKCOOL + (r) * SK_PEND_SLOT + (s)])
+#define SKMR(r, cat, k) (c->sd[UDB_SKMR + ((r) * SKC_COUNT + (cat)) * SK_CAT + (k)])
+#define SKSEQ(r, cat, k) (c->su[CLS_SKD_SEQ + ((r) * SKC_COUNT + (cat)) * SK_CAT + (k)])
+#define SKSLEN(r, cat) (c->su[CLS_SKD_SLEN + (r) * SKC_COUNT + (cat)])
+#define SKPEND(r, s) (c->su + CLS_SKD_PEND + ((r) * SK_PEND_SLOT + (s)) * 3)
+#define SKPEND_T(r, s) (c->sd[UDB_SKPEND + ((r) * SK_PEND_SLOT + (s)) * 2])
+#define SKPEND_D(r, s) (c->sd[UDB_SKPEND + ((r) * SK_PEND_SLOT + (s)) * 2 + 1])
+#define CLS_SD_STRIDE (UDB_SKQDUR + SK_QMAX)
 #define DF_POS 0
 #define DF_SPEED 1
 #define DF_ACCEL 2
@@ -290,12 +359,24 @@
 // The runner clock at kakari activation, measured for the kakari
 // skillEvents entry the deactivate hook writes (lib.rs:653, 690-701).
 #define DF_KSTARTTIME 102
+// Live horse stats. The engine's add_stat_modifier writes move these fields
+// and the readers below consume them live (race_solver.rs:695-709, refresh
+// at :1330-1340). DF_SPEEDST/DF_STAMINA/DF_GUTS start from the adjusted
+// stats; DF_WISDOM and DF_POWER already carry the live readers.
+#define DF_SPEEDST 103
+#define DF_STAMINA 104
+#define DF_GUTS 105
+#define DF_SPOTP 106
+// 107, not 106: sharing SPOTP's slot zeroes the spot duration for any
+// runner whose distance aptitude reads as zero.
+#define DF_DISTAPT 107
 
 typedef struct cc_ctx {
     __global unsigned int* su;
     __global double* sd;
     __global const double* cd;
     __global unsigned int* rp;
+    __global const unsigned int* ri;
     int n;
     int nhills;
     int rp_over;
@@ -310,6 +391,15 @@ static void cc_update_spot(Cc* c, const int r);
 static void cc_update_dueling(Cc* c, const int r, const double dt);
 static void cc_emit_kakari(Cc* c, const unsigned int r,
     const double start_t, const double end_t);
+static void cc_sk_pass(Cc* c, const int r);
+static void cc_sk_scan(Cc* c, const int r, const int fieldless);
+static void cc_sk_init(Cc* c);
+static void cc_sk_flush(Cc* c);
+static void cc_sk_finalize_pending(Cc* c);
+static double cc_sk_vision(Cc* c, const int r);
+static int cc_sk_lane_pref(Cc* c, const int r);
+static int cc_sk_setlane(Cc* c, const int r, double* out);
+static double cc_sk_lane_speed_sum(Cc* c, const int r);
 
 // KBN compensated add, CompensatedAccumulator::add (race_solver.rs:184-208).
 static void cc_add(__global double* acc, __global double* err, const double v) {
@@ -605,7 +695,7 @@ static int cc_collect_targets(Cc* c, const int r, const int m) {
     const double lane = SR(DF_LANE);
     const double speed = SR(DF_SPEED);
     const double target = SR(DF_TARGET);
-    const double vision = 20.0;
+    const double vision = cc_sk_vision(c, r);
     int nearest = -1;
     double best_gap = 0.0;
     for (int i = 0; i < m; i++) {
@@ -672,7 +762,8 @@ static int cc_passing_lane(Cc* c, const int r, const int m, const int nt,
     const double pos = SR(DF_POS);
     const double lane = SR(DF_LANE);
     const int phase = (int)SU(UR_PHASE);
-    const double vision = 20.0;
+    const double vision = cc_sk_vision(c, r);
+    const int pref = cc_sk_lane_pref(c, r);
     const double max_lane = c->cd[D_MAXLANE];
     int ncand = 0;
     for (int ti = 0; ti < nt; ti++) {
@@ -740,7 +831,9 @@ static int cc_passing_lane(Cc* c, const int r, const int m, const int nt,
             weight = phase == 0 ? 100.0 : (phase >= 2 ? 1.149999976158142 : 1.0);
         }
         const double gap = lane - candidate;
-        const double sc = fabs(gap * weight);
+        const double skill =
+            ((pref == 1 && gap > 0.0) || (pref == 2 && gap < 0.0)) ? 1.5 : 1.0;
+        const double sc = fabs((gap * weight) * skill);
         if (sc < best_score) {
             best_score = sc;
             best = candidate;
@@ -816,7 +909,12 @@ static void cc_update_lane(Cc* c, const int r, const double dt) {
     const int m = cc_build_others(c, r);
     const int nt = cc_collect_targets(c, r, m);
     if (c->su[U_EIM]) {
-        cc_update_lane_target(c, r, m, nt);
+        double fixed;
+        if (cc_sk_setlane(c, r, &fixed)) {
+            SR(DF_LANETARGET) = fixed;
+        } else {
+            cc_update_lane_target(c, r, m, nt);
+        }
     }
     const double max_lane = c->cd[D_MAXLANE];
     SR(DF_LANETARGET) = fmin(fmax(SR(DF_LANETARGET), 0.0), max_lane);
@@ -848,7 +946,8 @@ static void cc_update_lane(Cc* c, const int r, const double dt) {
         SR(DF_LCSPEED) = fmax(target_lane_change_speed,
             SR(DF_LCSPEED) - lane_change_accel * dt);
     }
-    double actual_speed = fmin(fmax(SR(DF_LCSPEED), 0.0), 0.6);
+    double actual_speed = fmin(fmax(SR(DF_LCSPEED) + cc_sk_lane_speed_sum(c, r),
+        0.0), 0.6);
     const double direction = SR(DF_LANETARGET) > SR(DF_LANE) ? 1.0 : -1.0;
     if (direction < 0.0) {
         actual_speed *= 1.0 + SR(DF_LANE);
@@ -1338,6 +1437,12 @@ static void cc_sweep(Cc* c, const int r, const double d) {
     SR(DF_DOWNHT) += d;
     SR(DF_KTIMER) += d;
     SR(DF_SPOTT) += d;
+    for (int cat = 0; cat < SKC_COUNT; cat++) {
+        const int len = (int)SKSLEN(r, cat);
+        for (int k = 0; k < len; k++) {
+            SKMR(r, cat, k) += d;
+        }
+    }
 }
 
 // step_forward (race_solver.rs:1175-1224). Timers swept here are
@@ -1362,6 +1467,7 @@ static double cc_step_forward(Cc* c, const int r, double dt) {
     cc_sweep(c, r, dt);
     cc_update_hills(c, r);
     cc_update_phase(c, r);
+    cc_sk_pass(c, r);
     cc_update_kakari(c, r);
     cc_update_position_keep(c, r, dt);
     cc_update_last_spurt(c, r);
@@ -1393,8 +1499,12 @@ static void cc_step_field_conditions(Cc* c, const int r, const double dt) {
     cc_update_dueling(c, r, dt);
 }
 // start_spot_struggle classic (race_solver.rs:2928-2946); the modifier and
-// duration come precomputed from the host (powf of adjusted guts).
+// duration read live guts at entry, the strategy aptitude coefficient rides
+// DF_SPOTP. The recomputed pair also feeds the deactivation subtract.
 static void cc_start_spot(Cc* c, const int j) {
+    const double guts = fmax(SO(DF_GUTS, j), 1.0);
+    SO(DF_SPOTM, j) = gs_pow(500.0 * guts, 0.6) * 0.0001;
+    SO(DF_SPOTD, j) = gs_pow(700.0 * guts, 0.5) * 0.012 * SO(DF_SPOTP, j);
     SUO(UR_SPOTACT, j) = 1u;
     SUO(UR_SPOTSTART, j) = 1u;
     SO(DF_SPOTT, j) = -SO(DF_SPOTD, j);
@@ -1530,8 +1640,13 @@ static void cc_update_spot(Cc* c, const int r) {
     (void)dist;
 }
 
-// activate_retail_duel classic branch (race_solver.rs:3194-3214).
+// activate_retail_duel classic branch (race_solver.rs:3194-3214). The duel
+// modifiers read live guts at entry, so a mid-race GutsUp moves them; the
+// recomputed pair also feeds the deactivation subtract at :1672-1673.
 static void cc_activate_duel(Cc* c, const int j) {
+    const double guts = fmax(SO(DF_GUTS, j), 1.0);
+    SO(DF_DTS, j) = gs_pow(200.0 * guts, 0.708) * 0.0001;
+    SO(DF_DA, j) = gs_pow(160.0 * guts, 0.59) * 0.0001;
     SUO(UR_DUELACT, j) = 1u;
     SUO(UR_FIGHT, j) += 1u;
     cc_add(&SO(DF_TSA, j), &SO(DF_TSE, j), SO(DF_DTS, j));
@@ -1909,6 +2024,11 @@ static void cc_prepare(Cc* c, __global const unsigned int* ri) {
         d[DF_SPURTT] = -1.0;
         d[DF_SPURTD] = 0.0;
         d[DF_SPURTTICK] = 0.0;
+        d[DF_SPEEDST] = rd[db + F_SPEED_STAT];
+        d[DF_STAMINA] = rd[db + F_STAMINA];
+        d[DF_GUTS] = rd[db + F_GUTS];
+        d[DF_SPOTP] = rd[db + F_SPOTP];
+        d[DF_DISTAPT] = (double)(int)ri[rb + R_DISTAPT];
     }
     c->rp[CLS_RP_COMPLEN] = 0u;
     c->rp[CLS_RP_PHRCOUNT] = 0u;
@@ -1922,6 +2042,14 @@ static void cc_prepare(Cc* c, __global const unsigned int* ri) {
         c->su[U_BLOCK + k] = 0u;
         c->su[U_TLIST + k] = 0u;
         c->su[U_OMAP + k] = 0u;
+    }
+    // The constructor skill pass (race_solver.rs:1008) runs once per runner
+    // in roster order after all derived constants exist. The host applied
+    // the self stat bumps already; everything else lands through the fire.
+    c->ri = ri;
+    cc_sk_init(c);
+    for (int r = 0; r < c->n; r++) {
+        cc_sk_scan(c, r, 1);
     }
     cc_field_update(c);
 }
@@ -1991,23 +2119,899 @@ static void cc_emit_phr(Cc* c, const unsigned int r, const unsigned int phase) {
     c->rp[CLS_RP_PHRCOUNT] = len + 2u;
 }
 
-// The kakari skillEvents entry the deactivate hook writes (lib.rs:695-701):
-// runner, activation clock, measured duration.
+// The kakari skillEvents entry the deactivate hook writes (lib.rs:692-698),
+// tagged 1 in the unified stream: runner, activation clock, measured
+// duration. Kakari and numeric-skill activations share one engine stream.
 static void cc_emit_kakari(Cc* c, const unsigned int r,
     const double start_t, const double end_t) {
     const unsigned int len = c->rp[CLS_RP_SKLEN];
-    if (len + 5u > (unsigned int)CLS_RP_SK_CAP) {
+    if (len + 6u > (unsigned int)CLS_RP_SK_CAP) {
         c->rp_over = 1;
         return;
     }
     const ulong t = as_ulong(start_t);
     const ulong d = as_ulong(end_t - start_t);
-    c->rp[CLS_RP_SK0 + len] = r;
-    c->rp[CLS_RP_SK0 + len + 1] = (unsigned int)(t & 0xffffffffu);
-    c->rp[CLS_RP_SK0 + len + 2] = (unsigned int)(t >> 32u);
-    c->rp[CLS_RP_SK0 + len + 3] = (unsigned int)(d & 0xffffffffu);
-    c->rp[CLS_RP_SK0 + len + 4] = (unsigned int)(d >> 32u);
-    c->rp[CLS_RP_SKLEN] = len + 5u;
+    __global unsigned int* p = c->rp + CLS_RP_SK0 + len;
+    p[0] = 1u;
+    p[1] = r;
+    p[2] = (unsigned int)(t & 0xffffffffu);
+    p[3] = (unsigned int)(t >> 32u);
+    p[4] = (unsigned int)(d & 0xffffffffu);
+    p[5] = (unsigned int)(d >> 32u);
+    c->rp[CLS_RP_SKLEN] = len + 6u;
+}
+
+// ---------------------------------------------------------------------------
+// Classic skill runtime. The activation model mirrors the classic (non-retail)
+// engine exactly: a pending-record scan (race_solver.rs:2131-2182), per-kind
+// effect application (:2539-2641), end-of-tick delivery of cross effects
+// (race_field.rs:486-492), and the lib.rs:632-721 event hooks over one
+// shared stream. There is no wisdom lottery (the flag is
+// retail_initialization-only), no additional activation, and no kakari
+// extend, so the running-skill machinery stays empty.
+
+#define SKRD(rec) (c->su + CLS_SK_TABLE + SK_RECORDS + SK_RSTRIDE * (rec))
+#define SKEF(e) (c->su + CLS_SK_TABLE + SK_EFFECTS + SK_ESTRIDE * (e))
+#define SKARMF(a) (c->su + CLS_SK_TABLE + SK_ARMS + SK_ASTRIDE * (a))
+#define SKREGF(g) (c->su + CLS_SK_TABLE + SK_REGIONS + SK_GSTRIDE * (g))
+
+static double cc_sk_f64(const __global unsigned int* w) {
+    return sk_read_f64(w);
+}
+
+static int cc_sk_nrec(Cc* c) {
+    return (int)c->su[CLS_SK_TABLE + SK_NREC];
+}
+
+// The category an effect lands in, following the engine's expire walk order
+// (race_solver.rs:1953-1996). Non-timer kinds never push a token.
+static int cc_sk_cat(const int kind) {
+    if (kind == 27) return SKC_TGT;
+    if (kind == 21 || kind == 22) return SKC_CUR;
+    if (kind == 31) return SKC_ACC;
+    if (kind == 28) return SKC_LAN;
+    return SKC_AUX;
+}
+
+static int cc_sk_tokened(const int kind) {
+    return kind == 27 || kind == 21 || kind == 22 || kind == 31 || kind == 28
+        || kind == 8 || kind == 11 || kind == 12 || kind == 35 || kind == 38;
+}
+
+// The runner-local slot of a skill id, matching the sid slot assigned at
+// init (the engine keys cooldowns and the pending map by skill id string).
+static int cc_sk_slot_of_sid(Cc* c, const int r, const unsigned int sid) {
+    const int nrec = cc_sk_nrec(c);
+    for (int rec = 0; rec < nrec; rec++) {
+        const __global unsigned int* rd = SKRD(rec);
+        if ((int)rd[1] == r && rd[0] == sid) {
+            return (int)SKW(rec)[SKW_SLOT];
+        }
+    }
+    return -1;
+}
+
+// Init: the sid slot walk per runner, the merged window list per record, and
+// the zeroed runtime state. Windows merge with the engine's region algebra
+// (region.rs Union through sk_union, skills.cl:399-447) over the arms, whose
+// compiled post lists already carry the pre-clipped chain.
+static void cc_sk_init(Cc* c) {
+    const int nrec = cc_sk_nrec(c);
+    c->su[CLS_SKD_ORD] = 0u;
+    c->su[CLS_SKD_QLEN] = 0u;
+    for (int w = 0; w < SK_RMAX; w++) {
+        c->su[CLS_SKD_CONS + w] = 0u;
+    }
+    for (int w = 0; w < CLS_MAXR * SKC_COUNT * SK_CAT; w++) {
+        c->sd[UDB_SKMR + w] = 0.0;
+    }
+    for (int w = 0; w < CLS_MAXR * SK_PEND_SLOT; w++) {
+        c->sd[UDB_SKCOOL + w] = -1e300;
+        c->sd[UDB_SKPEND + 2 * w] = 0.0;
+        c->sd[UDB_SKPEND + 2 * w + 1] = 0.0;
+        for (int f = 0; f < 3; f++) {
+            c->su[CLS_SKD_PEND + w * 3 + f] = 0u;
+        }
+    }
+    for (int w = 0; w < CLS_MAXR * SKC_COUNT; w++) {
+        c->su[CLS_SKD_SLEN + w] = 0u;
+    }
+    for (int r = 0; r < c->n; r++) {
+        int slot = -1;
+        unsigned int last_sid = 0xFFFFFFFFu;
+        int prev_rec = -1;
+        for (int rec = 0; rec < nrec; rec++) {
+            const __global unsigned int* rd = SKRD(rec);
+            if ((int)rd[1] != r) {
+                continue;
+            }
+            if (prev_rec >= 0 && slot >= SK_PEND_SLOT) {
+                c->rp_over = 1;
+            }
+            (void)prev_rec;
+            if (rd[0] != last_sid) {
+                last_sid = rd[0];
+                slot++;
+            }
+            if (slot >= SK_PEND_SLOT) {
+                c->rp_over = 1;
+            }
+            double merged[2 * SK_MWINMAX];
+            int nm = 0;
+            const int arms_base = (int)rd[21];
+            const int arms_len = (int)rd[20];
+            for (int a = 0; a < arms_len && a < SK_ARMMAX; a++) {
+                const __global unsigned int* ar = SKARMF(arms_base + a);
+                if (ar[6] & SK_ARM_DEAD) {
+                    continue;
+                }
+                double cur[2 * SK_WINMAX];
+                int nc = 0;
+                const int rl = (int)ar[4];
+                const int rb = (int)ar[5];
+                for (int g = 0; g < rl && g < SK_WINMAX; g++) {
+                    cur[2 * nc] = cc_sk_f64(SKREGF(rb + g));
+                    cur[2 * nc + 1] = cc_sk_f64(SKREGF(rb + g) + 2);
+                    nc++;
+                }
+                if (nc == 0) {
+                    continue;
+                }
+                double out[2 * SK_MWINMAX];
+                const int mo = sk_union(out, merged, nm, cur, nc);
+                for (int w = 0; w < mo * 2 && w < 2 * SK_MWINMAX; w++) {
+                    merged[w] = out[w];
+                }
+                nm = mo;
+            }
+            __global double* wd = SKW(rec);
+            for (int w = 0; w < SKW_STRIDE; w++) {
+                wd[w] = 0.0;
+            }
+            wd[SKW_SLOT] = (double)slot;
+            if (nm > SK_WINMAXP) {
+                c->rp_over = 1;
+                nm = SK_WINMAXP;
+            }
+            wd[SKW_NWIN] = (double)nm;
+            for (int w = 0; w < nm * 2; w++) {
+                wd[SKW_WIN0 + w] = merged[w];
+            }
+            // The pending trigger spans the merged list (skills.cl:590-597
+            // pattern; the engine builds trigger from the merged windows).
+            wd[SKW_TRIG0] = nm > 0 ? merged[0] : 1e300;
+            wd[SKW_TRIG1] = nm > 0 ? merged[2 * (nm - 1) + 1] : 1e300;
+        }
+    }
+}
+
+// The activate-hook pending lookup lives here, but the remaining fold reads
+// the live timers first (race_solver.rs:731-740, finite Self-side entries).
+static double cc_sk_remaining(Cc* c, const int r, const int slot) {
+    double rem = 0.0;
+    for (int cat = 0; cat < SKC_COUNT; cat++) {
+        const int len = (int)SKSLEN(r, cat);
+        for (int k = 0; k < len; k++) {
+            const unsigned int tok = SKSEQ(r, cat, k);
+            if (SKT_GET_S(tok) != slot || (tok & SKT_PERSP) != 0u) {
+                continue;
+            }
+            const double timer = SKMR(r, cat, k);
+            if (timer == -INFINITY) {
+                continue;
+            }
+            rem = fmax(rem, fmax(-timer, 0.0));
+        }
+    }
+    return rem;
+}
+
+// The deactivate hook of the engine (lib.rs:685-721) after one removal: when
+// the last Self-side instance of a numeric skill ends, its pending
+// skillEvents entry finalizes with the activation-time modeled duration.
+static void cc_sk_deactivate_hook(Cc* c, const int r, const int slot,
+    const unsigned int tok) {
+    if ((tok & SKT_PERSP) != 0u) {
+        return;
+    }
+    if (cc_sk_remaining(c, r, slot) > 0.0) {
+        return;
+    }
+    const unsigned int flags = SKPEND(r, slot)[1];
+    if ((flags & 1u) == 0u) {
+        return;
+    }
+    const unsigned int ordinal = SKPEND(r, slot)[0];
+    const unsigned int sid = SKPEND(r, slot)[2];
+    const double start_t = SKPEND_T(r, slot);
+    const double dur = SKPEND_D(r, slot);
+    SKPEND(r, slot)[1] = 0u;
+    const unsigned int len = c->rp[CLS_RP_SKLEN];
+    if (len + 9u > (unsigned int)CLS_RP_SK_CAP) {
+        c->rp_over = 1;
+        return;
+    }
+    const ulong tb = as_ulong(start_t);
+    const ulong db = as_ulong(dur);
+    __global unsigned int* p = c->rp + CLS_RP_SK0 + len;
+    p[0] = 0u;
+    p[1] = ordinal;
+    p[2] = (unsigned int)r;
+    p[3] = sid;
+    p[4] = (flags & 2u) ? 1u : 0u;
+    p[5] = (unsigned int)(tb & 0xffffffffu);
+    p[6] = (unsigned int)(tb >> 32u);
+    p[7] = (unsigned int)(db & 0xffffffffu);
+    p[8] = (unsigned int)(db >> 32u);
+    c->rp[CLS_RP_SKLEN] = len + 9u;
+}
+
+// Remove one expired entry like Vec::remove keeps order, then run the
+// release math and the deactivate hook of its category.
+static void cc_sk_expire_entry(Cc* c, const int r, const int cat, const int k,
+    const int len) {
+    const unsigned int tok = SKSEQ(r, cat, k);
+    for (int w = k; w + 1 < len; w++) {
+        SKSEQ(r, cat, w) = SKSEQ(r, cat, w + 1);
+        SKMR(r, cat, w) = SKMR(r, cat, w + 1);
+    }
+    SKSLEN(r, cat) = (unsigned int)(len - 1);
+    const int eff = SKT_GET_E(tok);
+    const int kind = (int)SKEF(eff)[0];
+    const double mod = cc_sk_f64(SKEF(eff) + 6);
+    if (cat == SKC_TGT) {
+        cc_add(&SR(DF_TSA), &SR(DF_TSE), -mod);
+    } else if (cat == SKC_CUR) {
+        cc_add(&SR(DF_CSA), &SR(DF_CSE), -mod);
+        if ((tok & SKT_NAT) != 0u) {
+            SR(DF_ONEFRAME) += mod;
+        }
+    } else if (cat == SKC_ACC) {
+        cc_add(&SR(DF_ACA), &SR(DF_ACE), -mod);
+    }
+    cc_sk_deactivate_hook(c, r, SKT_GET_S(tok), tok);
+}
+
+// expire_skill_effects (race_solver.rs:1949-2000), classic branch: the
+// history pass only touches the always-empty running list, then the five
+// vectors expire back-to-front with per-entry hooks between removals.
+static void cc_sk_expire(Cc* c, const int r) {
+    for (int cat = 0; cat < SKC_COUNT; cat++) {
+        int len = (int)SKSLEN(r, cat);
+        for (int k = len - 1; k >= 0; k--) {
+            if (SKMR(r, cat, k) >= 0.0) {
+                cc_sk_expire_entry(c, r, cat, k, len);
+                len--;
+            }
+        }
+    }
+}
+
+// Aux presence and sums, recomputed at every read like the engine's live
+// vec scans (race_solver.rs:1310-1323, :1356-1358, :1380-1381, :2454-2456).
+// Source-side Noop placeholders never count.
+static double cc_sk_vision(Cc* c, const int r) {
+    double v = 0.0;
+    const int len = (int)SKSLEN(r, SKC_AUX);
+    for (int k = 0; k < len; k++) {
+        const unsigned int tok = SKSEQ(r, SKC_AUX, k);
+        if ((tok & SKT_PLACE) != 0u) {
+            continue;
+        }
+        if ((int)SKEF(SKT_GET_E(tok))[0] == 8) {
+            v += cc_sk_f64(SKEF(SKT_GET_E(tok)) + 6);
+        }
+    }
+    return fmax(20.0 + v, 0.1);
+}
+
+static int cc_sk_lane_pref(Cc* c, const int r) {
+    int outside = 0;
+    int inside = 0;
+    const int len = (int)SKSLEN(r, SKC_AUX);
+    for (int k = 0; k < len; k++) {
+        const unsigned int tok = SKSEQ(r, SKC_AUX, k);
+        if ((tok & SKT_PLACE) != 0u) {
+            continue;
+        }
+        const int kind = (int)SKEF(SKT_GET_E(tok))[0];
+        if (kind == 11) outside = 1;
+        if (kind == 12) inside = 1;
+    }
+    return outside | (inside << 1);
+}
+
+// The latest SetTargetLane entry wins (race_solver.rs:1356-1358 rev().find()).
+static int cc_sk_setlane(Cc* c, const int r, double* out) {
+    const int len = (int)SKSLEN(r, SKC_AUX);
+    for (int k = len - 1; k >= 0; k--) {
+        const unsigned int tok = SKSEQ(r, SKC_AUX, k);
+        if ((tok & SKT_PLACE) != 0u) {
+            continue;
+        }
+        const int eff = SKT_GET_E(tok);
+        if ((int)SKEF(eff)[0] == 35) {
+            *out = cc_sk_f64(SKEF(eff) + 6);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static double cc_sk_lane_speed_sum(Cc* c, const int r) {
+    double s = 0.0;
+    const int len = (int)SKSLEN(r, SKC_LAN);
+    for (int k = 0; k < len; k++) {
+        s += cc_sk_f64(SKEF(SKT_GET_E(SKSEQ(r, SKC_LAN, k))) + 6);
+    }
+    return s;
+}
+
+static int cc_sk_immune(Cc* c, const int r) {
+    const int len = (int)SKSLEN(r, SKC_AUX);
+    for (int k = 0; k < len; k++) {
+        const unsigned int tok = SKSEQ(r, SKC_AUX, k);
+        if ((tok & SKT_PLACE) != 0u) {
+            continue;
+        }
+        if ((int)SKEF(SKT_GET_E(tok))[0] == 38) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// skill_targets (race_field.rs:407-463). Ranks come from the tick-start
+// order, matching the engine's borrow of field.order during step_forward.
+// out gets the kept indices; returns the count. cap is at least CLS_MAXR.
+static int cc_sk_targets(Cc* c, const int r, const int target,
+    const int value, const int debuff, int* out) {
+    int cand[CLS_MAXR];
+    int n = 0;
+    const int rank = cc_rank(c, r);
+    if (target == 1) {
+        cand[n++] = r;
+    } else if (target == 4) {
+        for (int k = 0; k < c->n; k++) {
+            const int j = (int)c->su[U_ORDER + k];
+            if (j == r) {
+                continue;
+            }
+            const double gap = SO(DF_POS, j) - SR(DF_POS);
+            const double vision = cc_sk_vision(c, r);
+            if (gap >= 0.0 && gap <= vision &&
+                fabs(SO(DF_LANE, j) - SR(DF_LANE)) <=
+                    (gap / vision * 11.5 + 2.0) * CLS_HORSE_LANE / 2.0) {
+                cand[n++] = j;
+            }
+        }
+    } else if (target == 9) {
+        const int limit = value;
+        for (int k = rank - 2; k >= 0 && n < limit; k--) {
+            const int j = (int)c->su[U_ORDER + k];
+            if (j != r) {
+                cand[n++] = j;
+            }
+        }
+        n = n < limit ? n : limit;
+    } else if (target == 10) {
+        const int limit = value;
+        for (int k = rank; k < c->n && n < limit; k++) {
+            const int j = (int)c->su[U_ORDER + k];
+            if (j != r) {
+                cand[n++] = j;
+            }
+        }
+        n = n < limit ? n : limit;
+    }
+    if (target == 4) {
+        const int limit = value;
+        if (n > limit) {
+            n = limit;
+        }
+    }
+    int m = 0;
+    const unsigned int team_r =
+        c->ri[CLS_RI_RUN0 + r * CLS_RI_RUN_STRIDE + R_TEAM];
+    for (int k = 0; k < n; k++) {
+        const int j = cand[k];
+        if (debuff != 0) {
+            if (cc_sk_immune(c, j) != 0) {
+                continue;
+            }
+            const unsigned int team_j =
+                c->ri[CLS_RI_RUN0 + j * CLS_RI_RUN_STRIDE + R_TEAM];
+            if (j != r && team_r != 0u && team_j == team_r) {
+                continue;
+            }
+        }
+        out[m++] = j;
+    }
+    return m;
+}
+
+// push one instance; overflow flags the race (a 32-deep category is far
+// past any compiled skill's footprint).
+static void cc_sk_push(Cc* c, const int r, const int cat,
+    const unsigned int tok, const double timer) {
+    const int len = (int)SKSLEN(r, cat);
+    if (len >= SK_CAT) {
+        c->rp_over = 1;
+        return;
+    }
+    SKSEQ(r, cat, len) = tok;
+    SKMR(r, cat, len) = timer;
+    SKSLEN(r, cat) = (unsigned int)(len + 1);
+}
+
+static double cc_sk_new_timer(const double duration) {
+    return duration < 0.0 ? -INFINITY : -duration;
+}
+
+// Construction constants the refresh recomputes from live stats, mirroring
+// race_solver.rs:43-88 and hp_policy.rs:20.
+__constant double CC_SPEED_STRAT[6][3] = {
+    {0.0, 0.0, 0.0},
+    {1.0, 0.98, 0.962},
+    {0.978, 0.991, 0.975},
+    {0.938, 0.998, 0.994},
+    {0.931, 1.0, 1.0},
+    {1.063, 0.962, 0.95},
+};
+__constant double CC_SPEED_DIST[8] =
+    {1.05, 1.0, 0.9, 0.8, 0.6, 0.4, 0.2, 0.1};
+__constant double CC_ACCEL_STRAT[6][3] = {
+    {0.0, 0.0, 0.0},
+    {1.0, 1.0, 0.996},
+    {0.985, 1.0, 0.996},
+    {0.975, 1.0, 1.0},
+    {0.945, 1.0, 0.997},
+    {1.17, 0.94, 0.956},
+};
+__constant double CC_ACCEL_GROUND[8] =
+    {1.05, 1.0, 0.9, 0.8, 0.7, 0.5, 0.3, 0.1};
+__constant double CC_ACCEL_DIST[8] =
+    {1.0, 1.0, 1.0, 1.0, 1.0, 0.6, 0.5, 0.4};
+__constant double CC_HP_STRAT[6] = {0.0, 0.95, 0.89, 1.0, 0.995, 0.86};
+
+// Mid-race refresh_stat_effects (race_solver.rs:1330-1340). The classic
+// readers of these constants are DF_BTS0..2, DF_LSS, DF_MINSPEED, DF_BACC0..5
+// and the hp ceiling; the duel and spot constants are construction-time.
+static void cc_sk_refresh(Cc* c, const int r) {
+    const double guts = SR(DF_GUTS);
+    const double power = SR(DF_POWER);
+    const double speed = SR(DF_SPEEDST);
+    const double stamina = SR(DF_STAMINA);
+    const double wisdom = SR(DF_WISDOM);
+    const int strategy = (int)SU(UR_STRATEGY);
+    const int distapt = (int)SR(DF_DISTAPT);
+    const int surfapt = (int)c->ri[CLS_RI_RUN0 + r * CLS_RI_RUN_STRIDE + R_SURFAPT];
+    const double base = SR(DF_BASESPEED);
+    const double dist = c->cd[D_DISTANCE];
+    SR(DF_MINSPEED) = 0.85 * base + sqrt(200.0 * guts) * 0.001;
+    const double spd_root = sqrt(500.0 * speed);
+    for (int p = 0; p < 3; p++) {
+        SR(DF_BTS0 + p) = base * CC_SPEED_STRAT[strategy][p] +
+            (p == 2 ? 1.0 : 0.0) * spd_root * CC_SPEED_DIST[distapt] * 0.002;
+    }
+    SR(DF_LSS) = (SR(DF_BTS0 + 2) + 0.01 * base) * 1.05 +
+        spd_root * CC_SPEED_DIST[distapt] * 0.002 +
+        gs_pow(450.0 * guts, 0.597) * 0.0001;
+    for (int slot = 0; slot < 6; slot++) {
+        const double konst = slot > 2 ? 0.0004 : 0.0006;
+        const int p = slot % 3;
+        SR(DF_BACC0 + slot) = konst * sqrt(500.0 * power) *
+            CC_ACCEL_STRAT[strategy][p] *
+            CC_ACCEL_GROUND[surfapt] * CC_ACCEL_DIST[distapt];
+    }
+    const double new_max = 0.8 * CC_HP_STRAT[strategy] * stamina + dist;
+    const double spent = SR(DF_MAXHP) - SR(DF_HP);
+    SR(DF_MAXHP) = new_max;
+    SR(DF_HP) = fmin(fmax(new_max - spent, 0.0), new_max);
+    SR(DF_GUTSMOD) = 1.0 + 200.0 / sqrt(600.0 * guts);
+    SR(DF_SUBPAR) = rint((15.0 + 0.05 * wisdom) * 1000.0);
+}
+
+// One applied effect on the activation or delivery path (the per-kind match
+// at race_solver.rs:2539-2641). fieldless marks the constructor pass, where
+// the host already consumed the stat bumps and the kakari chance bump
+// (recovery included: the engine lands it before hp init, which then
+// re-seeds full hp, so it is net zero).
+static void cc_sk_apply_effect(Cc* c, const int r, const int eff,
+    const int slot, const int fieldless, const int own) {
+    const __global unsigned int* ef = SKEF(eff);
+    const int kind = (int)ef[0];
+    const double mod = cc_sk_f64(ef + 6);
+    const double base_dur = cc_sk_f64(ef + 8);
+    const double dur = base_dur * (c->cd[D_DISTANCE] / 1000.0);
+    const unsigned int tok = SKT_E(eff) | SKT_S(slot) | (own ? 0u : SKT_PERSP);
+    if (fieldless) {
+        if (kind == 1 || kind == 2 || kind == 3 || kind == 4 || kind == 5 ||
+            kind == 9 || kind == 29) {
+            return;
+        }
+    }
+    if (kind == 21 || kind == 22) {
+        cc_add(&SR(DF_CSA), &SR(DF_CSE), mod);
+        cc_sk_push(c, r, SKC_CUR,
+            tok | ((kind == 22) ? SKT_NAT : 0u), cc_sk_new_timer(dur));
+    } else if (kind == 27) {
+        cc_add(&SR(DF_TSA), &SR(DF_TSE), mod);
+        cc_sk_push(c, r, SKC_TGT, tok, cc_sk_new_timer(dur));
+    } else if (kind == 31) {
+        cc_add(&SR(DF_ACA), &SR(DF_ACE), mod);
+        cc_sk_push(c, r, SKC_ACC, tok, cc_sk_new_timer(dur));
+    } else if (kind == 28) {
+        cc_sk_push(c, r, SKC_LAN, tok, cc_sk_new_timer(dur));
+    } else if (kind == 8 || kind == 11 || kind == 12 || kind == 35 ||
+        kind == 38) {
+        cc_sk_push(c, r, SKC_AUX, tok, cc_sk_new_timer(dur));
+    } else if (kind == 10) {
+        SR(DF_DELAY) *= mod;
+    } else if (kind == 14) {
+        SR(DF_DELAY) = mod;
+    } else if (kind == 9) {
+        SR(DF_HP) = fmax(fmin(SR(DF_MAXHP),
+            SR(DF_HP) + SR(DF_MAXHP) * mod), 0.0);
+        if (mod > 0.0 && (int)SU(UR_PHASE) >= 2 && !SU(UR_SPURT)) {
+            SR(DF_LSTTRANS) = -1.0;
+            cc_update_last_spurt(c, r);
+        }
+    } else if (kind == 1 || kind == 2 || kind == 3 || kind == 4 || kind == 5) {
+        if (kind == 1) {
+            SR(DF_SPEEDST) = fmax(SR(DF_SPEEDST) + mod, 1.0);
+        } else if (kind == 2) {
+            SR(DF_STAMINA) = fmax(SR(DF_STAMINA) + mod, 1.0);
+        } else if (kind == 3) {
+            SR(DF_POWER) = fmax(SR(DF_POWER) + mod, 1.0);
+        } else if (kind == 4) {
+            SR(DF_GUTS) = fmax(SR(DF_GUTS) + mod, 1.0);
+        } else {
+            SR(DF_WISDOM) = fmax(SR(DF_WISDOM) + mod, 1.0);
+        }
+    }
+}
+
+// The activate-hook tail (lib.rs:632-680) after one direct activation of a
+// numeric skill, plus the detail and target events the wrapper writes
+// (race_solver.rs:2448-2451). The asitame record instead records the
+// conserve release with no skillEvents entry at all (lib.rs:634-641).
+static void cc_sk_hook_activate(Cc* c, const int r, const int slot,
+    const unsigned int sid, const unsigned int flags, const int detail) {
+    const int numeric = (flags & SK_FLAG_ASITAME) == 0u && sid != 0u;
+    if ((flags & SK_FLAG_ASITAME) != 0u) {
+        const unsigned int len = c->rp[CLS_RP_CNSLEN];
+        if (len + 3u > (unsigned int)CLS_RP_CNS_CAP) {
+            c->rp_over = 1;
+            return;
+        }
+        const ulong tb = as_ulong(SR(DF_ACCUM));
+        __global unsigned int* p = c->rp + CLS_RP_CNS0 + len;
+        p[0] = (unsigned int)r;
+        p[1] = (unsigned int)(tb & 0xffffffffu);
+        p[2] = (unsigned int)(tb >> 32u);
+        c->rp[CLS_RP_CNSLEN] = len + 3u;
+    }
+    if (!numeric) {
+        return;
+    }
+    const double rem = cc_sk_remaining(c, r, slot);
+    if (rem <= 0.0) {
+        unsigned int ord = c->su[CLS_SKD_ORD];
+        c->su[CLS_SKD_ORD] = ord + 1u;
+        const unsigned int len = c->rp[CLS_RP_SKLEN];
+        if (len + 9u > (unsigned int)CLS_RP_SK_CAP) {
+            c->rp_over = 1;
+            return;
+        }
+        const ulong tb = as_ulong(SR(DF_ACCUM));
+        __global unsigned int* p = c->rp + CLS_RP_SK0 + len;
+        p[0] = 0u;
+        p[1] = ord;
+        p[2] = (unsigned int)r;
+        p[3] = sid;
+        p[4] = (flags & SK_FLAG_UNIQUE) ? 1u : 0u;
+        p[5] = (unsigned int)(tb & 0xffffffffu);
+        p[6] = (unsigned int)(tb >> 32u);
+        p[7] = 0u;
+        p[8] = 0u;
+        c->rp[CLS_RP_SKLEN] = len + 9u;
+    } else {
+        unsigned int ord = SKPEND(r, slot)[0];
+        if ((SKPEND(r, slot)[1] & 1u) == 0u) {
+            ord = c->su[CLS_SKD_ORD];
+            c->su[CLS_SKD_ORD] = ord + 1u;
+        }
+        SKPEND(r, slot)[0] = ord;
+        SKPEND(r, slot)[1] = 1u | ((flags & SK_FLAG_UNIQUE) ? 2u : 0u);
+        SKPEND(r, slot)[2] = sid;
+        SKPEND_T(r, slot) = SR(DF_ACCUM);
+        SKPEND_D(r, slot) = rem;
+    }
+    // skillDetailEvents and skillTargetEvents (race_solver.rs:2448-2451;
+    // the reply renders them per runner in push order, lib.rs:1078-1094).
+    {
+        const unsigned int len = c->rp[CLS_RP_DETLEN];
+        if (len + 5u > (unsigned int)CLS_RP_DET_CAP) {
+            c->rp_over = 1;
+        } else {
+            const ulong tb = as_ulong(SR(DF_ACCUM));
+            __global unsigned int* p = c->rp + CLS_RP_DET0 + len;
+            p[0] = (unsigned int)r;
+            p[1] = sid;
+            p[2] = (unsigned int)detail;
+            p[3] = (unsigned int)(tb & 0xffffffffu);
+            p[4] = (unsigned int)(tb >> 32u);
+            c->rp[CLS_RP_DETLEN] = len + 5u;
+        }
+    }
+}
+
+// Fire one record: the per-effect loop of apply_activation (2458-2641) with
+// the classic value chain compiled in, the cross queue of queue_skill_effect
+// (race_field.rs:465-484), the source-side Noop placeholder, and the hooks.
+static void cc_sk_fire(Cc* c, const int r, const int rec, const int fieldless) {
+    const __global unsigned int* rd = SKRD(rec);
+    const unsigned int sid = rd[0];
+    const unsigned int flags = rd[2];
+    const int detail = (int)rd[26];
+    const int eff_base = (int)rd[6];
+    const int n_eff = (int)rd[5];
+    const int slot = (int)SKW(rec)[SKW_SLOT];
+    // The wrapper only records DET and TGT events for numeric skill ids
+    // (race_solver.rs:2448-2451).
+    const int numeric = (flags & SK_FLAG_ASITAME) == 0u && sid != 0u;
+    if (numeric && n_eff <= 31) {
+        const unsigned int len = c->rp[CLS_RP_TGTLEN];
+        if (len + 6u > (unsigned int)CLS_RP_TGT_CAP) {
+            c->rp_over = 1;
+        } else {
+            const ulong tb = as_ulong(SR(DF_ACCUM));
+            __global unsigned int* p = c->rp + CLS_RP_TGT0 + len;
+            p[0] = (unsigned int)r;
+            p[1] = sid;
+            p[2] = (unsigned int)detail;
+            p[3] = (unsigned int)(tb & 0xffffffffu);
+            p[4] = (unsigned int)(tb >> 32u);
+            p[5] = (unsigned int)n_eff;
+            c->rp[CLS_RP_TGTLEN] = len + 6u;
+        }
+    }
+    if (numeric && n_eff > 31) {
+        c->rp_over = 1;
+    }
+    for (int e = 0; e < n_eff; e++) {
+        const __global unsigned int* ef = SKEF(eff_base + e);
+        const int kind = (int)ef[0];
+        const int target = (int)ef[1];
+        const int debuff = (int)ef[6];
+        const double dur =
+            cc_sk_f64(ef + 8) * (c->cd[D_DISTANCE] / 1000.0);
+        int sel[CLS_MAXR];
+        int ns = 0;
+        // Selection precedes delivery on every caster activation and covers
+        // the self target too (race_solver.rs:2479-2484). The constructor
+        // pass has no field, so every list stays null there.
+        if (!fieldless && kind != 0 && kind != 6) {
+            if (target == 1) {
+                ns = debuff != 0 && cc_sk_immune(c, r) != 0 ? 0 : 1;
+                if (ns == 1) {
+                    sel[0] = r;
+                }
+            } else {
+                ns = cc_sk_targets(c, r, target, (int)ef[4], debuff, sel);
+            }
+        }
+        if (numeric && n_eff <= 31) {
+            const unsigned int len = c->rp[CLS_RP_TGTLEN];
+            const int nullish = fieldless || kind == 0 || kind == 6;
+            if (len + 1u + (nullish ? 0u : (unsigned int)ns) >
+                (unsigned int)CLS_RP_TGT_CAP) {
+                c->rp_over = 1;
+            } else {
+                c->rp[CLS_RP_TGT0 + len] =
+                    nullish ? 0xFFFFFFFFu : (unsigned int)ns;
+                for (int k = 0; k < (nullish ? 0 : ns); k++) {
+                    c->rp[CLS_RP_TGT0 + len + 1 + k] = (unsigned int)sel[k];
+                }
+                c->rp[CLS_RP_TGTLEN] =
+                    len + 1u + (nullish ? 0u : (unsigned int)ns);
+            }
+        }
+        if (target == 1 && debuff != 0 && cc_sk_immune(c, r) != 0) {
+            continue;
+        }
+        if (target != 1) {
+            const int q = (int)c->su[CLS_SKD_QLEN];
+            for (int k = 0; k < ns; k++) {
+                if (q + k >= SK_QMAX) {
+                    c->rp_over = 1;
+                    break;
+                }
+                c->su[CLS_SKD_QMETA + q + k] =
+                    (unsigned int)r |
+                    ((unsigned int)sel[k] << 7) |
+                    ((unsigned int)rec << 14) |
+                    ((unsigned int)e << 24);
+                c->sd[UDB_SKQDUR + q + k] = dur;
+            }
+            if (ns > 0) {
+                c->su[CLS_SKD_QLEN] = (unsigned int)(q + ns);
+            }
+            if (dur > 0.0) {
+                cc_sk_push(c, r, SKC_AUX,
+                    SKT_E(eff_base + e) | SKT_S(slot) | SKT_PLACE,
+                    cc_sk_new_timer(dur));
+            }
+            continue;
+        }
+        cc_sk_apply_effect(c, r, eff_base + e, slot, fieldless, 1);
+    }
+    // The hook runs with the post-apply state (race_solver.rs:2673 fires
+    // after the whole effect list), and asitame never carries skill events.
+    cc_sk_hook_activate(c, r, slot, sid, flags, detail);
+}
+
+// process_pending_armed (race_solver.rs:2131-2182) for one runner: armed
+// records (trigger.start <= pos) in descending creation order, trigger-end
+// consumption, the fire gate, and the cooldown parking. fieldless is the
+// constructor pass, where only all-self-target records fire.
+static void cc_sk_scan(Cc* c, const int r, const int fieldless) {
+    const int nrec = cc_sk_nrec(c);
+    const double pos = fieldless ? 0.0 : SR(DF_POS);
+    for (int rec = nrec - 1; rec >= 0; rec--) {
+        const __global unsigned int* rd = SKRD(rec);
+        if ((int)rd[1] != r || (rd[2] & SK_FLAG_DEAD) != 0u) {
+            continue;
+        }
+        __global double* wd = SKW(rec);
+        const double trig0 = wd[SKW_TRIG0];
+        const double trig1 = wd[SKW_TRIG1];
+        if (trig0 > pos) {
+            continue;
+        }
+        if (c->su[CLS_SKD_CONS + rec] != 0u) {
+            continue;
+        }
+        if (pos >= trig1) {
+            c->su[CLS_SKD_CONS + rec] = 1u;
+            continue;
+        }
+        const int slot = (int)wd[SKW_SLOT];
+        int all_self = 1;
+        const int eff_base = (int)rd[6];
+        const int n_eff = (int)rd[5];
+        for (int e = 0; e < n_eff; e++) {
+            if ((int)SKEF(eff_base + e)[1] != 1) {
+                all_self = 0;
+                break;
+            }
+        }
+        if (fieldless && all_self == 0) {
+            continue;
+        }
+        if (SKCOOL(r, slot) > SR(DF_ACCUM)) {
+            continue;
+        }
+        int win = 0;
+        const int nwin = (int)wd[SKW_NWIN];
+        for (int k = 0; k < nwin; k++) {
+            if (wd[SKW_WIN0 + 2 * k] <= pos &&
+                pos < wd[SKW_WIN0 + 2 * k + 1]) {
+                win = 1;
+                break;
+            }
+        }
+        if (win == 0) {
+            continue;
+        }
+        if ((rd[2] & SK_FLAG_ASITAME) != 0u && !SU(UR_SPURT)) {
+            continue;
+        }
+        cc_sk_fire(c, r, rec, fieldless);
+        const double cd = cc_sk_f64(rd + 13);
+        if (cd <= 0.0) {
+            c->su[CLS_SKD_CONS + rec] = 1u;
+            SKCOOL(r, slot) = INFINITY;
+        } else {
+            SKCOOL(r, slot) = SR(DF_ACCUM) + cd * c->cd[D_DISTANCE] / 1000.0;
+        }
+    }
+}
+
+// The per-tick skill pass, process_skill_activations (race_solver.rs:1943)
+// with field: expire first, then the armed scan.
+static void cc_sk_pass(Cc* c, const int r) {
+    cc_sk_expire(c, r);
+    cc_sk_scan(c, r, 0);
+}
+
+// flush_skill_effects (race_field.rs:486-492): the FIFO drains in push
+// order; every delivery is a follow_up application on the receiver, so no
+// hooks and no detail events, with the stat refresh of race_solver.rs:2660-2663.
+static void cc_sk_flush(Cc* c) {
+    int q = (int)c->su[CLS_SKD_QLEN];
+    c->su[CLS_SKD_QLEN] = 0u;
+    int head = 0;
+    while (head < q) {
+        const unsigned int meta = c->su[CLS_SKD_QMETA + head];
+        head++;
+        const int src = (int)(meta & 0x7fu);
+        const int dst = (int)((meta >> 7) & 0x7fu);
+        const int eff_local = (int)((meta >> 14) & 0xfu);
+        const int rec = (int)(meta >> 18);
+        const int eff = (int)SKRD(rec)[6] + eff_local;
+        const int kind = (int)SKEF(eff)[0];
+        const int slot = cc_sk_slot_of_sid(c, dst, SKRD(rec)[0]);
+        if (slot < 0) {
+            c->rp_over = 1;
+            continue;
+        }
+        cc_sk_apply_effect(c, dst, eff, slot, 0, src == dst ? 1 : 0);
+        if (kind == 1 || kind == 2 || kind == 3 || kind == 4 || kind == 5) {
+            cc_sk_refresh(c, dst);
+        }
+    }
+    (void)q;
+}
+
+// The race-end finalizer (lib.rs:1005-1017): still-open pending entries
+// append their skillEvents entries, sorted by the activation ordinal.
+static void cc_sk_finalize_pending(Cc* c) {
+    unsigned int ord[CLS_MAXR * SK_PEND_SLOT];
+    unsigned int sid[CLS_MAXR * SK_PEND_SLOT];
+    unsigned int run[CLS_MAXR * SK_PEND_SLOT];
+    unsigned int uni[CLS_MAXR * SK_PEND_SLOT];
+    double t[CLS_MAXR * SK_PEND_SLOT];
+    double d[CLS_MAXR * SK_PEND_SLOT];
+    int m = 0;
+    for (int r = 0; r < c->n; r++) {
+        for (int s = 0; s < SK_PEND_SLOT; s++) {
+            if ((SKPEND(r, s)[1] & 1u) == 0u) {
+                continue;
+            }
+            ord[m] = SKPEND(r, s)[0];
+            sid[m] = SKPEND(r, s)[2];
+            run[m] = (unsigned int)r;
+            uni[m] = (SKPEND(r, s)[1] & 2u) ? 1u : 0u;
+            t[m] = SKPEND_T(r, s);
+            d[m] = SKPEND_D(r, s);
+            SKPEND(r, s)[1] = 0u;
+            m++;
+        }
+    }
+    for (int i = 1; i < m; i++) {
+        for (int j = i; j > 0 && ord[j] < ord[j - 1]; j--) {
+            unsigned int x;
+            double y;
+            x = ord[j]; ord[j] = ord[j - 1]; ord[j - 1] = x;
+            x = sid[j]; sid[j] = sid[j - 1]; sid[j - 1] = x;
+            x = run[j]; run[j] = run[j - 1]; run[j - 1] = x;
+            x = uni[j]; uni[j] = uni[j - 1]; uni[j - 1] = x;
+            y = t[j]; t[j] = t[j - 1]; t[j - 1] = y;
+            y = d[j]; d[j] = d[j - 1]; d[j - 1] = y;
+        }
+    }
+    for (int i = 0; i < m; i++) {
+        const unsigned int len = c->rp[CLS_RP_SKLEN];
+        if (len + 9u > (unsigned int)CLS_RP_SK_CAP) {
+            c->rp_over = 1;
+            return;
+        }
+        const ulong tb = as_ulong(t[i]);
+        const ulong db = as_ulong(d[i]);
+        __global unsigned int* p = c->rp + CLS_RP_SK0 + len;
+        p[0] = 0u;
+        p[1] = ord[i];
+        p[2] = run[i];
+        p[3] = sid[i];
+        p[4] = uni[i];
+        p[5] = (unsigned int)(tb & 0xffffffffu);
+        p[6] = (unsigned int)(tb >> 32u);
+        p[7] = (unsigned int)(db & 0xffffffffu);
+        p[8] = (unsigned int)(db >> 32u);
+        c->rp[CLS_RP_SKLEN] = len + 9u;
+    }
 }
 
 // The race driver (lib.rs:876-970), one work item per race.
@@ -2051,6 +3055,9 @@ static void cc_run(Cc* c, __global const unsigned int* ri,
                 cc_step_field_conditions(c, r, SO(DF_EFF, r));
             }
         }
+        // flush_skill_effects (race_field.rs:291-323), the tick-tail FIFO
+        // that delivers queued cross effects on the receivers.
+        cc_sk_flush(c);
         // Reply observables the engine records after step_all (lib.rs:883
         // and lib.rs:899-922): the style-group leaders over the tick-start
         // ranks, the rushing countdown, positioning phases, and the spot
@@ -2126,6 +3133,9 @@ static void cc_run(Cc* c, __global const unsigned int* ri,
             break;
         }
     }
+    // The race-end pending finalizer (lib.rs:1005-1017) appends the events
+    // of still-open activations, in activation order.
+    cc_sk_finalize_pending(c);
     for (int r = 0; r < c->n; r++) {
         if (!SUO(UR_FIN, r)) {
             SO(DF_FINRAW, r) = t;

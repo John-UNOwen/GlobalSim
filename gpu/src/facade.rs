@@ -9,8 +9,8 @@
 //! batch's other races are untouched. CPU replays stay on the CPU lanes.
 //!
 //! Two kernel lanes share this facade. A request carrying any retail flag runs
-//! the retail kernel, the rest run the classic kernel, which takes zero-skill
-//! races and refuses skills until its own skill pass lands.
+//! the retail kernel, the rest run the classic kernel, which runs the
+//! engine's classic skill lane through the shared skill compiler.
 
 use crate::json::Value;
 use crate::{classic_exec, race_exec, replay_packet};
@@ -382,8 +382,9 @@ fn build_classic_outcomes(
 
 /// The compact meta of a classic race, same keys and types as `compact_meta`.
 /// The engine leaves hpEmptyOnRace null unless the retail config ran
-/// (src/lib.rs:994), and a zero-skill classic reply's only skillEvents
-/// entries are the completed kakari episodes (src/lib.rs:690-701).
+/// (src/lib.rs:994). skillEvents entries mirror the engine's identity pair
+/// per hook-emitted event: numeric activations carry the skill id, kakari
+/// episodes carry the string id (src/lib.rs:661-720).
 fn classic_meta(race: &classic_exec::ClassicGpu, player: f64) -> Value {
     let n = race.finish_raw_all.len();
     let finished: Vec<f64> = (0..n)
@@ -413,17 +414,31 @@ fn classic_meta(race: &classic_exec::ClassicGpu, player: f64) -> Value {
             })
             .collect(),
     );
-    let skill_events = json::arr(
-        race.kakari
-            .chunks(5)
-            .map(|record| {
-                json::obj(vec![
-                    ("horseIndex", json::num(record[0] as f64)),
-                    ("skillId", Value::String("kakari".into())),
-                ])
-            })
-            .collect(),
-    );
+    let mut skill_events: Vec<Value> = Vec::new();
+    {
+        let stream = &race.skev;
+        let mut i = 0;
+        while i < stream.len() {
+            match stream[i] {
+                0 if i + 9 <= stream.len() => {
+                    skill_events.push(json::obj(vec![
+                        ("horseIndex", json::num(stream[i + 2] as f64)),
+                        ("skillId", json::num(stream[i + 3] as f64)),
+                    ]));
+                    i += 9;
+                }
+                1 if i + 6 <= stream.len() => {
+                    skill_events.push(json::obj(vec![
+                        ("horseIndex", json::num(stream[i + 1] as f64)),
+                        ("skillId", Value::String("kakari".into())),
+                    ]));
+                    i += 6;
+                }
+                _ => break,
+            }
+        }
+    }
+    let skill_events = json::arr(skill_events);
     json::obj(vec![
         ("playerHorseIndex", json::num(player)),
         ("results", results),
@@ -595,7 +610,9 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
                 })
             });
         if skilled {
-            return Some("the classic kernel does not run skills".into());
+            if let Some(reason) = classic_exec::classic_gate_reason(request) {
+                return Some(reason);
+            }
         }
         if (1..=classic_exec::CLS_MAXR).contains(&horse_count) {
             None

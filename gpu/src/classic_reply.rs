@@ -38,20 +38,108 @@ fn f64w(lo: u32, hi: u32) -> f64 {
     f64::from_bits(u64::from(lo) | (u64::from(hi) << 32))
 }
 
-// Kakari skillEvents entries, in kernel push order (the deactivate hook
-// of src/lib.rs:690-701; the classic path never sorts skillEvents,
-// src/lib.rs:1030).
-fn kakari_events(kakari: &[u32]) -> Result<Vec<Value>, String> {
-    if kakari.len() % 5 != 0 {
-        return Err("kakari stream is ragged".to_string());
+// The unified skillEvents stream in engine push order (src/lib.rs:661-720,
+// :1009-1016; the classic path never sorts skillEvents, src/lib.rs:1021-1031).
+// Tag 0 is a numeric-skill activation, tag 1 the kakari deactivate entry.
+fn skill_events(skev: &[u32]) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < skev.len() {
+        match skev[i] {
+            0 => {
+                if i + 9 > skev.len() {
+                    return Err("skill event stream is ragged".to_string());
+                }
+                let rec = &skev[i..i + 9];
+                out.push(json::obj(vec![
+                    ("duration", json::num(f64w(rec[7], rec[8]))),
+                    ("horseIndex", json::num(rec[2] as f64)),
+                    ("isUnique", json::num(rec[4] as f64)),
+                    ("skillId", json::num(rec[3] as f64)),
+                    ("t", json::num(f64w(rec[5], rec[6]))),
+                ]));
+                i += 9;
+            }
+            1 => {
+                if i + 6 > skev.len() {
+                    return Err("kakari event stream is ragged".to_string());
+                }
+                let rec = &skev[i..i + 6];
+                out.push(json::obj(vec![
+                    ("duration", json::num(f64w(rec[4], rec[5]))),
+                    ("horseIndex", json::num(rec[1] as f64)),
+                    ("isUnique", json::num(0.0)),
+                    ("skillId", Value::String("kakari".into())),
+                    ("t", json::num(f64w(rec[2], rec[3]))),
+                ]));
+                i += 6;
+            }
+            _ => return Err("unknown skill event tag".to_string()),
+        }
     }
-    Ok(kakari.chunks(5).map(|rec| {
+    Ok(out)
+}
+
+// skillDetailEvents, runner-major like the engine's per-solver collection
+// (src/lib.rs:1078-1083). The kernel pushes in activation order, so the
+// decode groups by runner and keeps each runner's push order.
+fn detail_events(det: &[u32]) -> Result<Vec<Value>, String> {
+    if det.len() % 5 != 0 {
+        return Err("skill detail stream is ragged".to_string());
+    }
+    let mut recs: Vec<&[u32]> = det.chunks(5).collect();
+    recs.sort_by_key(|rec| rec[0]);
+    Ok(recs.into_iter().map(|rec| {
         json::obj(vec![
-            ("duration", json::num(f64w(rec[3], rec[4]))),
+            ("detailIndex", json::num(rec[2] as f64)),
             ("horseIndex", json::num(rec[0] as f64)),
-            ("isUnique", json::num(0.0)),
-            ("skillId", Value::String("kakari".into())),
-            ("t", json::num(f64w(rec[1], rec[2]))),
+            ("skillId", json::num(rec[1] as f64)),
+            ("t", json::num(f64w(rec[3], rec[4]))),
+        ])
+    }).collect())
+}
+
+// skillTargetEvents, runner-major (src/lib.rs:1085-1094). A count word of
+// 0xFFFFFFFF is the null selection, k is the list of k runner indices.
+fn target_events(tgt: &[u32]) -> Result<Vec<Value>, String> {
+    let mut recs: Vec<([u32; 6], Vec<Value>)> = Vec::new();
+    let mut i = 0;
+    while i < tgt.len() {
+        if i + 6 > tgt.len() {
+            return Err("skill target stream is ragged".to_string());
+        }
+        let head: [u32; 6] = [tgt[i], tgt[i + 1], tgt[i + 2], tgt[i + 3],
+            tgt[i + 4], tgt[i + 5]];
+        i += 6;
+        let mut ability = Vec::new();
+        for _ in 0..head[5] {
+            if i >= tgt.len() {
+                return Err("skill target stream is ragged".to_string());
+            }
+            let count = tgt[i];
+            i += 1;
+            if count == 0xFFFF_FFFF {
+                ability.push(Value::Null);
+                continue;
+            }
+            if i + count as usize > tgt.len() {
+                return Err("skill target stream is ragged".to_string());
+            }
+            ability.push(json::arr(
+                tgt[i..i + count as usize].iter()
+                    .map(|v| json::num(*v as f64)).collect()));
+            i += count as usize;
+        }
+        recs.push((head, ability));
+    }
+    recs.sort_by_key(|rec| rec.0[0]);
+    Ok(recs.into_iter().map(|(head, ability)| {
+        json::obj(vec![
+            ("abilityTargets", json::arr(ability)),
+            ("detailIndex", json::num(head[2] as f64)),
+            ("horseIndex", json::num(head[0] as f64)),
+            ("skillId", json::num(head[1] as f64)),
+            ("t", json::num(f64w(head[3], head[4]))),
         ])
     }).collect())
 }
@@ -130,12 +218,12 @@ fn encode_frames(mut result: Value, mut frames: ReplayFrames, retain_all: bool) 
 /// classic reply never carries: `postFinishMovementVersion` is retail-only
 /// (src/lib.rs:1130-1134), `gutsOrder` and `wizOrder` are 0 outside the
 /// retail runtime (src/lib.rs:992-993), `hpEmptyOnRace` is Null because
-/// `solver.retail` is None (src/lib.rs:994), and the three skill detail and
-/// target arrays plus `conservePowerEvents` stay empty for zero-skill
-/// rosters (src/lib.rs:1081, 1087, 1098, 1111). `skillEvents` carries only
-/// the kakari deactivate entries (src/lib.rs:690-701): zero skills means
-/// no other hook fires and the classic path keeps the push order, skipping
-/// the retail sort (src/lib.rs:1030). `singleModeVersion`,
+/// `solver.retail` is None (src/lib.rs:994), and `additionalTargetEvents`
+/// stays empty because the classic lane refuses additional activation
+/// (src/lib.rs:1096-1106). `skillEvents` keeps the hook push order: the
+/// classic path skips the retail sort (src/lib.rs:1021-1031), and the
+/// detail and target arrays are collected runner-major (src/lib.rs:1078-1094).
+/// `singleModeVersion`,
 /// `conservePowerDiagnosticVersion` and `experimentalGridVersion` belong to
 /// refused flags (src/lib.rs:1115-1139).
 pub fn build(request: &str, seed: i64, race: &ClassicGpu) -> Result<String, String> {
@@ -259,7 +347,15 @@ pub fn build(request: &str, seed: i64, race: &ClassicGpu) -> Result<String, Stri
         ]));
     }
 
-    let skill_events = kakari_events(&race.kakari)?;
+    let skill_events = skill_events(&race.skev)?;
+    let detail_events = detail_events(&race.skdet)?;
+    let target_events = target_events(&race.sktgt)?;
+    let conserve_events: Vec<Value> = race.skcns.chunks(3).map(|rec| {
+        json::obj(vec![
+            ("horseIndex", json::num(rec[0] as f64)),
+            ("t", json::num(f64w(rec[1], rec[2]))),
+        ])
+    }).collect();
 
     let mut result = json::obj(vec![
         ("seed", json::num(seed as f64)),
@@ -304,13 +400,13 @@ pub fn build(request: &str, seed: i64, race: &ClassicGpu) -> Result<String, Stri
         ("results", json::arr(results)),
         ("skillEvents", json::arr(skill_events)),
         ("skillDetailObservationVersion", json::num(1.0)),
-        ("skillDetailEvents", json::arr(Vec::new())),
+        ("skillDetailEvents", json::arr(detail_events)),
         ("skillTargetObservationVersion", json::num(1.0)),
-        ("skillTargetEvents", json::arr(Vec::new())),
+        ("skillTargetEvents", json::arr(target_events)),
         ("additionalTargetObservationVersion", json::num(1.0)),
         ("additionalTargetEvents", json::arr(Vec::new())),
         ("competitionEvents", json::arr(competition_events)),
-        ("conservePowerEvents", json::arr(Vec::new())),
+        ("conservePowerEvents", json::arr(conserve_events)),
         ("playerLastSpurtTime", json::num(player_last_spurt)),
         ("playerHorseIndex", json::num(player as f64)),
     ]);

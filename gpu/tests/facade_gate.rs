@@ -486,10 +486,13 @@ fn gate_reasons_names_every_refusal() {
         facade::gate_reasons(legacy, Some(&accepted)).as_deref(),
         Some("retail runtime belongs to the retail lane")
     );
-    let classic_skills = r#"{"courseId":10504,"horses":[{"skills":[1]}]}"#;
+    // A skilled classic race is no longer blanket-refused. The gate answers
+    // with the same compiler prepare() uses, so the refusal names the skill
+    // the compiler cannot lower.
+    let classic_skills = classic_v77_with_skills(&["999999999"]);
     assert_eq!(
-        facade::gate_reasons(classic_skills, Some(&accepted)).as_deref(),
-        Some("the classic kernel does not run skills")
+        facade::gate_reasons(&classic_skills, Some(&accepted)).as_deref(),
+        Some("skillData has no entry for skill 999999999")
     );
     let classic_grid = format!(
         "{{\"courseId\":10504,\"experimentalGrid\":{{\"columns\":20,\"rowSpacing\":3}},\"horses\":[{}]}}",
@@ -561,6 +564,40 @@ fn classic_v77() -> String {
             map.insert("horses".into(), json::arr(cleared));
         }
     }
+    let mut text = String::new();
+    json::to_string_into(&value, &mut text);
+    text
+}
+
+/// The zero-skill classic v77 roster with the given skill ids on the first
+/// runner.
+fn classic_v77_with_skills(ids: &[&str]) -> String {
+    let mut value = json::parse(&classic_v77()).expect("classic v77 parses");
+    let json::Value::Object(root) = &mut value else {
+        panic!("classic v77 is an object");
+    };
+    let horses = match root.remove("horses") {
+        Some(json::Value::Array(list)) => list,
+        _ => panic!("classic v77 has a horses array"),
+    };
+    let skills = json::arr(
+        ids.iter().map(|id| json::Value::String((*id).to_string())).collect(),
+    );
+    let updated: Vec<json::Value> = horses
+        .into_iter()
+        .enumerate()
+        .map(|(i, horse)| {
+            if i != 0 {
+                return horse;
+            }
+            let json::Value::Object(mut fields) = horse else {
+                panic!("horse is an object");
+            };
+            fields.insert("skills".to_string(), skills.clone());
+            json::Value::Object(fields)
+        })
+        .collect();
+    root.insert("horses".to_string(), json::arr(updated));
     let mut text = String::new();
     json::to_string_into(&value, &mut text);
     text

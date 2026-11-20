@@ -101,6 +101,7 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
 #[test]
 fn classic_scratch_regions_match_the_kernel_mirrors() {
     use globalsim_gpu::classic_exec as ce;
+    use globalsim_gpu::skills_compile as sk;
     assert_eq!(ce::CLS_MAXR, 120);
     assert_eq!(ce::CLS_MAX_TICKS, 6144);
     // Frame rows carry the six replay columns plus eight debug columns
@@ -115,8 +116,11 @@ fn classic_scratch_regions_match_the_kernel_mirrors() {
     assert_eq!(ce::CLS_ST_STRIDE, ce::CLS_ST_RUN0 + ce::CLS_ST_RUN_STRIDE * ce::CLS_MAXR);
     assert_eq!(ce::CLS_ST_STRIDE, 16 + 17 * ce::CLS_MAXR);
     assert_eq!(ce::CLS_ST_STRIDE, 2056);
-    assert_eq!(ce::CLS_SU_STRIDE, 24400);
-    assert_eq!(ce::CLS_SD_STRIDE, 54784);
+    // SU stacks the uint scratch, the compiled skill table, and the classic
+    // skill runtime block (queue, consumption, pending, sequences, meta).
+    assert_eq!(ce::CLS_SU_STRIDE, 24400 + sk::SK_STRIDE + 25704);
+    assert_eq!(ce::CLS_SU_STRIDE, 105976);
+    assert_eq!(ce::CLS_SD_STRIDE, 118336);
     // uint scratch stacking per classic_core.cl: header words 0..512, runner
     // blocks (72 words each, the reply-mirror slots included), target map
     // 120x120, blocker words, target list, owner map, tick-rank snapshot and
@@ -128,21 +132,32 @@ fn classic_scratch_regions_match_the_kernel_mirrors() {
     assert_eq!(23696 + 128, 23824);
     assert!(23824 + ce::CLS_MAXR <= 23952);
     assert!(23952 + ce::CLS_MAXR <= 24080);
-    assert!(24080 + 6 <= ce::CLS_SU_STRIDE);
-    // Reply record channels: header, competition triples, phase pairs, and
-    // five-word kakari skillEvents records.
-    assert_eq!(ce::CLS_RP_STRIDE, ce::CLS_RP_SK0 + ce::CLS_RP_SK_CAP);
-    assert_eq!(ce::CLS_RP_STRIDE, 3848);
+    assert!(24080 + 6 <= 24400);
+    // The classic skill runtime block ends exactly at its region end: the
+    // queue meta at +23656 spans the 2048-word queue cap.
+    assert_eq!(ce::CLS_SKD, 24400 + sk::SK_STRIDE);
+    assert_eq!(ce::CLS_SKD_QMETA + 2048 - ce::CLS_SKD, 25704);
+    assert_eq!(ce::CLS_SKD_PENDING - ce::CLS_SKD, 976);
+    assert_eq!(ce::CLS_SKD_SEQLEN - ce::CLS_SKD, 3856);
+    assert_eq!(ce::CLS_SKD_SEQ - ce::CLS_SKD, 4456);
+    // Reply record channels: header, competition triples, phase pairs, the
+    // unified skillEvents stream, detail, target and conserve channels.
+    assert_eq!(ce::CLS_RP_STRIDE, ce::CLS_RP_CNS0 + ce::CLS_RP_CNS_CAP);
+    assert_eq!(ce::CLS_RP_STRIDE, 21896);
     assert_eq!(ce::S_LSTTRANS + 2, ce::S_SPURTT);
     assert_eq!(ce::S_SPURTT + 2, ce::S_SPURTD);
     assert!(ce::S_SPURTTICK + 2 < ce::CLS_ST_RUN_STRIDE);
     // double scratch stacking: field tables below the runner block (duel park
-    // and proximity mirrors each span 120*120), runner blocks, slack.
+    // and proximity mirrors each span 120*120), runner blocks, then the skill
+    // runtime mirrors in kernel order: record windows, slot cooldown clocks,
+    // instance timers, pending pairs, queue durations.
     assert_eq!(14912 + ce::CLS_MAXR * ce::CLS_MAXR, 29312);
     assert_eq!(41216 + 112 * ce::CLS_MAXR, 54656);
-    assert!(54656 <= ce::CLS_SD_STRIDE);
+    assert_eq!(55808 + 40 * 960, 94208);
+    assert_eq!(94208 + 960 + 120 * 5 * 32, 114368);
+    assert_eq!(114368 + 120 * 8 * 2 + 2048, ce::CLS_SD_STRIDE);
     // The per-race frame buffer matches the kernel capture row stride.
-    assert_eq!(ce::CLS_SD_STRIDE, 41216 + 112 * ce::CLS_MAXR + 128);
+    assert!(54656 <= ce::CLS_SD_STRIDE);
 }
 
 #[test]

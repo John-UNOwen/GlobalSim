@@ -97,6 +97,12 @@ pub const SK_FLAG_BUMPED: u32 = 8192;
 /// pass (race_solver.rs:1008 before the section draws at lib.rs:760). The
 /// kernel bakes its self bumps once the lottery has enabled it.
 pub const SK_FLAG_INIT_BUMP: u32 = 16384;
+/// The classic lane's injected asitame conserve release (record carries the
+/// engine hook's extra condition instead of a compiled leaf).
+pub const SK_FLAG_ASITAME: u32 = 32768;
+/// The request flagged this skill id isUnique for the runner, read by the
+/// activate hook when it writes skillEvents (lib.rs:620-667).
+pub const SK_FLAG_UNIQUE: u32 = 65536;
 
 pub const SK_TERM_ALL_CORNER: u32 = 0;
 pub const SK_TERM_STRAIGHT: u32 = 1;
@@ -201,17 +207,31 @@ pub struct SkillsPlan {
 }
 
 pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
-    plan_lane(root, course, Lane::Retail)
+    plan_lane(root, course, Lane::Retail, None)
 }
 
 /// Compile against the classic (non-retail) runtime profile: the classic
 /// effect-value chain and durations, with sampled and live-state condition
 /// leaves refused by name.
 pub fn plan_classic(root: &Value, course: &Value) -> SkillsPlan {
-    plan_lane(root, course, Lane::Classic)
+    plan_lane(root, course, Lane::Classic, None)
 }
 
-fn plan_lane(root: &Value, course: &Value, lane: Lane) -> SkillsPlan {
+/// The classic host inputs the classic profile cannot re-derive from the
+/// request: the adjusted raw power per runner (initialization::stats_reference)
+/// and the resolved strategy ids. The course distance type comes from the
+/// course json. With extras, the compiler injects the engine's asitame record
+/// for every runner past the 1200 power arm (race_solver_builder.rs:786-815).
+pub struct ClassicExtras {
+    pub raw_power: Vec<f64>,
+    pub strategy: Vec<i32>,
+}
+
+pub fn plan_classic_with(root: &Value, course: &Value, extras: &ClassicExtras) -> SkillsPlan {
+    plan_lane(root, course, Lane::Classic, Some(extras))
+}
+
+fn plan_lane(root: &Value, course: &Value, lane: Lane, extras: Option<&ClassicExtras>) -> SkillsPlan {
     let mut c = Compiler {
         words: vec![0; SK_STRIDE],
         tags: Vec::new(),
@@ -275,6 +295,28 @@ fn plan_lane(root: &Value, course: &Value, lane: Lane) -> SkillsPlan {
     }
     // A cross debuff is delivered by the kernel, which drops the same-team
     // receivers exactly like race_field.rs:458-461, so no roster gate remains.
+    if lane == Lane::Classic {
+        if let Some(extras) = extras {
+            let distance = match course.get_f64("distance") {
+                Ok(v) => v,
+                Err(why) => {
+                    c.unsupported(format!("course distance: {why}"));
+                    return c.finish();
+                }
+            };
+            let distance_type = course.get_i64("distanceType").unwrap_or(0) as i32;
+            for r in 0..entries.len() {
+                let raw_power = extras.raw_power.get(r).copied().unwrap_or(0.);
+                if raw_power > 1200.0 {
+                    let strategy = extras.strategy.get(r).copied().unwrap_or(0);
+                    c.pack_asitame(r, raw_power, strategy, distance_type, distance);
+                    if c.reason.is_some() {
+                        return c.finish();
+                    }
+                }
+            }
+        }
+    }
     c.finish()
 }
 
@@ -553,7 +595,11 @@ impl Compiler {
                     return;
                 }
             };
-            let wisdom = def.get("wisdomCheck").and_then(Value::as_i64).unwrap_or(0) == 1;
+            // The wisdom lottery lives in retail_initialization only; the
+            // classic build never consults the flag, so classic treats the
+            // skill as enabled with no draw.
+            let wisdom = def.get("wisdomCheck").and_then(Value::as_i64).unwrap_or(0) == 1
+                && self.lane != Lane::Classic;
             let priority = def.get("priority").and_then(Value::as_i64).unwrap_or(0);
             if !(0..=1).contains(&priority) {
                 self.unsupported(format!("skill {sid} priority {priority} is not ported"));
@@ -585,7 +631,7 @@ impl Compiler {
             };
             let g = Geometry::new(course);
             let statics = Statics::new(course, horse, root, sid, runner);
-            let leaves: Vec<Leaf> = match terms.iter().map(|t| classify(t, &g, &statics)).collect() {
+            let leaves: Vec<Leaf> = match terms.iter().map(|t| classify(t, &g, &statics, self.lane)).collect() {
                 Ok(l) => l,
                 Err(why) => {
                     self.unsupported(format!("skill {sid} condition '{condition}': {why}"));
@@ -623,7 +669,7 @@ impl Compiler {
                     }
                 };
                 let pre_leaves: Vec<Leaf> =
-                    match pre_terms.iter().map(|t| classify(t, &g, &statics)).collect() {
+                    match pre_terms.iter().map(|t| classify(t, &g, &statics, self.lane)).collect() {
                         Ok(l) => l,
                         Err(why) => {
                             self.unsupported(format!("skill {sid} precondition '{pre_text}': {why}"));
@@ -1003,6 +1049,16 @@ impl Compiler {
             // 4 extends the running instance on an overtake (race_solver.rs:2655).
             let duration_usage =
                 alt.get("durationUsage").and_then(Value::as_f64).unwrap_or(1.0) as i32;
+            // The classic kernel models the du 1 constant coefficient only. The
+            // other tiers read live HP or leader gap, and du 4 extends running
+            // instances on an overtake, which the classic lane never enters.
+            if self.lane == Lane::Classic && duration_usage != 1 {
+                self.unsupported(format!(
+                    "skill {sid} duration_usage {duration_usage} reads live HP, live leader \
+                     gap, or the overtake extend, none of which the classic runtime models"
+                ));
+                return;
+            }
             if effect_list.len() > SK_EMAXSLOT {
                 self.unsupported(format!(
                     "skill {sid} alternative has more than {} effects",
@@ -1042,9 +1098,18 @@ impl Compiler {
             // same way the engine's constructor pass does.
             let mut bumped = false;
             let mut selig = true;
+            // A classic record with a window covering the start line fires in
+            // the engine's constructor pass (race_solver.rs:1008), before the
+            // host computes the derived constants. Its self stat writes go into
+            // the same bump channel the static fires use.
+            let fires_at_start = self.lane == Lane::Classic
+                && !dead
+                && arms
+                    .iter()
+                    .any(|a| a.0[1].iter().any(|&(s, e)| s <= 0.0 && 0.0 < e));
             for ef in effect_list {
                 let kind = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
-                if !matches!(kind, 1 | 2 | 4 | 5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 14
+                if !matches!(kind, 1 | 2 | 3 | 4 | 5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 14
                     | 21 | 22 | 27 | 28 | 29 | 31 | 35 | 36 | 37 | 38)
                 {
                     let reason = match kind {
@@ -1059,10 +1124,27 @@ impl Compiler {
                     self.unsupported(format!("skill {sid} effect {reason}"));
                     return;
                 }
+                if self.lane != Lane::Classic && kind == 3 {
+                    self.unsupported(format!(
+                        "skill {sid} PowerUp is not ported to the retail kernel"
+                    ));
+                    return;
+                }
                 let target = ef.get("target").and_then(Value::as_i64).unwrap_or(1) as i32;
                 if !(matches!(target, 1 | 4 | 9 | 10) || (target == 21 && kind == 13)) {
                     self.unsupported(format!(
                         "skill {sid} effect target {target} is not ported"
+                    ));
+                    return;
+                }
+                // The classic runtime refuses the random re-activation pair and
+                // the kakari extend. The stat kinds apply on both paths: the
+                // construction fire lands in a host bump below, a mid-race fire
+                // runs the engine's add_stat_modifier and refresh math in the
+                // kernel (race_solver.rs:2555-2565, :1330-1340).
+                if self.lane == Lane::Classic && matches!(kind, 13 | 36 | 37) && !dead {
+                    self.unsupported(format!(
+                        "skill {sid} type {kind} is not ported to the classic runtime"
                     ));
                     return;
                 }
@@ -1110,6 +1192,15 @@ impl Compiler {
                     ));
                     return;
                 }
+                // The classic lane has no running-instance list to carry a
+                // follow-up, so the additional-activation machinery is off.
+                if self.lane == Lane::Classic && aa != 0 {
+                    self.unsupported(format!(
+                        "skill {sid} additionalActivate {aa} on type {kind}: the classic \
+                         runtime has no running-instance list to re-fire"
+                    ));
+                    return;
+                }
                 // A usage with no engine arm passes the modifier through: the
                 // builder's fold matches 3..=7, 10, 12 and 13
                 // (race_solver_builder.rs:915-928), activation_modifier 8, 9 and
@@ -1118,6 +1209,15 @@ impl Compiler {
                 // the same tiers.
                 let value_usage =
                     ef.get("valueUsage").and_then(Value::as_f64).unwrap_or(1.0) as i32;
+                // The activation-time rolls and the late-corner tier read live
+                // state with no classic reader (race_solver.rs:2485-2503).
+                if self.lane == Lane::Classic && matches!(value_usage, 8 | 9 | 11 | 14) {
+                    self.unsupported(format!(
+                        "skill {sid} value_usage {value_usage} draws live state at activation, \
+                         which the classic runtime does not model"
+                    ));
+                    return;
+                }
                 let raw = ef.get("modifier").and_then(Value::as_f64).unwrap_or(0.);
                 let multiplier = match ef
                     .get("levelModifiers")
@@ -1140,7 +1240,19 @@ impl Compiler {
                 if kind == 4 && !(static_fire && target == 1) && !dead {
                     self.live_guts = true;
                 }
-                if static_fire && target == 1 && matches!(kind, 4 | 5 | 29) {
+                if self.lane != Lane::Classic
+                    && static_fire
+                    && target == 1
+                    && matches!(kind, 4 | 5 | 29)
+                {
+                    self.bumps.push((runner, kind, modifier));
+                    bumped = true;
+                }
+                if self.lane == Lane::Classic
+                    && target == 1
+                    && fires_at_start
+                    && matches!(kind, 1 | 2 | 3 | 4 | 5 | 29)
+                {
                     self.bumps.push((runner, kind, modifier));
                     bumped = true;
                 }
@@ -1184,6 +1296,18 @@ impl Compiler {
             // followers inherit its enablement.
             let (wis_off, wis_len) =
                 if wisdom && first_record { self.tag(&format!("W{sid}")) } else { (0, 0) };
+            // The wire's isUnique flag feeds the hook's skillEvents entries
+            // (lib.rs:620-667); the request keys it by skill id per horse.
+            let unique = horse
+                .get("skills")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter().any(|e| {
+                        normalize_skill_entry(e).map(|(id, _)| id == sid).unwrap_or(false)
+                            && e.get("isUnique").and_then(Value::as_bool).unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
             let at = SK_RECORDS + SK_RSTRIDE * self.nrec;
             self.words[at] = sid_num;
             self.words[at + 1] = runner as u32;
@@ -1201,7 +1325,8 @@ impl Compiler {
                 | (if rarity == 1 { SK_FLAG_RANWHITE } else { 0 })
                 | (if general { SK_FLAG_GENERAL } else { 0 })
                 | (if bumped { SK_FLAG_BUMPED } else { 0 })
-                | (if gated_static { SK_FLAG_INIT_BUMP | SK_FLAG_BUMPED } else { 0 });
+                | (if gated_static { SK_FLAG_INIT_BUMP | SK_FLAG_BUMPED } else { 0 })
+                | (if unique { SK_FLAG_UNIQUE } else { 0 });
             self.words[at + 3] = priority as u32;
             self.words[at + 4] = rarity;
             self.words[at + 5] = (self.neff - eff_base) as u32;
@@ -1278,6 +1403,101 @@ impl Compiler {
                 self.team_stats[i] = totals[team];
             }
         }
+    }
+
+    /// The engine's asitame injection (race_solver_builder.rs:786-815), armed
+    /// when the adjusted raw power passes 1200. The record carries one region
+    /// chain [phase 2 start, distance] and one Accel effect. The engine's
+    /// extra condition (is_last_spurt) is a kernel special case marked by the
+    /// ASITAME flag, and the wire modifier 0 is replaced at activation by the
+    /// release formula, which depends on no race state here, so the compiled
+    /// value is the folded one (race_solver.rs:2489-2495, with the classic
+    /// lane's dead cp_struggle and cp_kakari flags).
+    fn pack_asitame(
+        &mut self,
+        runner: usize,
+        raw_power: f64,
+        strategy: i32,
+        distance_type: i32,
+        distance: f64,
+    ) {
+        if self.nrec >= SK_RMAX {
+            self.unsupported("skill table overflow: too many records".to_string());
+            return;
+        }
+        if self.nreg + 1 > SK_GMAX || self.nprog + 1 > SK_PMAX || self.narm + 1 > SK_AMAX
+            || self.neff + 1 > SK_EMAX
+        {
+            self.unsupported("skill table overflow: asitame injection".to_string());
+            return;
+        }
+        let region = self.nreg;
+        let at = SK_REGIONS + SK_GSTRIDE * self.nreg;
+        let w = f64_words(distance * 2.0 / 3.0);
+        self.words[at] = w[0];
+        self.words[at + 1] = w[1];
+        let w = f64_words(distance);
+        self.words[at + 2] = w[0];
+        self.words[at + 3] = w[1];
+        self.nreg += 1;
+        let prog = self.nprog;
+        self.words[SK_PROGRAMS + SK_PSTRIDE * self.nprog] = OP_TRUE;
+        self.nprog += 1;
+        let arm = self.narm;
+        let at = SK_ARMS + SK_ASTRIDE * self.narm;
+        self.words[at] = 1;
+        self.words[at + 1] = prog as u32;
+        self.words[at + 2] = 0;
+        self.words[at + 3] = 0;
+        self.words[at + 4] = 1;
+        self.words[at + 5] = region as u32;
+        self.words[at + 6] = 0;
+        self.words[at + 7] = u32::MAX;
+        self.narm += 1;
+        let effect = self.neff;
+        let at = SK_EFFECTS + SK_ESTRIDE * self.neff;
+        self.words[at] = 31;
+        self.words[at + 1] = 1;
+        self.words[at + 2] = 1;
+        self.words[at + 3] = 1;
+        self.words[at + 4] = 0;
+        self.words[at + 5] = 0;
+        let w = f64_words(asitame_release_modifier(raw_power, strategy, distance_type));
+        self.words[at + 6] = w[0];
+        self.words[at + 7] = w[1];
+        let w = f64_words(3.0 / (distance / 1000.0));
+        self.words[at + 8] = w[0];
+        self.words[at + 9] = w[1];
+        self.neff += 1;
+        let at = SK_RECORDS + SK_RSTRIDE * self.nrec;
+        self.words[at] = 0;
+        self.words[at + 1] = runner as u32;
+        self.words[at + 2] = SK_FLAG_RETAIN | SK_FLAG_PRIMARY | SK_FLAG_ASITAME;
+        self.words[at + 3] = 0;
+        self.words[at + 4] = 1;
+        self.words[at + 5] = 1;
+        self.words[at + 6] = effect as u32;
+        self.words[at + 7] = 1;
+        self.words[at + 8] = prog as u32;
+        self.words[at + 9] = 0;
+        self.words[at + 10] = u32::MAX;
+        self.words[at + 11] = 0;
+        self.words[at + 12] = 0;
+        self.words[at + 13] = 0;
+        self.words[at + 14] = 0;
+        self.words[at + 15] = 0;
+        self.words[at + 16] = 0;
+        self.words[at + 17] = 1.0f32.to_bits();
+        self.words[at + 18] = 1;
+        self.words[at + 19] = region as u32;
+        self.words[at + 20] = 1;
+        self.words[at + 21] = arm as u32;
+        self.words[at + 22] = 0;
+        self.words[at + 23] = 0;
+        self.words[at + 24] = 0;
+        self.words[at + 25] = 0;
+        self.words[at + 26] = 0;
+        self.nrec += 1;
     }
 
     /// The classic runtime has no sampled-term sampler and its kernel reads
@@ -1386,6 +1606,29 @@ fn retail_skill_value(raw: f64, multiplier: f64) -> f64 {
 /// through the multiplier in plain f64, no f32 round trip.
 fn classic_skill_value(raw: f64, multiplier: f64) -> f64 {
     raw / 10000.0 * multiplier
+}
+
+// The engine's asitame coefficient table (race_solver_builder.rs:139-145).
+const ASITAME_STRATEGY_DISTANCE_COEFFICIENT: [[f64; 6]; 5] = [
+    [0.0; 6],
+    [0.0, 1.0, 0.7, 0.75, 0.7, 1.0],
+    [0.0, 1.0, 0.8, 0.7, 0.75, 1.0],
+    [0.0, 1.0, 0.9, 0.875, 0.86, 1.0],
+    [0.0, 1.0, 0.9, 1.0, 0.9, 1.0],
+];
+
+/// `asitame_release_modifier` (race_solver_builder.rs:149-156): float operands
+/// and a float sqrt, one double expression product rounded to float.
+fn asitame_release_modifier(power: f64, strategy: i32, distance_type: i32) -> f64 {
+    let strategy = strategy.clamp(0, 5) as usize;
+    let coef = ASITAME_STRATEGY_DISTANCE_COEFFICIENT
+        .get(distance_type as usize)
+        .or(ASITAME_STRATEGY_DISTANCE_COEFFICIENT.last())
+        .map(|row| row[strategy])
+        .unwrap_or(0.0);
+    let arg = ((power as f32 - 1200.0_f32) * 130.0_f32).max(0.);
+    let root = (arg as f64).sqrt() as f32;
+    (root as f64 * 0.001_f32 as f64 * coef as f32 as f64) as f32 as f64
 }
 
 // Source-pinned mirrors of the vendored stat chain the team totals and the
@@ -1984,7 +2227,7 @@ fn fc_random_index(course: &Value, distance: f64) -> Option<usize> {
 /// One comparison's engine role. Region-algebra terms the retail runtime
 /// swaps to live values lower to pass-through leaves with the runtime
 /// feature, and course or runner constants fold at compile time.
-fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
+fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, String> {
     let d = g.distance;
     match t.name.as_str() {
         "always" => Ok(Leaf::True),
@@ -2022,6 +2265,17 @@ fn classify(t: &Term, g: &Geometry, s: &Statics) -> Result<Leaf, String> {
         "distance_diff_rate" => Ok(dyn_leaf(FEAT_DDRATE, t)),
         "distance_diff_top" => Ok(dyn_leaf(FEAT_DDTOP, t)),
         "distance_diff_top_float" => Ok(dyn_leaf(FEAT_DDTOPF, t)),
+        // The engine's distance_rate comparison is pure region algebra, an
+        // intersect with [rate*d/100, d] or [0, rate*d/100] and no live check
+        // (activation_conditions.rs:574-581, registered at :1552), so the
+        // classic runtime ports it as a course window.
+        "distance_rate" if lane == Lane::Classic && matches!(t.op, 3 | 5) => Ok(Leaf::Region(vec![
+            if t.op == 5 {
+                (d * t.arg as f64 / 100.0, d)
+            } else {
+                (0.0, d * t.arg as f64 / 100.0)
+            },
+        ])),
         "distance_rate" => Ok(Leaf::Dynamic {
             feat: FEAT_DIST_RATE,
             cmp: t.op,

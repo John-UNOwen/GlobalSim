@@ -1911,27 +1911,29 @@ The skill-side lists live in `SKILLS_DESIGN.md`.
   absent forms, which the engine runs identically to the ported retail mode,
   answer normally
 - Non-retail (classic) requests the classic kernel does not port, each refused
-  by name in `classic_exec::prepare` and in `facade::gate_reasons`: any
-  non-empty `skills` ("the classic kernel does not run skills"),
+  by name in `classic_exec::prepare` and in `facade::gate_reasons`:
   `experimentalGrid` starts, `singleMode`,
   `experimentalLaterStaminaMechanics`, `traceConservePower`, the legacy
   `retailRuntime` key, `experimentalRetailGeometry`, a roster beyond
-  `CLS_MAXR` (120), a course with more than `CLS_MAX_SLOPES` (16) slopes, and a
-  runner whose adjusted raw power exceeds 1200, which arms the injected
-  asitame (`race_solver_builder.rs:802`). Zero-skill classic races run on the
-  GPU lane. The classic refusals that need the course table (slope count,
-  adjusted raw power) run at prepare time, so `gate_reasons` alone does not
-  name them
+  `CLS_MAXR` (120), and a course with more than `CLS_MAX_SLOPES` (16) slopes.
+  Skills now run on the GPU lane (Wave-12b). The slope-count refusal needs the
+  course table, so it runs at prepare time and `gate_reasons` alone does not
+  name it
 
-Wave 12b landed the classic compiler profile (`skills_compile::plan_classic`):
-the classic effect-value chain (`modifier / 10000 * multiplier`) and duration
-(`base_duration / 10000`), and the refusal of sampled triggers and live-state
-condition leaves by name, gated in `tests/classic_folds.rs`. The classic kernel
-skill pass (the priority walk, cooldown and window bookkeeping, the classic duel
-and spot skill arms), the classic `skillEvents`, detail, target and additional
-event arrays, and the asitame conserve-power release (the release scan, its
-release clock and the `conservePowerEvents` channel) are not in the classic
-kernel, so classic skills and asitame rosters stay refused end to end.
+Wave 12b landed the classic skill runtime end to end. The compiler profile
+(`skills_compile::plan_classic`) compiles the classic effect-value chain
+(`modifier / 10000 * multiplier`) and duration (`base_duration / 10000`), and
+refuses sampled triggers and live-state condition leaves by name, gated in
+`tests/classic_folds.rs`. In the kernel the skill pass runs the engine order
+(expire armed effects, the priority walk, cooldown and window bookkeeping, the
+classic duel and spot arms), activations resolve self and cross effects through
+the end-of-tick batched field queue, and the reply lanes emit `skillEvents`,
+`skillDetailEvents`, `skillTargetEvents`, `additionalTargetEvents[]` and
+`conservePowerEvents` in engine push order. The asitame conserve-power release
+(the release scan, its release clock and the `conservePowerEvents` channel) runs
+on the GPU too. Full replies for skill and asitame rosters, real ids included,
+are byte-equal to the engine (`tests/wave12b_gate.rs`,
+`tests/wave12b_full_gate.rs`).
 
 
 ## Grid mode

@@ -38,10 +38,13 @@ pub const RACE_KERNEL_SOURCE: &str = concat!(
     include_str!("kernels/race.cl")
 );
 pub const BUILD_OPTIONS: &str = "-cl-fp32-correctly-rounded-divide-sqrt";
-// The classic lane's kernel runs no powf or log10 (construction is host
-// side), so this program carries the rng and initialization helpers only.
+// The classic lane carries the bit-exact powf table for the mid-race stat
+// refresh (race_solver.rs:1330-1340 recomputes the guts and power derived
+// terms when a delivered stat effect lands); construction stays host side.
 pub const CLASSIC_KERNEL_SOURCE: &str = concat!(
     include_str!("kernels/rng_core.cl"),
+    "\n",
+    include_str!("kernels/powf_core.cl"),
     "\n",
     include_str!("kernels/skills.cl"),
     "\n",

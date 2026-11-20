@@ -320,7 +320,7 @@ fn parse_fans(words: &[u32]) -> Result<Vec<Selected>, String> {
         let (r, sid, detail) = (words[at] as usize, words[at + 1] as i64, words[at + 2] as usize);
         let t = f64w(words[at + 3], words[at + 4]);
         let enc = words[at + 5] as usize;
-        let mut at2 = at + 6;
+        let at2 = at + 6;
         let nids;
         let list = if enc == 0 {
             nids = 0;
@@ -371,7 +371,7 @@ fn order_competition(comp: &[u32], strategies: &[i64], n: usize) -> Result<Vec<(
     // never reaches this lane. Every pair compares Equal, so the engine's
     // introsort leaves the roster filter order untouched.
     let roster = {
-        let mut recording: Vec<usize> =
+        let recording: Vec<usize> =
             (0..n).filter(|&i| strategies[i] == 1 || strategies[i] == 5).collect();
         let mut ranks = vec![0usize; n];
         for (rank, i) in recording.iter().copied().enumerate() {
