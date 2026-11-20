@@ -405,18 +405,38 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
     {
         return Ok(flagged(n, "retail runtime belongs to the retail lane".into()));
     }
+    // Engine errors first, in the order the engine raises them: the grid
+    // shape check runs inside parse_race_spec (lib.rs:262-272, :1502) and the
+    // classic trace check follows at lib.rs:1504-1506.
+    if let Some(grid) = root.get("experimentalGrid") {
+        let valid = grid.as_object().is_some_and(|o| o.len() == 2)
+            && grid.get("columns").and_then(Value::as_f64) == Some(20.0)
+            && grid.get("rowSpacing").and_then(Value::as_f64) == Some(3.0)
+            && (21..=120).contains(&n);
+        if !valid {
+            return Ok(flagged(
+                n,
+                "experimentalGrid requires 21 through 120 horses, columns=20 and rowSpacing=3.0.".into(),
+            ));
+        }
+    }
+    if root.get("traceConservePower").and_then(Value::as_bool).unwrap_or(false) {
+        // The engine itself errors on classic (lib.rs:1504-1506): the flag
+        // needs the retail runtime, so quote its text, not a GPU-only reason.
+        return Ok(flagged(n, "traceConservePower requires experimentalRetailRuntime".into()));
+    }
+    // Modes the engine answers but the classic kernel does not port: the
+    // refusal is a host fallback, never an approximation.
     if root.get("experimentalGrid").is_some() {
         return Ok(flagged(n, "experimentalGrid belongs to the retail lane".into()));
-    }
-    if root.get("singleMode").and_then(Value::as_bool).unwrap_or(false) {
-        return Ok(flagged(n, "singleMode's +400 stat bonus is outside the GPU lane".into()));
     }
     if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool).unwrap_or(false) {
         return Ok(flagged(n, "later stamina mechanics are not in the classic kernel".into()));
     }
-    if root.get("traceConservePower").and_then(Value::as_bool).unwrap_or(false) {
-        return Ok(flagged(n, "conserve-power tracing is not in the classic kernel".into()));
-    }
+    // singleMode is ported: the +400 lands inside the stats_reference chain
+    // (race_solver_builder.rs:304-321). A non-boolean flag is ignored, like
+    // the engine (lib.rs:342).
+    let single_mode = root.get("singleMode").and_then(Value::as_bool).unwrap_or(false);
     if n == 0 || n > CLS_MAXR {
         return Ok(flagged(n, "roster size outside the kernel's range".into()));
     }
@@ -456,6 +476,7 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
             strategy_apt: stapt,
             ground,
             css: course.css.clone(),
+            single_mode,
         };
         let stats = initialization::stats_reference(&stats_case);
         if stats.fallback != 0 {
@@ -464,11 +485,28 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         extras.raw_power.push(f64::from_bits(stats.raw_power));
         extras.strategy.push(strategy);
     }
-    let plan = crate::skills_compile::plan_classic_with(&root, course_json, &extras);
+    let mut plan = crate::skills_compile::plan_classic_with(&root, course_json, &extras);
     if let Some(reason) = plan.reason {
         return Ok(flagged(n, reason));
     }
     let bumps = plan.bumps;
+    // The builder sampler jobs, in the engine's skilldata order: wire skill
+    // order, alternatives reversed inside one skill (race_solver_builder.rs:
+    // 594-596,624). The host replays them per runner on the builder stream.
+    let classic_jobs = plan.classic_jobs;
+    let mut jobs_by_runner: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (ji, job) in classic_jobs.iter().enumerate() {
+        if job.runner < n {
+            jobs_by_runner[job.runner].push(ji);
+        }
+    }
+    for list in jobs_by_runner.iter_mut() {
+        list.sort_by(|a, b| {
+            let x = &classic_jobs[*a];
+            let y = &classic_jobs[*b];
+            (x.pack_seq, std::cmp::Reverse(x.alt_index)).cmp(&(y.pack_seq, std::cmp::Reverse(y.alt_index)))
+        });
+    }
 
     let mut ri = vec![0u32; CLS_RI_STRIDE];
     let mut rd = vec![0f64; CLS_RD_STRIDE];
@@ -520,6 +558,7 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
             strategy_apt: stapt as i32,
             ground,
             css: course.css.clone(),
+            single_mode,
         };
         let stats = initialization::stats_reference(&stats_case);
         if stats.fallback != 0 {
@@ -535,6 +574,33 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         let mut builder = Rule30CARng::new(seed_lo, ref_race_seed_hi(seed_lo));
         let d1 = builder.int32();
         let _d2 = builder.int32();
+        // The builder sampler replay (race_solver_builder.rs:944-960), on the
+        // builder stream right after the pacer draw. Duplicate filter chains
+        // reuse their windows and spend no draw, keyed like the engine's map.
+        let mut extra_bumps: Vec<(i32, f64)> = Vec::new();
+        if !jobs_by_runner[r].is_empty() {
+            let mut cache: std::collections::BTreeMap<&str, Vec<(f64, f64)>> =
+                std::collections::BTreeMap::new();
+            for &ji in jobs_by_runner[r].iter() {
+                let job = &classic_jobs[ji];
+                let windows = match cache.get(job.key.as_str()) {
+                    Some(w) => w.clone(),
+                    None => {
+                        let w = crate::skills_compile::classic_sample_windows(
+                            job.policy,
+                            &job.regions,
+                            &mut builder,
+                        );
+                        cache.insert(job.key.as_str(), w.clone());
+                        w
+                    }
+                };
+                crate::skills_compile::apply_classic_sampled(&mut plan.words, job, &windows);
+                if job.fires_start && windows.iter().any(|&(s, e)| s <= 0.0 && 0.0 < e) {
+                    extra_bumps.extend(job.cond_bumps.iter().copied());
+                }
+            }
+        }
         let mut solver = Rule30CARng::new(d1, 0);
         let hp_seed = solver.int32();
         let _gorosi = solver.int32();
@@ -547,9 +613,14 @@ fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<P
         // stats, so the compiler-listed bumps move the fields here. The stat
         // writes carry the engine's max(1.0) clamp per field
         // (race_solver.rs:695-709), the kakari bonus runs in f64.
-        for (b, kind, modifier) in bumps.iter().filter(|(b, _, _)| *b == r) {
+        for (b, kind, modifier) in bumps
+            .iter()
+            .filter(|(b, _, _)| *b == r)
+            .copied()
+            .chain(extra_bumps.iter().map(|(k, m)| (r, *k, *m)))
+        {
             let _ = b;
-            match *kind {
+            match kind {
                 1 => speed = (speed + modifier).max(1.0),
                 2 => stamina = (stamina + modifier).max(1.0),
                 3 => power = (power + modifier).max(1.0),

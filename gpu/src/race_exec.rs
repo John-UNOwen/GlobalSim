@@ -877,6 +877,7 @@ fn prepare(
             strategy_apt: ri[b + RR_STAPT] as i32,
             ground,
             css: css.clone(),
+            single_mode: false,
         });
     }
     Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, live_guts: sk_plan.live_guts, debug_scratch: false, grid, full: false })

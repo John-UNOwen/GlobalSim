@@ -223,8 +223,9 @@ fn roster_121_is_a_kernel_capacity_refusal_not_an_engine_error() {
 
 /// singleMode is a real engine mode: the adjusted stats gain +400
 /// (race_solver_builder.rs:304-320) and the reply carries singleModeVersion
-/// (lib.rs:1125-1128). The kernel ports neither and refuses by name on both
-/// lanes. A non-boolean singleMode is ignored by the engine (lib.rs:342), and
+/// (lib.rs:1125-1128). The retail lane ports neither and refuses by name;
+/// the classic lane folds the +400 into the stats reference. A non-boolean
+/// singleMode is ignored by the engine (lib.rs:342), and
 /// that ignore is ported: the GPU full reply answers it byte-equal to the
 /// engine on seeds 1 through 3.
 #[test]

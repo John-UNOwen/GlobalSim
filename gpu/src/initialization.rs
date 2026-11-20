@@ -119,6 +119,9 @@ pub struct StatsCase {
     pub ground: i32,
     /// course_set_status entries, at most 4.
     pub css: Vec<i32>,
+    /// The singleMode flag adds +400 to every adjusted stat
+    /// (race_solver_builder.rs:304-321); false outside single mode.
+    pub single_mode: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -579,7 +582,7 @@ fn ref_ranked_base_stat(raw: f64, mood: i32, rank: i32) -> f32 {
 
 /// The adjusted-stats chain over the vendored initial_base_wisdom and
 /// course_speed_modifier, mirroring build_base_stats_with_team_rank and
-/// build_adjusted_stats_for_mode with single_mode=false.
+/// build_adjusted_stats_for_mode with the case's single_mode flag.
 pub fn stats_reference(c: &StatsCase) -> StatsOut {
     let motiv = 1.0 + 0.02 * c.mood as f64;
     let base = [
@@ -617,17 +620,23 @@ pub fn stats_reference(c: &StatsCase) -> StatsOut {
         [0.0, -100.0, -50.0, -100.0, -100.0],
     ];
     let clamp1 = |v: f64| v.clamp(1.0, 2000.0);
+    // The singleMode bonus is added inside each clamp, after the course and
+    // ground adjustments, exactly as build_adjusted_stats_for_mode does
+    // (race_solver_builder.rs:308,315-321).
+    let bonus = if c.single_mode { 400.0 } else { 0.0 };
     let adjusted = [
         ((base[0] as f32 as f64 * race_course_modifier as f32 as f64
-            + gspd[c.surface as usize][c.ground as usize]) as f32)
+            + gspd[c.surface as usize][c.ground as usize]
+            + bonus) as f32)
             .clamp(1.0, 2000.0) as f64,
-        clamp1(base[1]),
-        clamp1(base[2] + gpow[c.surface as usize][c.ground as usize]),
-        clamp1(base[3]),
+        clamp1(base[1] + bonus),
+        clamp1(base[2] + gpow[c.surface as usize][c.ground as usize] + bonus),
+        clamp1(base[3] + bonus),
         ((base[4] as f32 as f64
             * ([11000.0f32, 10000.0, 8500.0, 7500.0, 6000.0, 4000.0, 2000.0, 1000.0]
                 [c.strategy_apt as usize]
-                * 0.0001_f32) as f64) as f32)
+                * 0.0001_f32) as f64
+            + bonus) as f32)
             .clamp(1.0, 2000.0) as f64,
     ];
     StatsOut {

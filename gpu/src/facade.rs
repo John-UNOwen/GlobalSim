@@ -534,10 +534,10 @@ impl DeviceFacts {
 /// None models "no GPU passed the exactness gate", Some carries one device's
 /// facts. The device checks come first, then the request checks, so a caller
 /// can pre-filter requests against known facts without a device. The checks
-/// follow the lane the request routes to. Two classic gates need the course
-/// table and stay in `classic_exec::prepare`: a course with more than
-/// CLS_MAX_SLOPES slopes, and a runner whose adjusted raw power exceeds 1200,
-/// which arms the injected asitame.
+/// follow the lane the request routes to. One classic gate needs the course
+/// table and stays in `classic_exec::prepare`: a course with more than
+/// CLS_MAX_SLOPES slopes. A runner above the 1200 adjusted raw power is not a
+/// gate: `prepare` injects the asitame record like the engine does.
 pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<String> {
     let device = match device {
         None => return Some("no GPU passes the exactness gate".into()),
@@ -589,17 +589,17 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
         {
             return Some("retail runtime belongs to the retail lane".into());
         }
+        // The engine errors on classic before answering any grid or mode
+        // (lib.rs:1504-1506), so quote it ahead of the mode fallbacks; the
+        // invalid-grid shape is already quoted by the prefilter above.
+        if root.get("traceConservePower").and_then(Value::as_bool) == Some(true) {
+            return Some("traceConservePower requires experimentalRetailRuntime".into());
+        }
         if root.get("experimentalGrid").is_some() {
             return Some("experimentalGrid belongs to the retail lane".into());
         }
-        if root.get("singleMode").and_then(Value::as_bool) == Some(true) {
-            return Some("singleMode's +400 stat bonus is outside the GPU lane".into());
-        }
         if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) == Some(true) {
             return Some("later stamina mechanics are not in the classic kernel".into());
-        }
-        if root.get("traceConservePower").and_then(Value::as_bool) == Some(true) {
-            return Some("conserve-power tracing is not in the classic kernel".into());
         }
         let skilled = root
             .get("horses")

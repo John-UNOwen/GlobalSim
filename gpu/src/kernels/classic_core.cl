@@ -215,6 +215,7 @@
 #define SK_QMAX 2048
 #define SK_WINMAXP 16
 #define SK_FLAG_ASITAME 32768
+#define SK_FLAG_DYN 131072
 #define SK_FLAG_UNIQUE 65536
 // Instance token words: global effect table index (below 65536), the
 // runner-local skill slot, the activation perspective, the source-side Noop
@@ -2146,8 +2147,9 @@ static void cc_emit_kakari(Cc* c, const unsigned int r,
 // engine exactly: a pending-record scan (race_solver.rs:2131-2182), per-kind
 // effect application (:2539-2641), end-of-tick delivery of cross effects
 // (race_field.rs:486-492), and the lib.rs:632-721 event hooks over one
-// shared stream. There is no wisdom lottery (the flag is
-// retail_initialization-only), no additional activation, and no kakari
+// shared stream. The host compiler replays the builder's wisdom lottery
+// (race_solver_builder.rs:1006-1011) and compiles lost entries dead, so the
+// kernel sees no draw. There is no additional activation and no kakari
 // extend, so the running-skill machinery stays empty.
 
 #define SKRD(rec) (c->su + CLS_SK_TABLE + SK_RECORDS + SK_RSTRIDE * (rec))
@@ -2831,8 +2833,8 @@ static void cc_sk_fire(Cc* c, const int r, const int rec, const int fieldless) {
                 c->su[CLS_SKD_QMETA + q + k] =
                     (unsigned int)r |
                     ((unsigned int)sel[k] << 7) |
-                    ((unsigned int)rec << 14) |
-                    ((unsigned int)e << 24);
+                    ((unsigned int)e << 14) |
+                    ((unsigned int)rec << 18);
                 c->sd[UDB_SKQDUR + q + k] = dur;
             }
             if (ns > 0) {
@@ -2852,14 +2854,226 @@ static void cc_sk_fire(Cc* c, const int r, const int rec, const int fieldless) {
     cc_sk_hook_activate(c, r, slot, sid, flags, detail);
 }
 
+// The live-condition gate. The engine folds the condition tree's dynamic
+// checks into one Or closure over per-arm checks
+// (activation_conditions.rs:1454-1464): an arm passes when the position sits
+// in its own filtered chain and all of its comparisons hold. The guard at
+// activation_conditions.rs:303 rejects every field-read comparison in the
+// fieldless constructor pass, so those readers answer NaN there and the NaN
+// check fails every comparison, `!=` included.
+
+// The engine's is_visible cone (retail_lane.rs:484-499), the same one the
+// retail lane machine ports.
+static int cc_is_visible(const float gap, const float lane_gap, const float vision) {
+    if (vision <= 0. || !(gap >= 0. && gap <= vision)) {
+        return 0;
+    }
+    // Keep the width expression double until the final f32 store, or an
+    // intermediate rounding admits a runner just outside the cone.
+    const float widest = convert_float_rte(
+        ((double)1. * (double)0.6388888955116272f + (double)0.1111111119389534f) * 0.5);
+    const float magnitude = fabs(lane_gap);
+    if (magnitude > widest) {
+        return 0;
+    }
+    const float ratio = gap / vision;
+    const float width = convert_float_rte(
+        ((double)ratio * (double)0.6388888955116272f + (double)0.1111111119389534f) * 0.5);
+    return magnitude <= width;
+}
+
+static double cc_feat_nan(void) {
+    return (double)as_float(0x7fc00000u);
+}
+
+// The scan gate's live predicate values, one FEAT_* code per dynamic leaf.
+// hp_per answers the classic ratio branch and accumulatetime the f32-floored
+// clock; both read solver state only, so the fieldless pass evaluates them.
+static double cc_sk_feat_value(const uint code, Cc* c, const int r, const int fieldless) {
+    const uint feat = code >> 3;
+    switch (feat) {
+    case FEAT_CLOCK:
+        return floor((double)convert_float_rte((float)SR(DF_ACCUM)));
+    case FEAT_HP_PER:
+        return fmax(SR(DF_HP) / SR(DF_MAXHP), 0.0);
+    case FEAT_ORDER:
+    case FEAT_ORDER_RATE:
+        if (fieldless != 0) {
+            return cc_feat_nan();
+        }
+        return (double)cc_rank(c, r);
+    case FEAT_NEAR: {
+        if (fieldless != 0) {
+            return cc_feat_nan();
+        }
+        const double pos = SR(DF_POS);
+        const double lane = SR(DF_LANE);
+        const double lane_lim = (double)0.16666f;
+        int cnt = 0;
+        for (int j = 0; j < c->n; j++) {
+            if (j == r) {
+                continue;
+            }
+            if (fabs(SO(DF_POS, j) - pos) <= 3.0 &&
+                fabs(SO(DF_LANE, j) - lane) <= lane_lim) {
+                cnt++;
+            }
+        }
+        return (double)cnt;
+    }
+    case FEAT_NEARIF: {
+        if (fieldless != 0) {
+            return cc_feat_nan();
+        }
+        const double pos = SR(DF_POS);
+        const double lane = SR(DF_LANE);
+        const double lane_lim = (double)0.16666f;
+        int cnt = 0;
+        for (int j = 0; j < c->n; j++) {
+            if (j == r) {
+                continue;
+            }
+            const double gap = SO(DF_POS, j) - pos;
+            if (gap > 0.0 && gap <= 3.0 && fabs(SO(DF_LANE, j) - lane) <= lane_lim) {
+                cnt++;
+            }
+        }
+        return (double)cnt;
+    }
+    case FEAT_SURR: {
+        if (fieldless != 0) {
+            return cc_feat_nan();
+        }
+        const double pos = SR(DF_POS);
+        const double lane = SR(DF_LANE);
+        int out = 0;
+        int front = 0;
+        int behind = 0;
+        for (int j = 0; j < c->n; j++) {
+            if (j == r) {
+                continue;
+            }
+            const double dg = (double)convert_float_rte(SO(DF_POS, j) - pos);
+            const double lg = (double)convert_float_rte(SO(DF_LANE, j) - lane);
+            if (fabs(dg) <= 1.5 && lg >= 0.0 && lg <= (double)0.16666f) out = 1;
+            if (dg > 0.0 && dg <= 3.0 && fabs(lg) <= (double)0.08333f) front = 1;
+            if (dg >= -3.0 && dg < 0.0 && fabs(lg) <= (double)0.08333f) behind = 1;
+            if (out && front && behind) break;
+        }
+        return out && front && behind ? 1.0 : 0.0;
+    }
+    case FEAT_VISN: {
+        if (fieldless != 0) {
+            return cc_feat_nan();
+        }
+        const double pos = SR(DF_POS);
+        const double lane = SR(DF_LANE);
+        const float vision = (float)cc_sk_vision(c, r);
+        int cnt = 0;
+        for (int j = 0; j < c->n; j++) {
+            if (j == r) {
+                continue;
+            }
+            if (cc_is_visible(convert_float_rte(SO(DF_POS, j) - pos),
+                convert_float_rte(SO(DF_LANE, j) - lane), vision)) {
+                cnt++;
+            }
+        }
+        return (double)cnt;
+    }
+    default:
+        return 0.0;
+    }
+}
+
+// The engine's comparisons. order_rate rounds the field-size threshold
+// half away from zero; the classic hp_per branch keeps the ratio and divides
+// the percent argument (activation_conditions.rs:612-624).
+static int cc_sk_feat_cmp(const uint code, const double v, const double arg, const int n) {
+    if (isnan(v)) {
+        return 0;
+    }
+    double b = arg;
+    const uint feat = code >> 3;
+    if (feat == FEAT_ORDER_RATE) {
+        b = round((double)n * (arg / 100.0));
+    } else if (feat == FEAT_HP_PER) {
+        b = arg / 100.0;
+    }
+    switch (code & 7u) {
+    case 0u: return v == b;
+    case 1u: return v != b;
+    case 2u: return v < b;
+    case 3u: return v <= b;
+    case 4u: return v > b;
+    default: return v >= b;
+    }
+}
+
+// One arm's condition program: a conjunction of leaf checks, since the '@'
+// structure lives in the arms table and not in the programs.
+static int cc_sk_prog(Cc* c, const int r, const __global const unsigned int* prog,
+    const int len, const int fieldless) {
+    for (int i = 0; i < len; i++) {
+        const __global const unsigned int* nd = prog + SK_PSTRIDE * i;
+        if (nd[0] == OP_TRUE) {
+            if (nd[1] == 0u) {
+                return 0;
+            }
+        } else if (nd[0] == OP_FEAT_I) {
+            const double arg = cc_sk_f64(nd + 2);
+            const double v = cc_sk_feat_value(nd[1], c, r, fieldless);
+            if (!cc_sk_feat_cmp(nd[1], v, arg, c->n)) {
+                return 0;
+            }
+        } else if (nd[0] != OP_AND) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// The arm fold of the engine's Or closure: one arm passes when the position
+// sits in its own runtime chain and its program holds.
+static int cc_sk_live_ok(Cc* c, const int r, const __global unsigned int* rd,
+    const double pos, const int fieldless) {
+    const int arms_base = (int)rd[21];
+    const int arms_len = (int)rd[20];
+    for (int a = 0; a < arms_len; a++) {
+        const __global unsigned int* ar = SKARMF(arms_base + a);
+        if (ar[6] & SK_ARM_DEAD) {
+            continue;
+        }
+        const int rl = (int)ar[4];
+        const int rb = (int)ar[5];
+        int member = 0;
+        for (int g = 0; g < rl; g++) {
+            if (cc_sk_f64(SKREGF(rb + g)) <= pos &&
+                pos < cc_sk_f64(SKREGF(rb + g) + 2)) {
+                member = 1;
+                break;
+            }
+        }
+        if (member == 0) {
+            continue;
+        }
+        if (cc_sk_prog(c, r, c->su + CLS_SK_TABLE + SK_PROGRAMS + SK_PSTRIDE * (int)ar[1],
+            (int)ar[0], fieldless)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // process_pending_armed (race_solver.rs:2131-2182) for one runner: armed
-// records (trigger.start <= pos) in descending creation order, trigger-end
-// consumption, the fire gate, and the cooldown parking. fieldless is the
-// constructor pass, where only all-self-target records fire.
+// records in wire (creation) order, the same visit order the full scan nets
+// by walking the reversed pending list from the back (race_solver.rs:2200),
+// trigger-end consumption, the fire gate, and the cooldown parking. fieldless
+// is the constructor pass, where only all-self-target records fire.
 static void cc_sk_scan(Cc* c, const int r, const int fieldless) {
     const int nrec = cc_sk_nrec(c);
     const double pos = fieldless ? 0.0 : SR(DF_POS);
-    for (int rec = nrec - 1; rec >= 0; rec--) {
+    for (int rec = 0; rec < nrec; rec++) {
         const __global unsigned int* rd = SKRD(rec);
         if ((int)rd[1] != r || (rd[2] & SK_FLAG_DEAD) != 0u) {
             continue;
@@ -2905,6 +3119,10 @@ static void cc_sk_scan(Cc* c, const int r, const int fieldless) {
         if (win == 0) {
             continue;
         }
+        if ((rd[2] & SK_FLAG_DYN) != 0u &&
+            cc_sk_live_ok(c, r, rd, pos, fieldless) == 0) {
+            continue;
+        }
         if ((rd[2] & SK_FLAG_ASITAME) != 0u && !SU(UR_SPURT)) {
             continue;
         }
@@ -2941,12 +3159,19 @@ static void cc_sk_flush(Cc* c) {
         const int eff_local = (int)((meta >> 14) & 0xfu);
         const int rec = (int)(meta >> 18);
         const int eff = (int)SKRD(rec)[6] + eff_local;
-        const int kind = (int)SKEF(eff)[0];
-        const int slot = cc_sk_slot_of_sid(c, dst, SKRD(rec)[0]);
+        // A receiver that does not own the skill still applies the effect,
+        // like the engine's unchecked solver delivery (race_field.rs:489).
+        // Other-perspective instances never reach the deactivate hook, so the
+        // slot only matters for self deliveries, which always own it.
+        int slot = cc_sk_slot_of_sid(c, dst, SKRD(rec)[0]);
         if (slot < 0) {
-            c->rp_over = 1;
-            continue;
+            if (src == dst) {
+                c->rp_over = 1;
+                continue;
+            }
+            slot = 0;
         }
+        const int kind = (int)SKEF(eff)[0];
         cc_sk_apply_effect(c, dst, eff, slot, 0, src == dst ? 1 : 0);
         if (kind == 1 || kind == 2 || kind == 3 || kind == 4 || kind == 5) {
             cc_sk_refresh(c, dst);

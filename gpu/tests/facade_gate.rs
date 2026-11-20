@@ -505,18 +505,17 @@ fn gate_reasons_names_every_refusal() {
     let classic_trace = r#"{"courseId":10504,"traceConservePower":true,"horses":[{}]}"#;
     assert_eq!(
         facade::gate_reasons(classic_trace, Some(&accepted)).as_deref(),
-        Some("conserve-power tracing is not in the classic kernel")
+        Some("traceConservePower requires experimentalRetailRuntime")
     );
     let classic_stamina = r#"{"courseId":10504,"experimentalLaterStaminaMechanics":true,"horses":[{}]}"#;
     assert_eq!(
         facade::gate_reasons(classic_stamina, Some(&accepted)).as_deref(),
         Some("later stamina mechanics are not in the classic kernel")
     );
+    // singleMode is ported on the classic lane: the +400 fold runs in the
+    // adjusted stats, so the gate accepts it.
     let classic_single = r#"{"courseId":10504,"singleMode":true,"horses":[{}]}"#;
-    assert_eq!(
-        facade::gate_reasons(classic_single, Some(&accepted)).as_deref(),
-        Some("singleMode's +400 stat bonus is outside the GPU lane")
-    );
+    assert_eq!(facade::gate_reasons(classic_single, Some(&accepted)), None);
     let flag_off = r#"{"courseId":10504,"experimentalRetailRuntime":false,"horses":[{}]}"#;
     assert_eq!(facade::gate_reasons(flag_off, Some(&accepted)), None);
     let empty = r#"{"horses":[],"experimentalRetailRuntime":true}"#;

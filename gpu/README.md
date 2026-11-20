@@ -1785,17 +1785,21 @@ The four wave-10 named refusals, each classified against the engine:
   reply gains `singleModeVersion` (`lib.rs:1127`), so the flag changes the
   answer. A non-boolean value is ignored at parse (`lib.rs:342`), and that
   ignore is ported: the full lane answers a `singleMode: 1.0` request
-  byte-equal to the engine. The `true` form is now refused on both lanes
-  ("singleMode is outside the GPU lane"); the compact lane had answered it
+  byte-equal to the engine. The classic lane ports the `true` form: the +400
+  folds inside `initialization::stats_reference` and the reply tags
+  `singleModeVersion`, frames bit-exact (wave 12c). The retail lane refuses
+  it ("singleMode is outside the GPU lane"); the compact lane had answered
   with the flag-off result, which the gate shows is not the engine's answer.
 - `traceConservePower` is an engine mode that only adds reply diagnostics:
   `conservePowerDiagnosticVersion` and `conservePowerDiagnostics`
   (`lib.rs:1115-1123`), and the rest of the engine reply is unchanged, so the
   physics are identical. The engine also requires the retail runtime with it
-  on (`api.rs:58-59`) and errors on a non-boolean value (`lib.rs:349`), both
-  quoted in the gate. The compact lane accepts the flag as the ignore port
-  (those keys never reach the compact output; meta and packet equal the
-  flag-off output byte for byte), and the full lane refuses it by name.
+  on (`api.rs:58-59`, `lib.rs:1504-1506`) and errors on a non-boolean value
+  (`lib.rs:349`), both quoted in the gate: the classic lane refuses the flag
+  with the engine's own error text. The compact lane accepts the flag as the
+  ignore port (those keys never reach the compact output; meta and packet
+  equal the flag-off output byte for byte), and the full lane refuses it by
+  name.
 - `experimentalLaterStaminaMechanics` is an engine mode: it enables the
   stamina keep, compete-before-spurt and secure-lead per-tick systems
   (`race_solver.rs:2767,2948,2998`, `update_competition_mechanics:2746`) and
@@ -1804,7 +1808,10 @@ The four wave-10 named refusals, each classified against the engine:
 - Grid mode is engine-supported end to end: a 21-horse grid request runs and
   the engine answers full, with `experimentalGridVersion` (`lib.rs:1137`).
   The kernel runs grid compact bit-exactly and refuses only the full reply,
-  naming the staggered snapshot ranks.
+  naming the staggered snapshot ranks. On the classic lane a valid grid is a
+  named host fallback ("experimentalGrid belongs to the retail lane") and an
+  invalid grid shape quotes the engine's parse error (`lib.rs:262-272`),
+  which outranks the classic trace error.
 
 `gpu/SKILLS_DESIGN.md` gained "Non-retail runtime physics: wave-11 port-scope
 survey": a system-by-system diff of the engine's `step_all` classic path
@@ -1923,17 +1930,41 @@ The skill-side lists live in `SKILLS_DESIGN.md`.
 Wave 12b landed the classic skill runtime end to end. The compiler profile
 (`skills_compile::plan_classic`) compiles the classic effect-value chain
 (`modifier / 10000 * multiplier`) and duration (`base_duration / 10000`), and
-refuses sampled triggers and live-state condition leaves by name, gated in
-`tests/classic_folds.rs`. In the kernel the skill pass runs the engine order
-(expire armed effects, the priority walk, cooldown and window bookkeeping, the
-classic duel and spot arms), activations resolve self and cross effects through
-the end-of-tick batched field queue, and the reply lanes emit `skillEvents`,
+refuses live-state condition leaves by name, gated in `tests/classic_folds.rs`.
+In the kernel the skill pass runs the engine order (expire armed effects, the
+priority walk, cooldown and window bookkeeping, the classic duel and spot
+arms), activations resolve self and cross effects through the end-of-tick
+batched field queue, and the reply lanes emit `skillEvents`,
 `skillDetailEvents`, `skillTargetEvents`, `additionalTargetEvents[]` and
 `conservePowerEvents` in engine push order. The asitame conserve-power release
 (the release scan, its release clock and the `conservePowerEvents` channel) runs
 on the GPU too. Full replies for skill and asitame rosters, real ids included,
 are byte-equal to the engine (`tests/wave12b_gate.rs`,
 `tests/wave12b_full_gate.rs`).
+
+Wave 12c closed the sampled condition leaves on classic. The compiler resolves
+each sampled leaf through the engine's own filter table (`corner_random`,
+`straight_random`, `all_corner_random`, the phase, slope and corner variants,
+18 names), folds one sampler job per live record carrying the reconciled
+policy, the filter chain the windows draw from and the arm slots the windows
+repoint, and `classic_exec` replays the engine's builder sampler host-side in
+skilldata order (wire skill order, alternatives reversed inside one skill),
+patching the merged window chains before the kernel starts, with the engine's
+per-key reuse map so duplicate entries share one draw. Sampled leaves in a
+precondition stay static filters with no sampler visit, as in the engine.
+Classic condition filter errors and the one rejected policy pair are engine
+build errors, so like `lib.rs:728-739` the kernel drops just that skill and
+answers the rest, keeping the surviving skills' draw stream untouched; the
+engine's own error texts travel unwrapped where a refusal reason is still
+raised. Duplicate skill ids on one runner answer from the kernel (the shared
+sampler cache and cooldown key mirror the kernel slot merge), the classic arm
+cap of one sampled term is retail-only, and the live-state runtime reads
+(`hp_per`, `order_rate`, `accumulatetime` and siblings) stay refused by name
+until the kernel carries per-arm programs. Gated in `tests/classic_folds.rs`
+and `tests/wave12c_classic_gate.rs`: every sampled name solo and eighteen on
+one horse over seeds 1..3, frames bit-exact, full replies byte-equal, each
+skill seen firing, duplicate reuse, and drop parity for eight engine-error
+shapes.
 
 
 ## Grid mode

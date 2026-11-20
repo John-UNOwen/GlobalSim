@@ -103,6 +103,9 @@ pub const SK_FLAG_ASITAME: u32 = 32768;
 /// The request flagged this skill id isUnique for the runner, read by the
 /// activate hook when it writes skillEvents (lib.rs:620-667).
 pub const SK_FLAG_UNIQUE: u32 = 65536;
+/// The record gates at least one live condition leaf the classic kernel can
+/// read, so the classic scan runs the arm membership and program gate.
+pub const SK_FLAG_DYN: u32 = 131072;
 
 pub const SK_TERM_ALL_CORNER: u32 = 0;
 pub const SK_TERM_STRAIGHT: u32 = 1;
@@ -204,6 +207,53 @@ pub struct SkillsPlan {
     /// the kernel must recompute the guts-derived powf terms from the live
     /// field instead of reading the prepare-baked words.
     pub live_guts: bool,
+    /// Classic only: records with a sampled condition leaf, in the engine's
+    /// skilldata order. The host replays the builder sampler over these
+    /// (race_solver_builder.rs:944-960) and patches the chains.
+    pub classic_jobs: Vec<ClassicSampledJob>,
+}
+
+/// A classic record whose trigger windows the builder rng resolves before
+/// the race starts. `policy` is 0 Random, 1 StraightRandom or 2
+/// AllCornerRandom. `regions` is the filter chain the sampler draws from,
+/// the engine's sd.regions. `dest_base` is a four-slot region block the
+/// windows land in, and `arm_slots` are the arm word slots whose post lists
+/// point at it. `cond_bumps` are the construction-fire stat bumps, held back
+/// until the sampled window is known to cover the start line.
+pub struct ClassicSampledJob {
+    pub runner: usize,
+    pub pack_seq: usize,
+    pub alt_index: usize,
+    pub record: usize,
+    pub policy: u8,
+    pub regions: Vec<(f64, f64)>,
+    pub key: String,
+    pub dest_base: usize,
+    pub arm_slots: Vec<usize>,
+    pub cond_bumps: Vec<(i32, f64)>,
+    pub fires_start: bool,
+}
+
+/// Write one sampled job's windows into the plan words: the dedicated region
+/// block, then every live arm's post length and base. An empty window list
+/// empties the chains, so the record never arms.
+pub fn apply_classic_sampled(
+    words: &mut [u32],
+    job: &ClassicSampledJob,
+    windows: &[(f64, f64)],
+) {
+    for (i, (s, e)) in windows.iter().enumerate().take(4) {
+        let w = f64_words(*s);
+        words[SK_REGIONS + 4 * (job.dest_base + i)] = w[0];
+        words[SK_REGIONS + 4 * (job.dest_base + i) + 1] = w[1];
+        let w = f64_words(*e);
+        words[SK_REGIONS + 4 * (job.dest_base + i) + 2] = w[0];
+        words[SK_REGIONS + 4 * (job.dest_base + i) + 3] = w[1];
+    }
+    for slot in &job.arm_slots {
+        words[slot + 4] = windows.len().min(4) as u32;
+        words[slot + 5] = job.dest_base as u32;
+    }
 }
 
 pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
@@ -211,8 +261,8 @@ pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
 }
 
 /// Compile against the classic (non-retail) runtime profile: the classic
-/// effect-value chain and durations, with sampled and live-state condition
-/// leaves refused by name.
+/// effect-value chain and durations, the classic condition leaves, and
+/// sampled leaves carried as host sampler jobs.
 pub fn plan_classic(root: &Value, course: &Value) -> SkillsPlan {
     plan_lane(root, course, Lane::Classic, None)
 }
@@ -246,6 +296,14 @@ fn plan_lane(root: &Value, course: &Value, lane: Lane, extras: Option<&ClassicEx
         narm: 0,
         team_stats: Vec::new(),
         lane,
+        wisdom_on: false,
+        wisdom_chance: Vec::new(),
+        wisdom_hseed: Vec::new(),
+        wisdom_rngs: Vec::new(),
+        wisdom_picks: Vec::new(),
+        pack_seq: 0,
+        classic_jobs: Vec::new(),
+        drop_skill: false,
     };
     let skill_data = match root.get("skillData") {
         Some(v) => v,
@@ -261,6 +319,24 @@ fn plan_lane(root: &Value, course: &Value, lane: Lane, extras: Option<&ClassicEx
     }
     let entries: Vec<&Value> = horses.as_array().map(|a| a.iter().collect()).unwrap_or_default();
     c.pack_team_stats(horses);
+    // The engine defaults wisdomChecks to true (lib.rs:341) and the classic
+    // builder then rolls the wisdom lottery per wisdomCheck entry
+    // (race_solver_builder.rs:1006-1012), so the host replays it per runner.
+    c.wisdom_on = lane == Lane::Classic
+        && root.get("wisdomChecks").and_then(Value::as_bool).unwrap_or(true);
+    if c.wisdom_on {
+        let seed = root.get("seed").and_then(Value::as_i64).unwrap_or(0);
+        for horse in entries.iter() {
+            let wisdom = ref_ranked_base_stat(
+                horse_raw_stat(horse, 4),
+                horse_mood(horse),
+                horse_team_rank(horse),
+            ) as f64;
+            c.wisdom_chance.push((1.0 - 90.0 / wisdom).max(0.2));
+        }
+        c.wisdom_hseed =
+            (0..entries.len()).map(|r| (seed + r as i64 * 7919) as u32).collect();
+    }
     for (r, horse) in entries.iter().enumerate() {
         let skills = match horse.get("skills") {
             Some(v) => v,
@@ -270,9 +346,12 @@ fn plan_lane(root: &Value, course: &Value, lane: Lane, extras: Option<&ClassicEx
             Some(a) => a,
             None => continue,
         };
-        // The engine's skill_enabled is keyed by skill id, so a runner that
-        // lists one id twice maps enablement differently than independent
-        // kernel records would. Flag the race instead of guessing.
+        // The engine's skill_enabled is a retail-only concept (built and read
+        // only with a retail init row), so on retail one runner listing one id
+        // twice maps enablement differently than independent kernel records
+        // would. Classic has no enablement map: duplicate ids build two
+        // skilldata entries that share the sampler cache and the cooldown slot
+        // keyed by the cooldown key, exactly like the kernel's slot merge.
         let mut seen_ids: Vec<String> = Vec::new();
         for entry in list {
             let (sid, level) = match normalize_skill_entry(entry) {
@@ -282,14 +361,51 @@ fn plan_lane(root: &Value, course: &Value, lane: Lane, extras: Option<&ClassicEx
                     return c.finish();
                 }
             };
-            if seen_ids.contains(&sid) {
+            if seen_ids.contains(&sid) && lane != Lane::Classic {
                 c.unsupported(format!("skill {sid} appears twice for one runner"));
                 return c.finish();
             }
             seen_ids.push(sid.clone());
+            // Classic rolls one skill whose build the engine itself would
+            // error on (lib.rs:728-739 keeps the race and drops the skill),
+            // so snapshot everything pack_skill appends and roll back on drop.
+            let snapshot = (
+                c.words.len(),
+                c.tags.len(),
+                c.bumps.len(),
+                c.classic_jobs.len(),
+                c.nrec,
+                c.nprog,
+                c.nreg,
+                c.neff,
+                c.nterm,
+                c.narm,
+                c.pack_seq,
+                c.live_guts,
+                c.words[SK_VIDX],
+            );
             c.pack_skill(&sid, level, r, skill_data, course, horse, root);
             if c.reason.is_some() {
-                return c.finish();
+                if !(lane == Lane::Classic && c.drop_skill) {
+                    return c.finish();
+                }
+                let (wlen, tlen, blen, jlen, nrec, nprog, nreg, neff, nterm, narm, seq, guts, vidx) =
+                    snapshot;
+                c.words.truncate(wlen);
+                c.tags.truncate(tlen);
+                c.bumps.truncate(blen);
+                c.classic_jobs.truncate(jlen);
+                c.nrec = nrec;
+                c.nprog = nprog;
+                c.nreg = nreg;
+                c.neff = neff;
+                c.nterm = nterm;
+                c.narm = narm;
+                c.pack_seq = seq;
+                c.live_guts = guts;
+                c.words[SK_VIDX] = vidx;
+                c.reason = None;
+                c.drop_skill = false;
             }
         }
     }
@@ -364,6 +480,25 @@ struct Compiler {
     // the retail_runtime branch), read by the value_usage 3 to 7 tier fold.
     team_stats: Vec<[f64; 5]>,
     lane: Lane,
+    // The engine's classic build rolls one wisdom lottery per wisdomCheck
+    // entry (race_solver_builder.rs:1006-1012): the draw comes from a
+    // per-(horse, skill id) rng against a chance from the horse's ranked
+    // wisdom, and a lost draw leaves the entry unbuilt. The host replays it
+    // per runner and compiles the lost records dead.
+    wisdom_on: bool,
+    wisdom_chance: Vec<f64>,
+    wisdom_hseed: Vec<u32>,
+    wisdom_rngs: Vec<((usize, String), crate::random_gen::Rule30CARng)>,
+    wisdom_picks: Vec<((usize, String), bool)>,
+    // Counts pack_skill calls so sampled jobs replay the engine's skilldata
+    // order: wire skill order, alternatives reversed inside one skill.
+    pack_seq: usize,
+    classic_jobs: Vec<ClassicSampledJob>,
+    // Set by pack_skill alongside reason when the reason is an error the
+    // engine's own build raises for this skill. Classic then drops just this
+    // skill (lib.rs:728-739) and answers without it, so the runner loop
+    // rolls the skill back and continues instead of refusing the race.
+    drop_skill: bool,
 }
 
 fn f64_words(v: f64) -> [u32; 2] {
@@ -429,6 +564,516 @@ fn sorted_by_start(items: &[(f64, f64)]) -> bool {
     true
 }
 
+fn phase_end(distance: f64, phase: i64) -> f64 {
+    match phase {
+        0 => distance * 1.0 / 6.0,
+        1 => distance * 2.0 / 3.0,
+        2 => distance * 5.0 / 6.0,
+        3 => distance,
+        _ => f64::NAN,
+    }
+}
+
+/// The skill ids whose phase== region end moves 10 m later
+/// (activation_conditions.rs:468,891).
+const PHASE_FUDGE_SKILLS: &[&str] = &[
+    "100591", "900591", "110261", "910261", "110191", "910191", "120451", "920451", "101502121",
+];
+
+/// The ids whose corner_random resolves the fourth-from-last corner and
+/// refuses other args (activation_conditions.rs:462-466,557-564).
+const CORNER_RANDOM_QUAD_SKILLS: &[&str] = &[
+    "200331", "200332", "200333", "200341", "200342", "200343", "200351", "200352", "200353",
+    "200971", "200972", "201041", "201042", "201111", "201112", "201181", "201182", "201251",
+    "201252", "201321", "201322", "201391", "201392", "201461", "201462",
+];
+
+/// Marks an error whose text the engine raises verbatim. The classic plan
+/// reason keeps it unwrapped so it byte-equals the engine error.
+const ENGINE_QUOTE: &str = "\u{1}";
+
+fn engine_quote(why: String) -> String {
+    format!("{ENGINE_QUOTE}{why}")
+}
+
+/// The classic lane's static condition leaves: the engine resolves these to
+/// course region lists through the filter table, with no live check on the
+/// classic branch (activation_conditions.rs static filter section).
+fn classic_regions(t: &Term, g: &Geometry, s: &Statics) -> Result<Vec<(f64, f64)>, String> {
+    let d = g.distance;
+    match t.name.as_str() {
+        "phase" => {
+            if t.arg < 0 || t.arg > 3 {
+                return Err(format!("phase{}{} is outside the engine's phases", op_text(t.op), t.arg));
+            }
+            let bounds = match t.op {
+                0 => {
+                    let fudge =
+                        if PHASE_FUDGE_SKILLS.contains(&s.sid_text.as_str()) { 10.0 } else { 0.0 };
+                    (phase_start(d, t.arg), phase_end(d, t.arg) + fudge)
+                }
+                2 => {
+                    if t.arg <= 0 {
+                        return Err("phase< requires phase>0".to_string());
+                    }
+                    (0.0, phase_start(d, t.arg))
+                }
+                3 => (0.0, phase_end(d, t.arg)),
+                4 => {
+                    if t.arg >= 3 {
+                        return Err("phase> requires phase<3".to_string());
+                    }
+                    (phase_start(d, t.arg + 1), d)
+                }
+                5 => (phase_start(d, t.arg), d),
+                _ => return Err("unsupported comparison".to_string()),
+            };
+            Ok(vec![bounds])
+        }
+        "remain_distance" => {
+            let r = t.arg as f64;
+            let bounds = match t.op {
+                0 => (d - r, d - r + 1.0),
+                3 => (d - r, d),
+                5 => (0.0, d - r),
+                _ => return Err("unsupported comparison".to_string()),
+            };
+            Ok(vec![bounds])
+        }
+        "corner" => {
+            if !sorted_by_start(&g.corners) {
+                return Err("corners not sorted".to_string());
+            }
+            let n = g.corners.len() as i64;
+            if t.op == 1 {
+                if t.arg != 0 {
+                    return Err("corner!= only supports 0".to_string());
+                }
+                return Ok(g.corners.iter().copied().collect());
+            }
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            if t.arg == 0 {
+                let mut gaps = Vec::new();
+                let mut last_end = 0.0f64;
+                for &(a, e) in &g.corners {
+                    gaps.push((last_end, a));
+                    last_end = e;
+                }
+                if last_end != d {
+                    gaps.push((last_end, d));
+                }
+                return Ok(gaps);
+            }
+            if n + t.arg < 5 {
+                return Ok(Vec::new());
+            }
+            let mut rows = Vec::new();
+            let mut idx = n + t.arg - 5;
+            while idx >= 0 {
+                rows.push(g.corners[idx as usize]);
+                idx -= 4;
+            }
+            rows.reverse();
+            Ok(rows)
+        }
+        "is_finalcorner" => {
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            if t.arg != 0 && t.arg != 1 {
+                return Err("is_finalcorner expects 0 or 1".to_string());
+            }
+            if !sorted_by_start(&g.corners) {
+                return Err("corners not sorted".to_string());
+            }
+            let Some(&(fs, _)) = g.corners.last() else { return Ok(Vec::new()) };
+            Ok(vec![if t.arg == 1 { (fs, d) } else { (0.0, fs) }])
+        }
+        "is_finalcorner_laterhalf" => {
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            if t.arg != 1 {
+                return Err("is_finalcorner_laterhalf expects arg==1".to_string());
+            }
+            if !sorted_by_start(&g.corners) {
+                return Err("corners not sorted".to_string());
+            }
+            let Some(&(fs, fe)) = g.corners.last() else { return Ok(Vec::new()) };
+            Ok(vec![((fs + fe) / 2.0, fe)])
+        }
+        "slope" => {
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            if !(0..=2).contains(&t.arg) {
+                return Err("slope_type must be 0,1,2".to_string());
+            }
+            if !sorted_by_start(&g.slopes.iter().map(|&(a, e, _)| (a, e)).collect::<Vec<_>>()) {
+                return Err("slopes not sorted".to_string());
+            }
+            let picked: Vec<(f64, f64, f64)> = g
+                .slopes
+                .iter()
+                .copied()
+                .filter(|(_, _, s)| (t.arg != 2 && *s > 0.0) || (t.arg != 1 && *s < 0.0))
+                .collect();
+            if t.arg == 0 {
+                let mut out = Vec::new();
+                let mut last_end = 0.0f64;
+                for (a, e, _) in &picked {
+                    out.push((last_end, *a));
+                    last_end = *e;
+                }
+                if last_end != d {
+                    out.push((last_end, d));
+                }
+                return Ok(out);
+            }
+            Ok(picked.iter().map(|&(a, e, _)| (a, e)).collect())
+        }
+        "furlong" => {
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            let n = t.arg as f64;
+            Ok(vec![((n - 1.0) * 201.168, n * 201.168)])
+        }
+        "is_last_straight" | "is_last_straight_onetime" => {
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            if t.arg != 1 {
+                return Err(format!("{name} expects arg==1", name = t.name));
+            }
+            if !sorted_by_start(&g.straights) {
+                return Err("straights not sorted".to_string());
+            }
+            let Some(&(a, e)) = g.straights.last() else {
+                return Err("no straights".to_string());
+            };
+            Ok(vec![if t.name == "is_last_straight" { (a, e) } else { (a, a + 10.0) }])
+        }
+        other => Err(format!("'{other}' has no classic region filter")),
+    }
+}
+
+/// The sampler class behind a sampled condition name
+/// (SamplePolicy in activation_sample_policy.rs, per registration in the
+/// engine's table).
+fn classic_sampled_policy(name: &str) -> Option<u8> {
+    let p = match name {
+        "straight_random" | "last_straight_random" | "phase_straight_random"
+        | "phase_first_half_straight_random" | "phase_latter_half_straight_random" => 1,
+        "all_corner_random" => 2,
+        "corner_random" | "distance_rate_after_random" | "down_slope_random"
+        | "up_slope_random" | "up_slope_random_later_half" | "is_finalcorner_random"
+        | "phase_corner_random" | "phase_firsthalf_random" | "phase_firstquarter_random"
+        | "phase_laterhalf_random" | "phase_random" | "run_at_full_speed_random" => 0,
+        _ => return None,
+    };
+    Some(p)
+}
+
+/// The double-dispatch policy table of activation_sample_policy.rs:55-75 on
+/// the three sampler kinds the classic table carries: 0 Random, 1
+/// StraightRandom, 2 AllCornerRandom. None is the Straight-AllCorner pair
+/// the engine rejects.
+fn reconcile_policy(a: u8, b: u8) -> Option<u8> {
+    match (a, b) {
+        (_, 0) => Some(0),
+        (1, 2) | (2, 1) => None,
+        (_, 1) => Some(1),
+        _ => Some(2),
+    }
+}
+
+/// region.rs:57-83 union, the same fold the kernel's sk_union runs at
+/// runtime: stable sort by start, only strict overlaps merge, adjacent
+/// regions stay separate.
+fn union_regions(a: &[(f64, f64)], b: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut u: Vec<(f64, f64)> = a.iter().chain(b.iter()).copied().collect();
+    u.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+    let mut out = Vec::new();
+    let Some(first) = u.first() else { return out };
+    let mut acc = *first;
+    for &b in &u[1..] {
+        let a = acc;
+        if a.0 <= b.0 && a.1 >= b.1 {
+        } else if a.0 <= b.0 && b.0 < a.1 {
+            acc = (a.0, b.1);
+        } else if a.0 < b.1 && b.1 <= a.1 {
+            acc = (b.0, a.1);
+        } else {
+            out.push(a);
+            acc = b;
+        }
+    }
+    out.push(acc);
+    out
+}
+
+/// The classic lane's host replay of the builder sampler
+/// (activation_sample_policy.rs). `policy` is the reconcile-folded sampler
+/// kind, `regions` the filter chain the engine hands to SamplePolicy::sample
+/// with nsamples 1 (race_solver_builder.rs:953-958). AllCornerRandom takes
+/// the place_all_corner_triggers branch of the builder loop, not the
+/// one-window arm of the sample method.
+pub fn classic_sample_windows(
+    policy: u8,
+    regions: &[(f64, f64)],
+    rng: &mut crate::random_gen::Rule30CARng,
+) -> Vec<(f64, f64)> {
+    if regions.is_empty() {
+        return Vec::new();
+    }
+    match policy {
+        1 => sample_straight_random(regions, rng),
+        2 => place_all_corner_triggers(regions, rng),
+        _ => sample_random(regions, rng),
+    }
+}
+
+/// activation_sample_policy.rs:98-105. Keep the float32 rounding exact:
+/// a short region still consumes one draw through its caller.
+fn sample_distance_window(r: (f64, f64), rng: &mut crate::random_gen::Rule30CARng) -> (f64, f64) {
+    let start = r.0 as f32;
+    let upper = (r.1 as f32 - 10.0).max(start);
+    let sample = rng.random() as f32;
+    let pos = (start + sample * (upper - start)).max(start).min(upper);
+    (pos as f64, (pos + 10.0) as f64)
+}
+
+/// activation_sample_policy.rs:107-127.
+fn sample_random(
+    regions: &[(f64, f64)],
+    rng: &mut crate::random_gen::Rule30CARng,
+) -> Vec<(f64, f64)> {
+    let mut acc = 0.0;
+    let mut weights = Vec::with_capacity(regions.len());
+    for r in regions {
+        acc += r.1 - r.0;
+        weights.push(acc);
+    }
+    let picked = if regions.len() == 1 || acc <= 0.0 {
+        regions[0]
+    } else {
+        let threshold = rng.random() * acc;
+        regions
+            .iter()
+            .enumerate()
+            .find(|(i, _)| weights[*i] > threshold)
+            .map(|(_, r)| *r)
+            .unwrap_or(regions[regions.len() - 1])
+    };
+    vec![sample_distance_window(picked, rng)]
+}
+
+/// activation_sample_policy.rs:129-139.
+fn sample_straight_random(
+    regions: &[(f64, f64)],
+    rng: &mut crate::random_gen::Rule30CARng,
+) -> Vec<(f64, f64)> {
+    let r = regions[rng.uniform(regions.len() as f64) as usize];
+    vec![sample_distance_window(r, rng)]
+}
+
+/// activation_sample_policy.rs:222-240.
+fn place_all_corner_triggers(
+    regions: &[(f64, f64)],
+    rng: &mut crate::random_gen::Rule30CARng,
+) -> Vec<(f64, f64)> {
+    let mut triggers: Vec<f64> = Vec::new();
+    let mut candidates: Vec<(f64, f64)> = regions.to_vec();
+    candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    while triggers.len() < 4 && !candidates.is_empty() {
+        let ci = rng.uniform(candidates.len() as f64) as usize;
+        let c = candidates[ci];
+        let window = sample_distance_window(c, rng);
+        if (c.1 as f32) - (window.1 as f32) >= 10.0 {
+            candidates.splice(ci..ci + 1, [(window.1, c.1)]);
+        } else {
+            candidates.remove(ci);
+        }
+        candidates.drain(0..ci);
+        triggers.push(window.0);
+    }
+    triggers
+        .into_iter()
+        .map(|start| (start, (start as f32 + 10.0) as f64))
+        .collect()
+}
+
+/// The engine's static filter behind a sampled name, the region list the
+/// builder sampler draws its window from
+/// (activation_conditions.rs, the *_random filter section).
+fn classic_sampled_regions(t: &Term, g: &Geometry, s: &Statics) -> Result<Vec<(f64, f64)>, String> {
+    let d = g.distance;
+    let half = |p: i64, frac: f64| -> Vec<(f64, f64)> {
+        let a = phase_start(d, p);
+        let e = phase_end(d, p);
+        vec![(a, a + (e - a) * frac)]
+    };
+    match t.name.as_str() {
+        "corner_random" => {
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            if g.corners.is_empty() {
+                return Ok(Vec::new());
+            }
+            if !sorted_by_start(&g.corners) {
+                return Err("corners not sorted".to_string());
+            }
+            if CORNER_RANDOM_QUAD_SKILLS.contains(&s.sid_text.as_str()) {
+                if t.arg != 1 {
+                    return Ok(Vec::new());
+                }
+                return Ok(vec![g.corners[(g.corners.len() as i64 - 4).max(0) as usize]]);
+            }
+            let n = g.corners.len() as i64;
+            if n + t.arg < 5 {
+                return Ok(Vec::new());
+            }
+            Ok(vec![g.corners[(n + t.arg - 5) as usize]])
+        }
+        "distance_rate_after_random" => {
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            Ok(vec![(d * t.arg as f64 / 100.0, d)])
+        }
+        "down_slope_random" => {
+            sampled_arg_one(t)?;
+            Ok(g.slopes.iter().filter(|(_, _, sl)| *sl < 0.0).map(|(a, e, _)| (*a, *e)).collect())
+        }
+        "up_slope_random" => {
+            sampled_arg_one(t)?;
+            Ok(g.slopes.iter().filter(|(_, _, sl)| *sl > 0.0).map(|(a, e, _)| (*a, *e)).collect())
+        }
+        "up_slope_random_later_half" => {
+            sampled_arg_one(t)?;
+            let picked: Vec<(f64, f64)> = g
+                .slopes
+                .iter()
+                .filter(|(_, _, sl)| *sl > 0.0)
+                .map(|(a, e, _)| (*a, *e))
+                .collect();
+            let half = (d / 2.0, d);
+            let mut out = Vec::new();
+            for p in picked {
+                let r = intersect(p, half);
+                if r.0 > -1.0 {
+                    out.push(r);
+                }
+            }
+            Ok(out)
+        }
+        "is_finalcorner_random" => {
+            sampled_arg_one(t)?;
+            if !sorted_by_start(&g.corners) {
+                return Err("corners not sorted".to_string());
+            }
+            let Some(&(fs, fe)) = g.corners.last() else { return Ok(Vec::new()) };
+            Ok(vec![(fs, fe)])
+        }
+        "phase_corner_random" => {
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            let ps = phase_start(d, t.arg);
+            let pe = phase_end(d, t.arg);
+            let mut picked = Vec::new();
+            for &(cs, ce) in &g.corners {
+                if (ps <= cs && cs < pe) || (ps <= ce && ce < pe) {
+                    picked.push((cs.max(ps), ce.min(pe)));
+                }
+            }
+            Ok(picked)
+        }
+        "phase_firsthalf_random" | "phase_firstquarter_random" => {
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            let frac = if t.name == "phase_firstquarter_random" { 0.25 } else { 0.5 };
+            Ok(half(t.arg, frac))
+        }
+        "phase_laterhalf_random" => {
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            let a = phase_start(d, t.arg);
+            let e = phase_end(d, t.arg);
+            Ok(vec![((a + e) / 2.0, e)])
+        }
+        "phase_random" => {
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            Ok(vec![(phase_start(d, t.arg), phase_end(d, t.arg))])
+        }
+        "run_at_full_speed_random" => {
+            sampled_arg_one(t)?;
+            Ok(vec![(phase_start(d, 3), d)])
+        }
+        "straight_random" => {
+            sampled_arg_one(t)?;
+            Ok(g.straights.clone())
+        }
+        "last_straight_random" => {
+            sampled_arg_one(t)?;
+            if !sorted_by_start(&g.straights) {
+                return Err("straights not sorted".to_string());
+            }
+            Ok(g.straights.last().copied().into_iter().collect())
+        }
+        "phase_straight_random" => {
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            let bounds = (phase_start(d, t.arg), phase_end(d, t.arg));
+            Ok(g.straights.iter().map(|st| intersect(*st, bounds)).filter(|r| r.0 > -1.0).collect())
+        }
+        "phase_first_half_straight_random" => {
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            let a = phase_start(d, t.arg);
+            let e = phase_end(d, t.arg);
+            let bounds = (a, a + (e - a) / 2.0);
+            Ok(g.straights.iter().map(|st| intersect(*st, bounds)).filter(|r| r.0 > -1.0).collect())
+        }
+        "phase_latter_half_straight_random" => {
+            if t.op != 0 {
+                return Err("unsupported comparison".to_string());
+            }
+            let a = phase_start(d, t.arg);
+            let e = phase_end(d, t.arg);
+            let bounds = (a + (e - a) / 2.0, e);
+            Ok(g.straights.iter().map(|st| intersect(*st, bounds)).filter(|r| r.0 > -1.0).collect())
+        }
+        "all_corner_random" => {
+            sampled_arg_one(t)?;
+            Ok(g.corners.clone())
+        }
+        other => Err(format!("'{other}' has no classic sampled filter")),
+    }
+}
+
+/// The engine's shared arg gate for the sampled filters that accept only
+/// arg 1 (activation_conditions.rs, the expects arg==1 messages).
+fn sampled_arg_one(t: &Term) -> Result<(), String> {
+    if t.op != 0 {
+        return Err("unsupported comparison".to_string());
+    }
+    if t.arg != 1 {
+        return Err(format!("{} expects arg==1", t.name));
+    }
+    Ok(())
+}
+
 impl Geometry {
     fn new(course: &Value) -> Geometry {
         let empty: Vec<Value> = Vec::new();
@@ -477,6 +1122,16 @@ impl Compiler {
         }
     }
 
+    /// The engine's own build error for this skill: classic build failures
+    /// drop only the failing skill (lib.rs:728-739), so the runner loop
+    /// rolls back this pack_skill and answers the rest from the kernel.
+    fn engine_error(&mut self, why: impl Into<String>) {
+        if self.reason.is_none() {
+            self.reason = Some(why.into());
+            self.drop_skill = true;
+        }
+    }
+
     fn finish(mut self) -> SkillsPlan {
         self.words[SK_NREC] = self.nrec as u32;
         self.words[SK_NPROG] = self.nprog as u32;
@@ -504,7 +1159,8 @@ impl Compiler {
         }
         let bumps = if self.reason.is_some() { Vec::new() } else { std::mem::take(&mut self.bumps) };
         let live_guts = self.reason.is_none() && self.live_guts;
-        SkillsPlan { words: self.words, reason: self.reason, bumps, live_guts }
+        let classic_jobs = if self.reason.is_some() { Vec::new() } else { std::mem::take(&mut self.classic_jobs) };
+        SkillsPlan { words: self.words, reason: self.reason, bumps, live_guts, classic_jobs }
     }
 
     fn tag(&mut self, text: &str) -> (usize, usize) {
@@ -555,6 +1211,9 @@ impl Compiler {
         horse: &Value,
         root: &Value,
     ) {
+        let pack_seq = self.pack_seq;
+        self.pack_seq += 1;
+        self.drop_skill = false;
         let sid_num = match sid.parse::<u32>() {
             Ok(v) => v,
             Err(_) => {
@@ -583,6 +1242,28 @@ impl Compiler {
                 return;
             }
         };
+        // The wisdom lottery draws once per cooldown key from one per-id rng
+        // (builder :589, :1006-1011). Across two keys of one id the draws
+        // follow the builder's reversed entry order, so a single-key id is
+        // the case whose pick is order-free and provably replayable.
+        if self.wisdom_on && def.get("wisdomCheck").and_then(Value::as_i64).unwrap_or(0) == 1 {
+            let mut plain = false;
+            let mut follow = false;
+            for alt in alts.iter() {
+                let cond = alt.get("condition").and_then(Value::as_str).unwrap_or("");
+                if cond.contains("is_activate_other_skill_detail") {
+                    follow = true;
+                } else {
+                    plain = true;
+                }
+            }
+            if plain && follow {
+                self.unsupported(format!(
+                    "skill {sid} wisdom lottery across two cooldown keys"
+                ));
+                return;
+            }
+        }
         let mut live: Option<(String, String)> = None;
         let mut live_rec: Option<usize> = None;
         let mut first_record = true;
@@ -595,9 +1276,8 @@ impl Compiler {
                     return;
                 }
             };
-            // The wisdom lottery lives in retail_initialization only; the
-            // classic build never consults the flag, so classic treats the
-            // skill as enabled with no draw.
+            // Retail gates the skill through its init lottery row; classic
+            // replays the builder's per-entry wisdom lottery in wisdom_pick.
             let wisdom = def.get("wisdomCheck").and_then(Value::as_i64).unwrap_or(0) == 1
                 && self.lane != Lane::Classic;
             let priority = def.get("priority").and_then(Value::as_i64).unwrap_or(0);
@@ -629,18 +1309,48 @@ impl Compiler {
                     return;
                 }
             };
+            // The parser composes the policy tree before any filter body
+            // runs, so the one rejected policy pair errors ahead of filter
+            // and runtime-reader refusals.
+            if self.lane == Lane::Classic {
+                let mut fold: Option<u8> = None;
+                for t in terms.iter() {
+                    let Some(p) = classic_sampled_policy(&t.name) else { continue };
+                    fold = Some(match fold {
+                        None => p,
+                        Some(prev) => match reconcile_policy(prev, p) {
+                            Some(f) => f,
+                            None => {
+                                self.engine_error(
+                                    "cannot reconcile StraightRandomPolicy with AllCornerRandomPolicy"
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                        },
+                    });
+                }
+            }
             let g = Geometry::new(course);
             let statics = Statics::new(course, horse, root, sid, runner);
             let leaves: Vec<Leaf> = match terms.iter().map(|t| classify(t, &g, &statics, self.lane)).collect() {
                 Ok(l) => l,
                 Err(why) => {
-                    self.unsupported(format!("skill {sid} condition '{condition}': {why}"));
+                    match why.strip_prefix(ENGINE_QUOTE) {
+                        Some(raw) => self.engine_error(raw.to_string()),
+                        None => self.unsupported(format!("skill {sid} condition '{condition}': {why}")),
+                    };
                     return;
                 }
             };
-            if self.lane == Lane::Classic && self.classic_refuses_leaf(sid, &terms, &leaves) {
+            if self.lane == Lane::Classic && self.classic_refuses_leaf(sid, &terms, &leaves, true) {
                 return;
             }
+            // The classic kernel gates records with a live leaf through the arm
+            // programs; without this flag the scan keeps the merged-window-only
+            // path every classic race ran before.
+            let dyn_gate = self.lane == Lane::Classic
+                && leaves.iter().any(|l| matches!(l, Leaf::Dynamic { .. }));
             if leaves.iter().any(|l| leaf_feat(l) == FEAT_VREMAIN) {
                 self.words[SK_VIDX] = statics.viewer.unwrap_or(0) as u32;
             }
@@ -649,6 +1359,16 @@ impl Compiler {
             // the main chain to the first precondition region's start, and checks
             // precondition membership plus its dynamics as a latched gate.
             let mut dead = false;
+            // A lost classic wisdom draw leaves the entry unbuilt for this
+            // runner (builder :1006-1011), which the dead record mirrors. The
+            // per-(runner, key) lazy pick is one draw per id for the single
+            // key ids accepted above, so its timing never matters.
+            if self.wisdom_on
+                && def.get("wisdomCheck").and_then(Value::as_i64).unwrap_or(0) == 1
+                && !self.wisdom_pick(runner, sid, condition, sid_num)
+            {
+                dead = true;
+            }
             let mut seed = vec![(0.0f64, g.distance)];
             let mut pre_n = 0usize;
             let mut pre_reg_b = self.nreg;
@@ -672,16 +1392,21 @@ impl Compiler {
                     match pre_terms.iter().map(|t| classify(t, &g, &statics, self.lane)).collect() {
                         Ok(l) => l,
                         Err(why) => {
-                            self.unsupported(format!("skill {sid} precondition '{pre_text}': {why}"));
+                            match why.strip_prefix(ENGINE_QUOTE) {
+                                Some(raw) => self.engine_error(raw.to_string()),
+                                None => self.unsupported(format!("skill {sid} precondition '{pre_text}': {why}")),
+                            };
                             return;
                         }
                     };
                 if self.lane == Lane::Classic
-                    && self.classic_refuses_leaf(sid, &pre_terms, &pre_leaves)
+                    && self.classic_refuses_leaf(sid, &pre_terms, &pre_leaves, false)
                 {
                     return;
                 }
-                if pre_leaves.iter().any(|l| matches!(l, Leaf::Sampled)) {
+                if pre_leaves.iter().any(|l| matches!(l, Leaf::Sampled))
+                    && self.lane != Lane::Classic
+                {
                     self.unsupported(format!(
                         "skill {sid} precondition random term is not ported"
                     ));
@@ -711,11 +1436,22 @@ impl Compiler {
                         | FEAT_DDTOPF | FEAT_VREMAIN)
                 });
                 let mut pre_regions: Vec<(f64, f64)> = vec![(0.0, g.distance)];
-                for leaf in pre_leaves.iter() {
+                for (t, leaf) in pre_terms.iter().zip(pre_leaves.iter()) {
                     let next = match leaf {
                         Leaf::True | Leaf::Dynamic { .. } => pre_regions.clone(),
                         Leaf::False => Vec::new(),
-                        Leaf::Sampled => unreachable!(),
+                        // The classic engine applies a sampled leaf's static
+                        // filter to the precondition chain and never samples
+                        // it: only condition triggers reach the sampler.
+                        Leaf::Sampled => match classic_sampled_regions(t, &g, &statics) {
+                            Ok(filt) => rmap_multi(&pre_regions, |r| {
+                                filt.iter().map(|b| intersect(*r, *b)).collect()
+                            }),
+                            Err(why) => {
+                                self.engine_error(why);
+                                return;
+                            }
+                        },
                         Leaf::Region(list) | Leaf::RegionDyn(list, _) => {
                             rmap_multi(&pre_regions, |r| list.iter().map(|b| intersect(*r, *b)).collect())
                         }
@@ -783,7 +1519,11 @@ impl Compiler {
             for (start, end) in groups.iter() {
                 let arm_sampled =
                     leaves[*start..*end].iter().filter(|l| matches!(l, Leaf::Sampled)).count();
-                if arm_sampled > 1 {
+                // One sampled term per arm is the retail term machinery's cap.
+                // Classic folds every sampled filter into the arm chain and
+                // samples the reconciled policy once, so several are legal,
+                // exactly as in the engine's condition tree.
+                if arm_sampled > 1 && self.lane != Lane::Classic {
                     self.unsupported(format!(
                         "skill {sid} arm has more than one random term"
                     ));
@@ -798,7 +1538,22 @@ impl Compiler {
                         Leaf::False => Vec::new(),
                         Leaf::Sampled => {
                             pre_split = regions.clone();
-                            regions.clone()
+                            if self.lane == Lane::Classic {
+                                // The classic engine folds the sampled filter
+                                // into the chain, and the host sampler later
+                                // replaces the whole window list.
+                                match classic_sampled_regions(t, &g, &statics) {
+                                    Ok(filt) => rmap_multi(&regions, |r| {
+                                        filt.iter().map(|b| intersect(*r, *b)).collect()
+                                    }),
+                                    Err(why) => {
+                                        self.engine_error(why);
+                                        return;
+                                    }
+                                }
+                            } else {
+                                regions.clone()
+                            }
                         }
                         Leaf::Region(list) | Leaf::RegionDyn(list, _) => {
                             if !sorted_by_start(list) && list.len() > 1 {
@@ -866,9 +1621,10 @@ impl Compiler {
             // Resolve each arm's sampled term. The engine samples one term per
             // arm at init, in text order. An arm whose term resolves to no row
             // spends no draw and can never fire, so it collapses like an empty chain.
+            // The classic lane resolves these with the host builder sampler.
             let mut term_word = u32::MAX;
             for ai in 0..arms.len() {
-                if arms[ai].1[0] & SK_ARM_SAMPLED == 0 {
+                if arms[ai].1[0] & SK_ARM_SAMPLED == 0 || self.lane == Lane::Classic {
                     continue;
                 }
                 let (gs, ge) = groups[ai];
@@ -970,6 +1726,17 @@ impl Compiler {
             let mut arm0_prog = (0usize, 0usize);
             let mut arm0_pre = (0usize, 0usize);
             let mut arm0_post = (0usize, 0usize);
+            // A classic sampled record resolves its windows on the host with
+            // the builder sampler. The arms share one reserved four-slot
+            // region block; the sampler fills it and repoints the arms at it.
+            let mut classic_dest: Option<usize> = None;
+            let mut classic_arm_slots: Vec<usize> = Vec::new();
+            if self.lane == Lane::Classic && sampled_count > 0 && !dead {
+                classic_dest = Some(self.push_regions(&[(0.0, 0.0); 4]).1);
+                if self.reason.is_some() {
+                    return;
+                }
+            }
             if dead {
                 // A dead record still spends its resolved random draws: the
                 // engine samples before any region is evaluated, keeping the
@@ -987,12 +1754,17 @@ impl Compiler {
                 arms_len = arms.len();
                 for (ai, (lists, flags, _)) in arms.iter().enumerate() {
                     let (gs, ge) = groups[ai];
-                    let (n_pre, pre_b) = if flags[0] == SK_ARM_SAMPLED {
+                    let sampled_arm = flags[0] & SK_ARM_SAMPLED != 0;
+                    let (n_pre, pre_b) =
+                        if flags[0] == SK_ARM_SAMPLED && self.lane != Lane::Classic {
                         self.push_regions(&lists[0])
                     } else {
                         (0, self.nreg)
                     };
-                    let (n_post, post_b) = self.push_regions(&lists[1]);
+                    let (n_post, post_b) = match (self.lane, sampled_arm, classic_dest) {
+                        (Lane::Classic, true, Some(base)) => (0, base),
+                        _ => self.push_regions(&lists[1]),
+                    };
                     if self.reason.is_some() {
                         return;
                     }
@@ -1014,6 +1786,9 @@ impl Compiler {
                     self.words[at + 5] = post_b as u32;
                     self.words[at + 6] = flags[0];
                     self.words[at + 7] = flags[1];
+                    if sampled_arm && flags[0] & SK_ARM_DEAD == 0 {
+                        classic_arm_slots.push(at);
+                    }
                     self.narm += 1;
                     if ai == 0 {
                         arm0_prog = (prog_len, prog_base);
@@ -1021,6 +1796,73 @@ impl Compiler {
                         arm0_post = (n_post, post_b);
                     }
                 }
+            }
+
+            // The engine's sampler entry for this alternative: one sample call
+            // over the union of the surviving arms' filter chains, keyed for
+            // the per-runner reuse map of race_solver_builder.rs:945.
+            let mut classic_job: Option<usize> = None;
+            if self.lane == Lane::Classic && sampled_count > 0 && !dead {
+                let mut policy: Option<u8> = None;
+                let mut bad_pair = false;
+                for t in terms.iter() {
+                    let Some(p) = classic_sampled_policy(&t.name) else { continue };
+                    policy = Some(match policy {
+                        None => p,
+                        Some(prev) => match reconcile_policy(prev, p) {
+                            Some(f) => f,
+                            None => {
+                                bad_pair = true;
+                                break;
+                            }
+                        },
+                    });
+                }
+                if bad_pair {
+                    self.engine_error(
+                        "cannot reconcile StraightRandomPolicy with AllCornerRandomPolicy"
+                            .to_string(),
+                    );
+                    return;
+                }
+                let mut regs: Vec<(f64, f64)> = Vec::new();
+                for (lists, flags, _) in arms.iter() {
+                    if flags[0] & SK_ARM_DEAD == 0 {
+                        regs = union_regions(&regs, &lists[1]);
+                    }
+                }
+                let cdkey = format!(
+                    "{}{}",
+                    sid,
+                    if condition.contains("is_activate_other_skill_detail") { "#followup" } else { "" }
+                );
+                let regtext = regs
+                    .iter()
+                    .map(|(s, e)| format!("Region {{ start: {s:?}, end: {e:?} }}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let key = format!(
+                    "{cdkey}:{}:[{regtext}]",
+                    match policy {
+                        Some(1) => "StraightRandom",
+                        Some(2) => "AllCornerRandom",
+                        _ => "Random",
+                    }
+                );
+                self.classic_jobs.push(ClassicSampledJob {
+                    runner,
+                    pack_seq,
+                    alt_index,
+                    record: self.nrec,
+                    policy: policy.unwrap_or(0),
+                    regions: regs,
+                    key,
+                    dest_base: classic_dest.unwrap_or(0),
+                    arm_slots: classic_arm_slots,
+                    cond_bumps: Vec::new(),
+                    fires_start: false,
+                });
+                classic_job = Some(self.classic_jobs.len() - 1);
             }
 
             let effect_list = match alt.get("effects").and_then(Value::as_array) {
@@ -1101,12 +1943,39 @@ impl Compiler {
             // A classic record with a window covering the start line fires in
             // the engine's constructor pass (race_solver.rs:1008), before the
             // host computes the derived constants. Its self stat writes go into
-            // the same bump channel the static fires use.
+            // the same bump channel the static fires use. The pass sees no
+            // field: guarded live readers report false, the clock reads zero
+            // and hp_per reads the full-tank ratio (activation_conditions.rs
+            // :287-318, :612-624), so an arm with live readers counts only
+            // when every live leaf survives that fieldless reading.
+            let ctor_leaf = |l: &Leaf| -> bool {
+                match l {
+                    Leaf::Dynamic { feat, cmp, arg } => {
+                        let (v, b) = match *feat {
+                            FEAT_CLOCK => (0.0, arg.unwrap_or(0.)),
+                            FEAT_HP_PER => (1.0, arg.unwrap_or(0.) / 100.0),
+                            _ => return false,
+                        };
+                        match cmp {
+                            0 => v == b,
+                            1 => v != b,
+                            2 => v < b,
+                            3 => v <= b,
+                            4 => v > b,
+                            _ => v >= b,
+                        }
+                    }
+                    Leaf::False => false,
+                    _ => true,
+                }
+            };
             let fires_at_start = self.lane == Lane::Classic
                 && !dead
-                && arms
-                    .iter()
-                    .any(|a| a.0[1].iter().any(|&(s, e)| s <= 0.0 && 0.0 < e));
+                && arms.iter().zip(groups.iter()).any(|(a, g)| {
+                    a.0[1].iter().any(|&(s, e)| s <= 0.0 && 0.0 < e)
+                        && (!leaves[g.0..g.1].iter().any(|l| matches!(l, Leaf::Dynamic { .. }))
+                            || leaves[g.0..g.1].iter().all(ctor_leaf))
+                });
             for ef in effect_list {
                 let kind = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
                 if !matches!(kind, 1 | 2 | 3 | 4 | 5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 14
@@ -1253,7 +2122,13 @@ impl Compiler {
                     && fires_at_start
                     && matches!(kind, 1 | 2 | 3 | 4 | 5 | 29)
                 {
-                    self.bumps.push((runner, kind, modifier));
+                    // A sampled record's construction fire depends on the
+                    // drawn window covering the start line, held for the host
+                    // sampler to decide.
+                    match classic_job {
+                        Some(ji) => self.classic_jobs[ji].cond_bumps.push((kind, modifier)),
+                        None => self.bumps.push((runner, kind, modifier)),
+                    }
                     bumped = true;
                 }
                 let target_value =
@@ -1276,6 +2151,9 @@ impl Compiler {
                 self.words[at + 8] = w[0];
                 self.words[at + 9] = w[1];
                 self.neff += 1;
+            }
+            if let Some(ji) = classic_job {
+                self.classic_jobs[ji].fires_start = fires_at_start;
             }
             let delay_mult = delay_factor(alt);
             // The engine's constructor pass cannot see field or retail-loop
@@ -1326,7 +2204,8 @@ impl Compiler {
                 | (if general { SK_FLAG_GENERAL } else { 0 })
                 | (if bumped { SK_FLAG_BUMPED } else { 0 })
                 | (if gated_static { SK_FLAG_INIT_BUMP | SK_FLAG_BUMPED } else { 0 })
-                | (if unique { SK_FLAG_UNIQUE } else { 0 });
+                | (if unique { SK_FLAG_UNIQUE } else { 0 })
+                | (if dyn_gate { SK_FLAG_DYN } else { 0 });
             self.words[at + 3] = priority as u32;
             self.words[at + 4] = rarity;
             self.words[at + 5] = (self.neff - eff_base) as u32;
@@ -1373,6 +2252,35 @@ impl Compiler {
             self.nreg += 1;
         }
         (list.len(), base)
+    }
+
+    // The engine's classic wisdom lottery (race_solver_builder.rs:1006-1011):
+    // one draw per cooldown key, from a fresh per-(horse, id) rng, against the
+    // horse's wisdom-derived chance. Keyed lazy replay reproduces the engine's
+    // pick because each accepted id draws exactly once.
+    fn wisdom_pick(&mut self, r: usize, sid: &str, condition: &str, sid_num: u32) -> bool {
+        let key = if condition.contains("is_activate_other_skill_detail") {
+            format!("{sid}#followup")
+        } else {
+            sid.to_string()
+        };
+        if let Some((_, pick)) = self.wisdom_picks.iter().find(|((kr, kk), _)| *kr == r && *kk == key)
+        {
+            return *pick;
+        }
+        let hseed = self.wisdom_hseed[r];
+        let rng_idx = self.wisdom_rngs.iter().position(|((kr, kk), _)| *kr == r && *kk == sid);
+        let mut rng = match rng_idx {
+            Some(i) => self.wisdom_rngs.swap_remove(i).1,
+            None => crate::random_gen::Rule30CARng::new(
+                ref_wisdom_seed(hseed, sid_num),
+                ref_wisdom_seed(hseed ^ 0x9e3779b9, sid_num),
+            ),
+        };
+        let pick = rng.random() < self.wisdom_chance[r];
+        self.wisdom_rngs.push(((r, sid.to_string()), rng));
+        self.wisdom_picks.push(((r, key), pick));
+        pick
     }
 
     fn pack_team_stats(&mut self, horses: &Value) {
@@ -1500,26 +2408,50 @@ impl Compiler {
         self.nrec += 1;
     }
 
-    /// The classic runtime has no sampled-term sampler and its kernel reads
-    /// only constant and course-region condition state, so a sampled or
-    /// live-state leaf refuses the skill by name. Returns true when a reason
-    /// was set.
-    fn classic_refuses_leaf(&mut self, sid: &str, terms: &[Term], leaves: &[Leaf]) -> bool {
+    /// The classic kernel carries live readers for eight runtime feats, so a
+    /// condition leaf over one of them compiles live. RegionDyn leaves (a
+    /// static filter and a live read in one term), every live read in a
+    /// precondition (the engine evaluates those at runtime, and the kernel
+    /// folds preconditions statically) and reads the kernel has no reader for
+    /// stay refused by name. Returns true when a reason was set.
+    fn classic_refuses_leaf(
+        &mut self,
+        sid: &str,
+        terms: &[Term],
+        leaves: &[Leaf],
+        live_ok: bool,
+    ) -> bool {
         for (t, leaf) in terms.iter().zip(leaves) {
             if matches!(leaf, Leaf::Sampled) {
-                self.unsupported(format!(
-                    "skill {sid} condition term '{}' is a sampled trigger: no sampler exists in the classic runtime",
-                    t.name
-                ));
-                return true;
+                continue;
             }
-            if matches!(leaf, Leaf::Dynamic { .. } | Leaf::RegionDyn(..)) {
-                self.unsupported(format!(
-                    "skill {sid} condition term '{}' reads live runtime state with no reader in the classic kernel",
-                    t.name
-                ));
-                return true;
+            let feat = match leaf {
+                Leaf::Dynamic { feat, .. } => Some(*feat),
+                Leaf::RegionDyn(_, feat) => Some(*feat),
+                _ => None,
+            };
+            let Some(feat) = feat else { continue };
+            let reader_ported = live_ok
+                && matches!(leaf, Leaf::Dynamic { .. })
+                && matches!(
+                    feat,
+                    FEAT_CLOCK
+                        | FEAT_HP_PER
+                        | FEAT_ORDER
+                        | FEAT_ORDER_RATE
+                        | FEAT_NEAR
+                        | FEAT_NEARIF
+                        | FEAT_SURR
+                        | FEAT_VISN
+                );
+            if reader_ported {
+                continue;
             }
+            self.unsupported(format!(
+                "skill {sid} condition term '{}' reads live runtime state with no reader in the classic kernel",
+                t.name
+            ));
+            return true;
         }
         false
     }
@@ -1646,6 +2578,13 @@ fn horse_mood(horse: &Value) -> i32 {
 
 fn horse_team_rank(horse: &Value) -> i32 {
     horse.get("teamRank").and_then(Value::as_f64).unwrap_or(0.0) as i32
+}
+
+fn ref_wisdom_seed(horse_seed: u32, skill_id: u32) -> u32 {
+    let mut seed = horse_seed ^ skill_id ^ 0x57495344;
+    seed = (seed ^ (seed >> 16)).wrapping_mul(0x85ebca6b);
+    seed = (seed ^ (seed >> 13)).wrapping_mul(0xc2b2ae35);
+    seed ^ (seed >> 16)
 }
 
 fn ref_adjust_overcap(stat: f64) -> f64 {
@@ -1842,6 +2781,9 @@ struct Statics {
     skill_ids: Vec<String>,
     // The record's own skill id, the target of is_activate_other_skill_detail.
     sid: f64,
+    // The record's skill id as written, the key of the engine's skill-id
+    // tables (phase fudge list, corner-random quad list).
+    sid_text: String,
     // Nonzero teams make the opponent counts differ from their plain ones.
     any_team: bool,
     // Wave-9c request folds. v_grade and v_time read the RaceParameters enums;
@@ -1955,6 +2897,7 @@ impl Statics {
             skill_count: skill_count as f64,
             skill_ids,
             sid: sid.parse::<u32>().unwrap_or(0) as f64,
+            sid_text: sid.to_string(),
             any_team,
             grade: enum_code_or_default(root.get("grade").and_then(Value::as_str), grade_code, 100.0),
             race_time: enum_code_or_default(root.get("time").and_then(Value::as_str), time_code, 2.0),
@@ -2164,7 +3107,7 @@ fn strategy_code(text: &str) -> i64 {
 }
 
 fn dyn_leaf(feat: u32, t: &Term) -> Leaf {
-    Leaf::Dynamic { feat, cmp: t.op, arg: None }
+    Leaf::Dynamic { feat, cmp: t.op, arg: Some(t.arg as f64) }
 }
 
 fn fold(value: f64, t: &Term) -> Leaf {
@@ -2230,6 +3173,29 @@ fn fc_random_index(course: &Value, distance: f64) -> Option<usize> {
 fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, String> {
     let d = g.distance;
     match t.name.as_str() {
+        // The classic lane resolves these course filters as region lists,
+        // with the engine filter bodies' own error texts.
+        "phase" | "remain_distance" | "corner" | "is_finalcorner" | "is_finalcorner_laterhalf"
+        | "slope" | "furlong" | "is_last_straight" | "is_last_straight_onetime"
+            if lane == Lane::Classic =>
+        {
+            Ok(Leaf::Region(classic_regions(t, g, s).map_err(engine_quote)?))
+        }
+        // Classic sampled leaves become host sampler jobs. Any op or arg is
+        // accepted here, and the filter's own error text surfaces at the
+        // arms fold.
+        "corner_random" | "distance_rate_after_random" | "down_slope_random"
+        | "up_slope_random" | "up_slope_random_later_half" | "is_finalcorner_random"
+        | "phase_random" | "phase_firsthalf_random" | "phase_firstquarter_random"
+        | "phase_laterhalf_random" | "phase_corner_random" | "phase_straight_random"
+        | "phase_first_half_straight_random" | "phase_latter_half_straight_random"
+        | "run_at_full_speed_random" | "straight_random" | "last_straight_random"
+        | "all_corner_random"
+            if lane == Lane::Classic =>
+        {
+            classic_sampled_regions(t, g, s).map_err(engine_quote)?;
+            Ok(Leaf::Sampled)
+        }
         "always" => Ok(Leaf::True),
         "accumulatetime" => Ok(dyn_leaf(FEAT_CLOCK, t)),
         "activate_count_start" if t.op == 5 => Ok(dyn_leaf(FEAT_ACT0, t)),

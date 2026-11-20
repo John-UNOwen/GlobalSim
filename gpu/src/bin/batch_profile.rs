@@ -124,6 +124,7 @@ fn main() -> Result<(), String> {
         strategy_apt: 1,
         ground: 1,
         css: vec![1, 2, 3],
+        single_mode: false,
     };
     let cases: Vec<Case> = (0..9).map(|_| Case::Stats(stats.clone())).collect();
     let t = Instant::now();

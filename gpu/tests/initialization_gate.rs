@@ -129,6 +129,7 @@ fn adjusted_stats_chain_bit_exact() {
                     raw: [raw, raw * 0.75, raw * 1.2, raw * 0.5, raw],
                     mood,
                     rank,
+                    single_mode: false,
                     surface: 1 + (next() % 2) as i32,
                     strategy_apt: (next() % 8) as i32,
                     ground: 1 + (next() % 4) as i32,
@@ -154,6 +155,7 @@ fn adjusted_stats_chain_bit_exact() {
             ],
             mood: (next() % 9) as i32 - 4,
             rank: (next() % 14) as i32 - 1,
+            single_mode: false,
             surface: 1 + (next() % 2) as i32,
             strategy_apt: (next() % 8) as i32,
             ground: 1 + (next() % 4) as i32,
@@ -458,6 +460,7 @@ fn v77_initialization_pinned_in_reply() {
         strategy_apt: 1,
         ground: 1,
         css: css.clone(),
+        single_mode: false,
     }).collect();
 
     // First run: the adjusted stats, whose wisdom feeds every later chain.

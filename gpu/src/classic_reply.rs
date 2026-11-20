@@ -223,9 +223,10 @@ fn encode_frames(mut result: Value, mut frames: ReplayFrames, retain_all: bool) 
 /// (src/lib.rs:1096-1106). `skillEvents` keeps the hook push order: the
 /// classic path skips the retail sort (src/lib.rs:1021-1031), and the
 /// detail and target arrays are collected runner-major (src/lib.rs:1078-1094).
-/// `singleModeVersion`,
 /// `conservePowerDiagnosticVersion` and `experimentalGridVersion` belong to
-/// refused flags (src/lib.rs:1115-1139).
+/// refused flags (src/lib.rs:1115-1139). singleMode is ported: it tags the
+/// reply with `singleModeVersion` (src/lib.rs:1125-1129) and its +400 lands
+/// in the adjusted stats (src/race_solver_builder.rs:304-321).
 pub fn build(request: &str, seed: i64, race: &ClassicGpu) -> Result<String, String> {
     let root = json::parse(request)?;
     let n = race.frames.first().map_or(0, |f| f.len());
@@ -249,10 +250,14 @@ pub fn build(request: &str, seed: i64, race: &ClassicGpu) -> Result<String, Stri
     if root.get("experimentalGrid").is_some() {
         return Err("experimentalGrid is outside the classic lane".to_string());
     }
-    for key in ["singleMode", "experimentalLaterStaminaMechanics", "traceConservePower"] {
+    for key in ["experimentalLaterStaminaMechanics"] {
         if root.get(key).and_then(Value::as_bool) == Some(true) {
             return Err(format!("{key} is outside the classic full lane"));
         }
+    }
+    // A classic trace is an engine error (lib.rs:1504-1506), quoted verbatim.
+    if root.get("traceConservePower").and_then(Value::as_bool) == Some(true) {
+        return Err("traceConservePower requires experimentalRetailRuntime".to_string());
     }
     let horses = root.get_array("horses")?;
     if horses.len() != n {
@@ -412,6 +417,11 @@ pub fn build(request: &str, seed: i64, race: &ClassicGpu) -> Result<String, Stri
     ]);
     if let Value::Object(map) = &mut result {
         map.insert("experimentalRetailInitialization".into(), Value::Bool(false));
+        // singleMode tags its reply (lib.rs:1125-1129); a non-boolean flag
+        // was ignored by the spec parse, so no tag.
+        if root.get("singleMode").and_then(Value::as_bool) == Some(true) {
+            map.insert("singleModeVersion".into(), json::num(1.0));
+        }
         if root.get("pairedRandomStreams").and_then(Value::as_bool) == Some(true) {
             map.insert("pairedRandomStreams".into(), Value::Bool(true));
         }

@@ -73,63 +73,97 @@ fn field_request(base: &str, course: i32, seed: i64) -> String {
 }
 
 /// Mood lifts power into the range where the injected asitame arms
-/// (`race_solver_builder.rs:802`). The classic kernel now runs that release,
-/// so the race answers instead of being refused, bit for bit.
+/// (`race_solver_builder.rs:802`). The classic kernel runs the conserve
+/// release scan, so the race answers instead of being refused, compact and
+/// full, over seeds 1..3, with a non-empty release channel every seed.
 #[test]
 fn adjusted_raw_power_above_1200_answers_bit_exact() {
-    let mut value = json::parse(&v77_line()).expect("parse v77 line");
-    if let json::Value::Object(map) = &mut value {
-        for key in [
-            "experimentalRetailInitialization",
-            "experimentalRetailSections",
-            "experimentalRetailRuntime",
-            "experimentalRetailGeometry",
-        ] {
-            map.insert(key.into(), json::Value::Bool(false));
-        }
-        if let Some(json::Value::Array(horses)) = map.get_mut("horses") {
-            if let Some(json::Value::Object(first)) = horses.get_mut(0) {
-                first.insert("power".into(), json::Value::Number(1160.));
-                first.insert("mood".into(), json::Value::Number(2.));
+    let mut problems: Vec<String> = Vec::new();
+    for seed in SEEDS {
+        let mut value = json::parse(&v77_line()).expect("parse v77 line");
+        if let json::Value::Object(map) = &mut value {
+            for key in [
+                "experimentalRetailInitialization",
+                "experimentalRetailSections",
+                "experimentalRetailRuntime",
+                "experimentalRetailGeometry",
+            ] {
+                map.insert(key.into(), json::Value::Bool(false));
+            }
+            if let Some(json::Value::Array(horses)) = map.get_mut("horses") {
+                if let Some(json::Value::Object(first)) = horses.get_mut(0) {
+                    first.insert("power".into(), json::Value::Number(1160.));
+                    first.insert("mood".into(), json::Value::Number(2.));
+                }
             }
         }
-    }
-    let mut text = String::new();
-    json::to_string_into(&value, &mut text);
-    let request = race_exec::solo_request(&text, 10504, 1).expect("solo request");
-    let out = classic_exec::run(&[(request.clone(), 1)]).expect("classic kernel run");
-    let race = &out.races[0];
-    if let Some(reason) = &race.fallback {
-        panic!("asitame race refused: {reason}");
-    }
-    let cpu = dep_cpu::run_cpu_race(&request, 1).expect("cpu race");
-    assert_eq!(cpu.frames.len(), race.frames.len(), "tick count");
-    for (tick, (cpu_frame, gpu_frame)) in cpu.frames.iter().zip(race.frames.iter()).enumerate() {
-        for (runner, (cpu_row, gpu_row)) in cpu_frame.iter().zip(gpu_frame.iter()).enumerate() {
-            for (column, (cpu, gpu)) in cpu_row.iter().zip(gpu_row.iter()).enumerate() {
-                assert_eq!(
-                    cpu.to_bits(),
-                    gpu.to_bits(),
-                    "tick {tick} runner {runner} column {column}"
-                );
+        let mut text = String::new();
+        json::to_string_into(&value, &mut text);
+        let request = race_exec::solo_request(&text, 10504, seed).expect("solo request");
+        let out = classic_exec::run(&[(request.clone(), seed)]).expect("classic kernel run");
+        let race = &out.races[0];
+        if let Some(reason) = &race.fallback {
+            problems.push(format!("seed {seed}: asitame race refused: {reason}"));
+            continue;
+        }
+        let cpu = dep_cpu::run_cpu_race(&request, seed).expect("cpu race");
+        if cpu.frames.len() != race.frames.len() {
+            problems.push(format!(
+                "seed {seed}: tick count cpu {} gpu {}",
+                cpu.frames.len(),
+                race.frames.len()
+            ));
+            continue;
+        }
+        let mut first_bad: Option<String> = None;
+        'frames: for (tick, (cpu_frame, gpu_frame)) in cpu.frames.iter().zip(race.frames.iter()).enumerate() {
+            for (runner, (cpu_row, gpu_row)) in cpu_frame.iter().zip(gpu_frame.iter()).enumerate() {
+                for (column, (cpu, gpu)) in cpu_row.iter().zip(gpu_row.iter()).enumerate() {
+                    if cpu.to_bits() != gpu.to_bits() {
+                        first_bad = Some(format!(
+                            "seed {seed}: tick {tick} runner {runner} column {column} cpu {} gpu {}",
+                            cpu.to_bits(),
+                            gpu.to_bits()
+                        ));
+                        break 'frames;
+                    }
+                }
             }
         }
+        if let Some(msg) = first_bad {
+            problems.push(msg);
+            continue;
+        }
+        let full = dep_cpu::with_retain_all_frames(&request).expect("retain request");
+        let gpu = classic_reply::build(&full, seed, race).expect("full reply");
+        let engine = match dep_cpu::run_cpu_binary(&request, seed) {
+            Ok(r) => r.reply,
+            Err(reason) => {
+                problems.push(format!("seed {seed}: cpu binary failed: {reason}"));
+                continue;
+            }
+        };
+        if gpu != engine {
+            problems.push(format!("seed {seed}: full reply differs from the engine"));
+            continue;
+        }
+        let engine_events = json::parse(&engine).ok().and_then(|v| {
+            v.get("conservePowerEvents")
+                .and_then(json::Value::as_array)
+                .map(|a| a.len())
+        }).unwrap_or(usize::MAX);
+        if engine_events != race.skcns.len() / 3 {
+            problems.push(format!(
+                "seed {seed}: conserve release count engine {engine_events} kernel {}",
+                race.skcns.len() / 3
+            ));
+            continue;
+        }
+        if engine_events < 1 {
+            problems.push(format!("seed {seed}: the asitame release never fired"));
+        }
     }
-    let full = dep_cpu::with_retain_all_frames(&request).expect("retain request");
-    let gpu = classic_reply::build(&full, 1, race).expect("full reply");
-    let engine = dep_cpu::run_cpu_binary(&request, 1).expect("cpu binary").reply;
-    assert_eq!(gpu, engine, "full reply");
-    let engine_events = json::parse(&engine).ok().and_then(|v| {
-        v.get("conservePowerEvents")
-            .and_then(json::Value::as_array)
-            .map(|a| a.len())
-    }).unwrap_or(usize::MAX);
-    assert_eq!(
-        engine_events,
-        race.skcns.len() / 3,
-        "the conserve release must fire and match the engine count"
-    );
-    assert!(engine_events >= 1, "the asitame release never fired");
+    assert!(problems.is_empty(), "{} problems:\n{}", problems.len(), problems.join("\n"));
 }
 
 #[test]
