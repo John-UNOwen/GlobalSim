@@ -167,13 +167,13 @@ fit in memory, not by the device's arithmetic.
 
 The `saturate` end-to-end stage times, ms, per route:
 
-| | `18de461` | + A1 | + A2 |
-| --- | --- | --- | --- |
-| upload | 3,597 | 210 | 64 |
-| launch | 2,161 | 2,050 | 2,000 |
-| readback | 1,200 | 1,200 | 1,201 |
-| decode | 384 | 400 | 400 |
-| end to end | 7,619 | 4,150 | 3,950 |
+| | `18de461` | + A1 | + A2 | + A3 |
+| --- | --- | --- | --- | --- |
+| upload | 3,597 | 210 | 64 | 64 |
+| launch | 2,161 | 2,050 | 2,000 | 1,990 |
+| readback | 1,200 | 1,200 | 1,201 | 468 |
+| decode | 384 | 400 | 400 | 1,080 |
+| end to end | 7,619 | 4,150 | 3,950 | 3,740 |
 
 A1 uploads no zeros: the skill, scratch, status and event words the kernel
 may read before writing are cleared on the device, frames (the biggest buffer)

@@ -1514,23 +1514,15 @@ impl RaceContext {
     let race_frames_bytes = RACE_MAX_TICKS * n * 6 * std::mem::size_of::<f64>();
     let chunk_len = (frame_bytes_budget / race_frames_bytes.max(1)).max(1);
 
-    let mut status = vec![0u32; m.max(1) * ST_STRIDE];
-    let mut events_all = vec![0u32; m.max(1) * EV_STRIDE];
-    let mut frames_all = if mode.timed() { Vec::new() } else { vec![0f64; m.max(1) * RACE_MAX_TICKS * n * 6] };
-    // The skill scratch readback stays off the normal path: the kernel leaves
-    // the merged windows and the record state there, and a divergence hunt
-    // asks for them per race through `run_with_skill_scratch`.
+    // Per-chunk host staging is filled by the readback and drained by the
+    // chunk's decode, so no batch pins more frames than its used ticks.
     let want_sk = m > 0
         && prepared.iter().any(|p| p.debug_scratch || p.full);
-    let mut skd_all: Vec<f64> = Vec::new();
-    let mut sks_all: Vec<u32> = Vec::new();
-    if want_sk {
-        skd_all = vec![0f64; m * SRL_WORDS];
-        sks_all = vec![0u32; m * SCR_U_WORDS];
-    }
+    let mut decoded: Vec<Option<RaceGpu>> = (0..m).map(|_| None).collect();
     let mut upload_ms = 0.;
     let mut launch_ms = 0.;
     let mut readback_ms = 0.;
+    let mut decode_ms = 0.;
     let mut bench_ticks = 0usize;
     let mut bench_launch_ms = 0.;
     for chunk_start in (0..m).step_by(chunk_len) {
@@ -1664,16 +1656,61 @@ impl RaceContext {
 
         let t_stage = std::time::Instant::now();
         if !mode.timed() {
-            b_status.cmd().read(&mut status[slot0 * ST_STRIDE..][..mc * ST_STRIDE]).enq().map_err(|e| e.to_string())?;
-            b_events.cmd().read(&mut events_all[slot0 * EV_STRIDE..][..mc * EV_STRIDE]).enq().map_err(|e| e.to_string())?;
-            b_frames.cmd().read(&mut frames_all[slot0 * RACE_MAX_TICKS * n * 6..][..mc * RACE_MAX_TICKS * n * 6]).enq().map_err(|e| e.to_string())?;
-            if want_sk {
-                b_scr_d.cmd().read(&mut skd_all[slot0 * SRL_WORDS..][..mc * SRL_WORDS]).enq().map_err(|e| e.to_string())?;
-                b_scr_u.cmd().read(&mut sks_all[slot0 * SCR_U_WORDS..][..mc * SCR_U_WORDS]).enq().map_err(|e| e.to_string())?;
+            // Read back only the ticks that ran. Status first, then one frame
+            // prefix read per race at its own height, packed side by side, so
+            // readback shrinks with the used ticks, not the 6,144-row budget.
+            let mut c_status = vec![0u32; mc * ST_STRIDE];
+            let mut c_events = vec![0u32; mc * EV_STRIDE];
+            b_status.cmd().read(&mut c_status).enq().map_err(|e| e.to_string())?;
+            b_events.cmd().read(&mut c_events).enq().map_err(|e| e.to_string())?;
+            queue.finish().map_err(|e| e.to_string())?;
+            let mut frame_off = vec![0usize; mc + 1];
+            let mut tail_off = vec![0usize; mc + 1];
+            for (slot, &i) in chunk.iter().enumerate() {
+                let rows = c_status[slot * ST_STRIDE + ST_TICKS] as usize + 1;
+                frame_off[slot + 1] = frame_off[slot] + rows * n * 6;
+                let dbg = if prepared[i].ri[RI_DEBUG_TICK] != 0 { 14 * n * 6 } else { 0 };
+                tail_off[slot + 1] = tail_off[slot] + dbg;
+            }
+            let mut c_frames = vec![0f64; frame_off[mc]];
+            let mut c_tail = vec![0f64; tail_off[mc]];
+            for (slot, &i) in chunk.iter().enumerate() {
+                b_frames.cmd()
+                    .read(&mut c_frames[frame_off[slot]..frame_off[slot + 1]])
+                    .offset(slot * RACE_MAX_TICKS * n * 6)
+                    .enq()
+                    .map_err(|e| e.to_string())?;
+                if prepared[i].ri[RI_DEBUG_TICK] != 0 {
+                    // The debug blocks sit in the last 14 rows of the race's
+                    // frame window, past the used-tick prefix.
+                    b_frames.cmd()
+                        .read(&mut c_tail[tail_off[slot]..tail_off[slot + 1]])
+                        .offset((slot * RACE_MAX_TICKS + RACE_MAX_TICKS - 14) * n * 6)
+                        .enq()
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            let mut c_skd: Vec<f64> = Vec::new();
+            let mut c_sks: Vec<u32> = Vec::new();
+            if want_sk && chunk.iter().any(|&i| prepared[i].debug_scratch || prepared[i].full) {
+                c_skd = vec![0f64; mc * SRL_WORDS];
+                c_sks = vec![0u32; mc * SCR_U_WORDS];
+                b_scr_d.cmd().read(&mut c_skd).enq().map_err(|e| e.to_string())?;
+                b_scr_u.cmd().read(&mut c_sks).enq().map_err(|e| e.to_string())?;
             }
             queue.finish().map_err(|e| e.to_string())?;
+            readback_ms += t_stage.elapsed().as_secs_f64() * 1e3;
+            let t_stage = std::time::Instant::now();
+            for (slot, &i) in chunk.iter().enumerate() {
+                decoded[slot0 + slot] = Some(decode_slot(
+                    &prepared[i], slot, n, &c_status, &c_events, &frame_off, &tail_off,
+                    &c_frames, &c_tail, &c_skd, &c_sks,
+                ));
+            }
+            decode_ms += t_stage.elapsed().as_secs_f64() * 1e3;
+        } else {
+            readback_ms += t_stage.elapsed().as_secs_f64() * 1e3;
         }
-        readback_ms += t_stage.elapsed().as_secs_f64() * 1e3;
     }
     let bench = if matches!(mode, LaunchMode::Timed { .. } | LaunchMode::Burst { .. }) && m > 0 {
         Some(KernelBench {
@@ -1688,33 +1725,38 @@ impl RaceContext {
         None
     };
 
-    let t_stage = std::time::Instant::now();
     let mut races: Vec<RaceGpu> = Vec::with_capacity(prepared.len());
     let mut slot = 0usize;
     for race in prepared.iter() {
-        let mut out = RaceGpu {
-            frames: Vec::new(),
-            ticks: 0,
-            fallback: race.host_fallback.clone(),
-            grid: race.grid,
-            grid_pos: Vec::new(),
-            kernel_flag: 0,
-            kernel_arg: 0,
-            finish_step: None,
-            finish_raw: None,
-            finish_step_all: Vec::new(),
-            finish_raw_all: Vec::new(),
-            loop_end: 0.,
-            tempt_all: Vec::new(),
-            rscore_all: Vec::new(),
-            hp_empty_all: Vec::new(),
-            later_stats: [0; 5],
-            delay_all: Vec::new(),
-            lss_all: Vec::new(),
-            events: Vec::new(),
-            reply: None,
-            debug_pace: Vec::new(),
-            debug_sk: None,
+        let mut out = if race.host_fallback.is_none() && !mode.timed() {
+            let d = decoded[slot].take().expect("every launched race decoded in its chunk");
+            slot += 1;
+            d
+        } else {
+            RaceGpu {
+                frames: Vec::new(),
+                ticks: 0,
+                fallback: race.host_fallback.clone(),
+                grid: race.grid,
+                grid_pos: Vec::new(),
+                kernel_flag: 0,
+                kernel_arg: 0,
+                finish_step: None,
+                finish_raw: None,
+                finish_step_all: Vec::new(),
+                finish_raw_all: Vec::new(),
+                loop_end: 0.,
+                tempt_all: Vec::new(),
+                rscore_all: Vec::new(),
+                hp_empty_all: Vec::new(),
+                later_stats: [0; 5],
+                delay_all: Vec::new(),
+                lss_all: Vec::new(),
+                events: Vec::new(),
+                reply: None,
+                debug_pace: Vec::new(),
+                debug_sk: None,
+            }
         };
         if race.grid {
             // The engine ranks its recording set by these construction-time
@@ -1724,119 +1766,8 @@ impl RaceContext {
                 .map(|r| race.pd[PI_RUNNER0 + PI_RUN_STRIDE * r + PI_RUN_POS])
                 .collect();
         }
-        if race.host_fallback.is_none() && !mode.timed() {
-            let st = &status[slot * ST_STRIDE..][..ST_STRIDE];
-            let ev = &events_all[slot * EV_STRIDE..][..EV_STRIDE];
-            slot += 1;
-            out.kernel_flag = st[ST_FALLBACK];
-            out.kernel_arg = st[ST_ARG];
-            out.ticks = st[ST_TICKS] as usize;
-            out.fallback = kernel_fallback(out.kernel_flag, out.kernel_arg);
-            out.loop_end = loop_end(out.ticks);
-            if out.fallback.is_none() {
-                let base = (slot - 1) * RACE_MAX_TICKS * n * 6;
-                out.frames = (0..=out.ticks)
-                    .map(|t| {
-                        (0..n)
-                            .map(|r| {
-                                let mut row = [0f64; 6];
-                                let at = base + t * n * 6 + r * 6;
-                                row.copy_from_slice(&frames_all[at..at + 6]);
-                                row
-                            })
-                            .collect()
-                    })
-                    .collect();
-                if race.ri[RI_DEBUG_TICK] != 0 {
-                    let tail = base + (RACE_MAX_TICKS - 14) * n * 6;
-                    out.debug_pace = (0..14 * n)
-                        .map(|row| {
-                            let mut v = [0f64; 6];
-                            v.copy_from_slice(&frames_all[tail + row * 6..tail + row * 6 + 6]);
-                            v
-                        })
-                        .collect();
-                }
-                if race.debug_scratch {
-                    let d = (slot - 1) * SRL_WORDS + SRL_SKD;
-                    let u = (slot - 1) * SCR_U_WORDS + SCR_SK;
-                    let j = (slot - 1) * SCR_U_WORDS + SK_JRN0;
-                    let jc = (sks_all[j] as usize).min(SK_JRN_N - 9);
-                    out.debug_sk = Some(SkillScratch {
-                        skd: skd_all[d..d + SK_RMAX * SKD_STRIDE].to_vec(),
-                        sks: sks_all[u..u + SK_RMAX * SKR_STRIDE].to_vec(),
-                        journal: sks_all[j + 1..j + 1 + jc].to_vec(),
-                    });
-                }
-                out.finish_step = read_f64(st, ST_FINISH0);
-                out.finish_raw = read_f64(st, ST_FINISH0 + 2);
-                out.finish_step_all = (0..race.n)
-                    .map(|r| read_f64(st, ST_FINISH0 + 4 * r))
-                    .collect();
-                out.finish_raw_all = (0..race.n)
-                    .map(|r| read_f64(st, ST_FINISH0 + 4 * r + 2))
-                    .collect();
-                out.tempt_all = (0..race.n).map(|r| st[ST_TEMPT0 + r]).collect();
-                out.rscore_all = (0..race.n).map(|r| st[ST_RSCORE0 + r]).collect();
-                out.hp_empty_all = (0..race.n).map(|r| st[ST_HPEMPTY0 + r] != 0).collect();
-                out.later_stats = [
-                    st[ST_LATER_KEEP],
-                    st[ST_LATER_CMP],
-                    st[ST_LATER_SEC],
-                    st[ST_LATER_GATE],
-                    st[ST_LATER_SYB],
-                ];
-                out.delay_all = (0..race.n)
-                    .map(|r| f64::from(f32::from_bits(st[ST_DELAY0 + r])))
-                    .collect();
-                out.lss_all = (0..race.n)
-                    .map(|r| f64::from(f32::from_bits(st[ST_LSS0 + r])))
-                    .collect();
-                let count = (ev[0] as usize).min(EV_MAX);
-                out.events = (0..count)
-                    .map(|k| (ev[1 + 2 * k] as usize, ev[2 + 2 * k]))
-                    .collect();
-                if race.full {
-                    let u = (slot - 1) * SCR_U_WORDS;
-                    let channel = |base: usize, cap: usize| -> Vec<u32> {
-                        let count = (sks_all[u + base] as usize).min(cap);
-                        sks_all[u + base + 1..u + base + 1 + count].to_vec()
-                    };
-                    let bits = |word: usize| -> f64 {
-                        f64::from_bits(
-                            u64::from(st[word]) | (u64::from(st[word + 1]) << 32),
-                        )
-                    };
-                    out.reply = Some(ReplyRaw {
-                        act: channel(SCR_RC_ACT, RC_ACT_CAP),
-                        tgt: channel(SCR_RC_TGT, RC_TGT_CAP),
-                        fan: channel(SCR_RC_FAN, RC_FAN_CAP),
-                        cons: channel(SCR_RC_CONS, RC_CONS_CAP),
-                        comp: channel(SCR_RC_COMP, RC_COMP_CAP),
-                        phr: channel(SCR_RC_PHR, RC_PHR_CAP),
-                        kak: channel(SCR_RC_KAK, RC_KAK_CAP),
-                        snap_guts: (0..race.n)
-                            .map(|r| bits(ST_SNAPG0 + 2 * r))
-                            .collect(),
-                        snap_wis: (0..race.n)
-                            .map(|r| bits(ST_SNAPW0 + 2 * r))
-                            .collect(),
-                        spurt_time: (0..race.n)
-                            .map(|r| read_f64(st, ST_SPURTT0 + 2 * r))
-                            .collect(),
-                        spurt_dist: (0..race.n)
-                            .map(|r| read_f64(st, ST_SPURTD0 + 2 * r))
-                            .collect(),
-                        spfirst: (0..race.n)
-                            .map(|r| st[ST_SPFIRST0 + r] as usize)
-                            .collect(),
-                    });
-                }
-            }
-        }
         races.push(out);
     }
-    let decode_ms = t_stage.elapsed().as_secs_f64() * 1e3;
 
     let stage_ms = StageTimings {
         total_ms: t_total.elapsed().as_secs_f64() * 1e3,
@@ -1849,6 +1780,156 @@ impl RaceContext {
     };
     Ok((RaceRun { device: self.spike.device.clone(), build_ms: self.spike.build_ms, stage_ms, races }, bench))
     }
+}
+
+/// Decodes one launched race from its chunk's staging. Frames arrive packed
+/// to the used-tick prefix, the offsets in frame_off and tail_off, scratch
+/// staging only for chunks holding debug or full-reply races.
+fn decode_slot(
+    race: &Prepared,
+    slot: usize,
+    n: usize,
+    status: &[u32],
+    events_all: &[u32],
+    frame_off: &[usize],
+    tail_off: &[usize],
+    frames_all: &[f64],
+    tail_all: &[f64],
+    skd_all: &[f64],
+    sks_all: &[u32],
+) -> RaceGpu {
+    let st = &status[slot * ST_STRIDE..][..ST_STRIDE];
+    let ev = &events_all[slot * EV_STRIDE..][..EV_STRIDE];
+    let mut out = RaceGpu {
+        frames: Vec::new(),
+        ticks: 0,
+        fallback: None,
+        grid: race.grid,
+        grid_pos: Vec::new(),
+        kernel_flag: 0,
+        kernel_arg: 0,
+        finish_step: None,
+        finish_raw: None,
+        finish_step_all: Vec::new(),
+        finish_raw_all: Vec::new(),
+        loop_end: 0.,
+        tempt_all: Vec::new(),
+        rscore_all: Vec::new(),
+        hp_empty_all: Vec::new(),
+        later_stats: [0; 5],
+        delay_all: Vec::new(),
+        lss_all: Vec::new(),
+        events: Vec::new(),
+        reply: None,
+        debug_pace: Vec::new(),
+        debug_sk: None,
+    };
+    out.kernel_flag = st[ST_FALLBACK];
+    out.kernel_arg = st[ST_ARG];
+    out.ticks = st[ST_TICKS] as usize;
+    out.fallback = kernel_fallback(out.kernel_flag, out.kernel_arg);
+    out.loop_end = loop_end(out.ticks);
+    if out.fallback.is_none() {
+        let base = frame_off[slot];
+        out.frames = (0..=out.ticks)
+            .map(|t| {
+                (0..n)
+                    .map(|r| {
+                        let mut row = [0f64; 6];
+                        let at = base + t * n * 6 + r * 6;
+                        row.copy_from_slice(&frames_all[at..at + 6]);
+                        row
+                    })
+                    .collect()
+            })
+            .collect();
+        if race.ri[RI_DEBUG_TICK] != 0 {
+            let tail = tail_off[slot];
+            out.debug_pace = (0..14 * n)
+                .map(|row| {
+                    let mut v = [0f64; 6];
+                    v.copy_from_slice(&tail_all[tail + row * 6..tail + row * 6 + 6]);
+                    v
+                })
+                .collect();
+        }
+        if race.debug_scratch {
+            let d = slot * SRL_WORDS + SRL_SKD;
+            let u = slot * SCR_U_WORDS + SCR_SK;
+            let j = slot * SCR_U_WORDS + SK_JRN0;
+            let jc = (sks_all[j] as usize).min(SK_JRN_N - 9);
+            out.debug_sk = Some(SkillScratch {
+                skd: skd_all[d..d + SK_RMAX * SKD_STRIDE].to_vec(),
+                sks: sks_all[u..u + SK_RMAX * SKR_STRIDE].to_vec(),
+                journal: sks_all[j + 1..j + 1 + jc].to_vec(),
+            });
+        }
+        out.finish_step = read_f64(st, ST_FINISH0);
+        out.finish_raw = read_f64(st, ST_FINISH0 + 2);
+        out.finish_step_all = (0..race.n)
+            .map(|r| read_f64(st, ST_FINISH0 + 4 * r))
+            .collect();
+        out.finish_raw_all = (0..race.n)
+            .map(|r| read_f64(st, ST_FINISH0 + 4 * r + 2))
+            .collect();
+        out.tempt_all = (0..race.n).map(|r| st[ST_TEMPT0 + r]).collect();
+        out.rscore_all = (0..race.n).map(|r| st[ST_RSCORE0 + r]).collect();
+        out.hp_empty_all = (0..race.n).map(|r| st[ST_HPEMPTY0 + r] != 0).collect();
+        out.later_stats = [
+            st[ST_LATER_KEEP],
+            st[ST_LATER_CMP],
+            st[ST_LATER_SEC],
+            st[ST_LATER_GATE],
+            st[ST_LATER_SYB],
+        ];
+        out.delay_all = (0..race.n)
+            .map(|r| f64::from(f32::from_bits(st[ST_DELAY0 + r])))
+            .collect();
+        out.lss_all = (0..race.n)
+            .map(|r| f64::from(f32::from_bits(st[ST_LSS0 + r])))
+            .collect();
+        let count = (ev[0] as usize).min(EV_MAX);
+        out.events = (0..count)
+            .map(|k| (ev[1 + 2 * k] as usize, ev[2 + 2 * k]))
+            .collect();
+        if race.full {
+            let u = slot * SCR_U_WORDS;
+            let channel = |base: usize, cap: usize| -> Vec<u32> {
+                let count = (sks_all[u + base] as usize).min(cap);
+                sks_all[u + base + 1..u + base + 1 + count].to_vec()
+            };
+            let bits = |word: usize| -> f64 {
+                f64::from_bits(
+                    u64::from(st[word]) | (u64::from(st[word + 1]) << 32),
+                )
+            };
+            out.reply = Some(ReplyRaw {
+                act: channel(SCR_RC_ACT, RC_ACT_CAP),
+                tgt: channel(SCR_RC_TGT, RC_TGT_CAP),
+                fan: channel(SCR_RC_FAN, RC_FAN_CAP),
+                cons: channel(SCR_RC_CONS, RC_CONS_CAP),
+                comp: channel(SCR_RC_COMP, RC_COMP_CAP),
+                phr: channel(SCR_RC_PHR, RC_PHR_CAP),
+                kak: channel(SCR_RC_KAK, RC_KAK_CAP),
+                snap_guts: (0..race.n)
+                    .map(|r| bits(ST_SNAPG0 + 2 * r))
+                    .collect(),
+                snap_wis: (0..race.n)
+                    .map(|r| bits(ST_SNAPW0 + 2 * r))
+                    .collect(),
+                spurt_time: (0..race.n)
+                    .map(|r| read_f64(st, ST_SPURTT0 + 2 * r))
+                    .collect(),
+                spurt_dist: (0..race.n)
+                    .map(|r| read_f64(st, ST_SPURTD0 + 2 * r))
+                    .collect(),
+                spfirst: (0..race.n)
+                    .map(|r| st[ST_SPFIRST0 + r] as usize)
+                    .collect(),
+            });
+        }
+    }
+    out
 }
 
 /// Diagnostic version of `run`: snapshot the pace decision state entering
