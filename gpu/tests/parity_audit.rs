@@ -598,6 +598,10 @@ fn gate_reasons_enumerates_exactly_the_documented_fallbacks() {
             Some(accepted()),
         ),
     ];
+    // At the default 18-runner cap every roster past 18 refuses by size first,
+    // so the 24-runner band refusal can only be reached under wide-roster.
+    let band = cfg!(feature = "wide-roster")
+        .then_some("non-grid fields above 24 runners are outside the validated lane band");
     let documented: BTreeSet<String> = [
         "no GPU passes the exactness gate",
         "missing cl_khr_fp64, missing CL_FP_DENORM in single_fp_config, missing CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT, missing CL_FP_DENORM in double_fp_config",
@@ -608,11 +612,11 @@ fn gate_reasons_enumerates_exactly_the_documented_fallbacks() {
         "retail runtime belongs to the retail lane",
         "traceConservePower requires experimentalRetailRuntime",
         "roster size outside the kernel's range",
-        "non-grid fields above 24 runners are outside the validated lane band",
         "non-retail runtime",
         "World geometry requires the experimental runtime and standard starting grid",
     ]
     .into_iter()
+    .chain(band)
     .map(str::to_string)
     .collect();
     let mut named: BTreeSet<String> = BTreeSet::new();

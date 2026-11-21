@@ -14,7 +14,7 @@ use crate::race::{FallbackReason, RaceOutcome, RaceRunner};
 use crate::random_gen::Rule30CARng;
 use ocl::{Buffer, Queue, flags};
 
-pub const CLS_MAXR: usize = 120;
+pub const CLS_MAXR: usize = crate::gpu::ROSTER_CAP;
 pub const CLS_MAX_TICKS: usize = 6144;
 pub const CLS_FRAME_COLS: usize = 14;
 pub const CLS_MAX_SLOPES: usize = 16;

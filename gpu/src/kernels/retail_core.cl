@@ -19,10 +19,12 @@
 // result with the vendored engine and passes it in (slot PT_POWF). The kernel
 // never evaluates a transcendental power.
 
-// Course and runner caps. Grid mode admits rosters up to 120
-// (src/lib.rs:262-272), so 120 is the binding layout bound and every
-// runner-indexed region sizes to it.
+// Course and runner caps. Every runner-indexed region sizes to RACE_MAXR.
+// The host passes it as -D RACE_MAXR (gpu::ROSTER_CAP: 18, the game's field
+// limit, or 120 for the engine's grid band under the wide-roster feature).
+#ifndef RACE_MAXR
 #define RACE_MAXR 120
+#endif
 // 400 s of race time at dt=0.0666 is under 6007 ticks.
 #define RACE_MAX_TICKS 6144
 // Slopes per course, from course_data.json entries.

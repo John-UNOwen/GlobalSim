@@ -14,9 +14,10 @@ use crate::random_gen::Rule30CARng;
 use crate::retail_geometry;
 use ocl::{Buffer, Queue, flags};
 
-// Grid mode stops at 120 (src/lib.rs:262-272), and above the non-grid band
-// the host refuses before the kernel, so 120 is the binding layout bound.
-pub const RACE_MAXR: usize = 120;
+// The layout bound every runner-indexed region sizes to: 18 by default (the
+// game's field limit), 120 under wide-roster for the engine's grid band
+// (src/lib.rs:262-272). Rosters above it refuse by size, before the kernel.
+pub const RACE_MAXR: usize = crate::gpu::ROSTER_CAP;
 
 /// Non-grid fields above this runner count are outside the validated lane
 /// band on both lanes. Grid mode keeps the engine's 21 to 120 (README
@@ -646,6 +647,16 @@ pub struct Prepared {
 }
 
 impl Prepared {
+    /// Why the host refused this race for the kernel, if it did.
+    pub fn host_fallback_reason(&self) -> Option<&str> {
+        self.host_fallback.as_deref()
+    }
+
+    /// The race's runner count (one launch needs one uniform count).
+    pub fn runners(&self) -> usize {
+        self.n
+    }
+
     /// Ask for the full-reply channels: the kernel writes the activation,
     /// target, fan, conserve, competition, phase and rush streams plus the
     /// snapshot columns the full reply needs. Only valid for a parsed
@@ -1186,6 +1197,19 @@ impl RaceContext {
         &self.spike.device
     }
 
+    /// The device's global memory and its largest single allocation, in
+    /// bytes, for sizing launches (bin saturate).
+    pub fn device_memory(&self) -> Result<(u64, u64), String> {
+        use ocl::enums::{DeviceInfo, DeviceInfoResult};
+        let device = self.spike.queue().device();
+        let read = |info| match device.info(info) {
+            Ok(DeviceInfoResult::GlobalMemSize(v)) | Ok(DeviceInfoResult::MaxMemAllocSize(v)) => Ok(v),
+            Ok(other) => Err(format!("unexpected device info {other:?}")),
+            Err(e) => Err(e.to_string()),
+        };
+        Ok((read(DeviceInfo::GlobalMemSize)?, read(DeviceInfo::MaxMemAllocSize)?))
+    }
+
     /// Register the app's course JSON as the kernel's geometry authority for
     /// the course, ahead of the file fallback (see `GeometryRegistry`).
     pub fn register_geometry(&mut self, course_id: i32, json_text: &str) -> Result<(), String> {
@@ -1378,9 +1402,16 @@ impl RaceContext {
     // Frame-byte budget per launch. A full 144-horse race writes
     // RACE_MAX_TICKS * n * 6 f64 (about 42.5 MB), so a big batch splits into
     // several launches; every current suite fits a single one.
+    // GSIM_GPU_FRAME_BUDGET_MB overrides the 512 MiB default, so a benchmark
+    // can launch as many races at once as device memory holds (bin saturate).
     const FRAME_BYTES_BUDGET: usize = 512 << 20;
+    let frame_bytes_budget = std::env::var("GSIM_GPU_FRAME_BUDGET_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&mb| mb > 0)
+        .map_or(FRAME_BYTES_BUDGET, |mb| mb << 20);
     let race_frames_bytes = RACE_MAX_TICKS * n * 6 * std::mem::size_of::<f64>();
-    let chunk_len = (FRAME_BYTES_BUDGET / race_frames_bytes.max(1)).max(1);
+    let chunk_len = (frame_bytes_budget / race_frames_bytes.max(1)).max(1);
 
     let mut status = vec![0u32; m.max(1) * ST_STRIDE];
     let mut events_all = vec![0u32; m.max(1) * EV_STRIDE];

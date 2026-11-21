@@ -470,12 +470,15 @@ fn gate_reasons_names_every_refusal() {
         facade::gate_reasons(grid, Some(&accepted)).as_deref(),
         Some("experimentalGrid requires 21 through 120 horses, columns=20 and rowSpacing=3.0.")
     );
-    // A valid grid key on a 21-horse retail roster is now runnable.
+    // A valid grid key on a 21-horse retail roster runs under the wide-roster
+    // cap, and refuses by size at the default 18-runner cap.
     let grid_ok = format!(
         "{{\"experimentalRetailRuntime\":true,\"experimentalGrid\":{{\"columns\":20,\"rowSpacing\":3}},\"horses\":[{}]}}",
         vec!["{}"; 21].join(",")
     );
-    assert_eq!(facade::gate_reasons(&grid_ok, Some(&accepted)), None);
+    let grid_expected =
+        if cfg!(feature = "wide-roster") { None } else { Some("roster size outside the kernel's range") };
+    assert_eq!(facade::gate_reasons(&grid_ok, Some(&accepted)).as_deref(), grid_expected);
     // A request without a retail flag routes to the classic lane, so the old
     // blanket non-retail refusal is gone. The classic refusals name what the
     // classic kernel does not port.
@@ -496,8 +499,9 @@ fn gate_reasons_names_every_refusal() {
         "{{\"courseId\":10504,\"experimentalGrid\":{{\"columns\":20,\"rowSpacing\":3}},\"horses\":[{}]}}",
         vec!["{}"; 21].join(",")
     );
-    // Grid starts are ported to the classic lane too, so the gate accepts.
-    assert_eq!(facade::gate_reasons(&classic_grid, Some(&accepted)), None);
+    // Grid starts are ported to the classic lane too, so the gate accepts
+    // under wide-roster; at the default 18-runner cap 21 horses refuse by size.
+    assert_eq!(facade::gate_reasons(&classic_grid, Some(&accepted)).as_deref(), grid_expected);
     let classic_trace = r#"{"courseId":10504,"traceConservePower":true,"horses":[{}]}"#;
     assert_eq!(
         facade::gate_reasons(classic_trace, Some(&accepted)).as_deref(),
@@ -530,7 +534,23 @@ fn gate_reasons_names_every_refusal() {
         Some("roster size outside the kernel's range")
     );
     // Wave 15's band gate: the classic lane refuses non-grid fields above
-    // the band by name, and the band's edge keeps passing.
+    // the band by name, and the band's edge keeps passing. The band only
+    // exists under wide-roster: at the default 18-runner cap a 24- or
+    // 25-runner field refuses by size first, and 18 is the edge that passes.
+    if !cfg!(feature = "wide-roster") {
+        let classic_field = |n: usize| format!("{{\"courseId\":10504,\"horses\":[{}]}}", vec!["{}"; n].join(","));
+        for n in [race_exec::RACE_MAXR + 1, race_exec::NON_GRID_MAX_RUNNERS + 1] {
+            assert_eq!(
+                facade::gate_reasons(&classic_field(n), Some(&accepted)).as_deref(),
+                Some("roster size outside the kernel's range"),
+                "a classic field of {n} refuses by size at the 18 cap"
+            );
+        }
+        assert_eq!(facade::gate_reasons(&classic_field(race_exec::RACE_MAXR), Some(&accepted)), None);
+        let broken = "not json";
+        assert!(facade::gate_reasons(broken, Some(&accepted)).is_some(), "a broken request is refused");
+        return;
+    }
     assert_eq!(
         facade::gate_reasons(
             &format!(
@@ -670,9 +690,21 @@ fn a_classic_request_answers_from_the_gpu_lane() {
     let retail =
         race_exec::skills_request(&v77_line(), 10504, 1, 0, &SKILLS, None).expect("skills request");
     let classic_grid = classic_v77_grid();
-    let requests = [classic.clone(), retail, classic_grid.clone()];
     let mut gpu = GpuRaces::new().expect("device gate");
-    let outcomes = gpu.run_batch(&requests, &[1, 1, 1]).expect("batch");
+    // The 21-horse classic grid needs the wide-roster cap. At the default
+    // 18-runner cap it refuses by size, so it leaves the comparison and is
+    // pinned to that refusal instead.
+    let wide = cfg!(feature = "wide-roster");
+    if !wide {
+        let refused = gpu.run_batch(&[classic_grid.clone()], &[1]).expect("grid batch");
+        assert_eq!(refused[0].fallback.as_deref(), Some("roster size outside the kernel's range"));
+    }
+    let mut requests = vec![classic.clone(), retail];
+    if wide {
+        requests.push(classic_grid.clone());
+    }
+    let seeds = vec![1; requests.len()];
+    let outcomes = gpu.run_batch(&requests, &seeds).expect("batch");
     assert_eq!(outcomes.len(), requests.len());
 
     let mut problems: Vec<String> = Vec::new();
@@ -753,10 +785,12 @@ fn a_classic_request_answers_from_the_gpu_lane() {
         }
     }
 
+    let full_requests: Vec<String> =
+        if wide { vec![classic.clone(), classic_grid.clone()] } else { vec![classic.clone()] };
     let full = gpu
-        .run_batch_full(&[classic.clone(), classic_grid.clone()], &[7, 7])
+        .run_batch_full(&full_requests, &vec![7; full_requests.len()])
         .expect("full batch");
-    for (index, request) in [classic.as_str(), classic_grid.as_str()].into_iter().enumerate() {
+    for (index, request) in full_requests.iter().map(String::as_str).enumerate() {
         let cpu = dep_cpu::run_cpu_binary(request, 7).expect("engine full run");
         if full[index].reply.as_deref() != Some(cpu.reply.as_str()) {
             let gpu_text = full[index]

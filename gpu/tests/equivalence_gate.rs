@@ -231,24 +231,28 @@ fn a_missing_skill_data_entry_quotes_the_engine_error() {
     assert_eq!(kernel, engine, "the retail kernel quotes the engine text");
 }
 
-/// Wave 15 puts the kernel cap back at the grid-mode 120. Rosters past it
-/// no longer run: 121, 128, 144 and 145 non-grid refuse by size from the
-/// run gate and `gate_reasons` alike, compact and full, while the engine
-/// answers them all. The band refusal covers non-grid 25 through 120 and
-/// is pinned by `non_grid_crowds_above_24_refuse_the_kernel_band`.
+/// The kernel cap is `gpu::ROSTER_CAP`: 18 by default (the game's field
+/// limit), 120 under wide-roster (the grid-mode band). Rosters past it do
+/// not run: they refuse by size from the run gate and `gate_reasons` alike,
+/// compact and full, while the engine answers them all. Under wide-roster
+/// the band refusal covers non-grid 25 through 120 and is pinned by
+/// `non_grid_crowds_above_24_refuse_the_kernel_band`.
 #[test]
 fn rosters_beyond_the_kernel_cap_refuse_by_size() {
     register_geometry(10504);
-    assert_eq!(race_exec::RACE_MAXR, 120, "the kernel's roster cap");
-    assert_eq!(classic_exec::CLS_MAXR, 120, "the classic kernel's roster cap");
-    for horse_count in [121usize, 128, 144, 145] {
+    let cap = globalsim_gpu::gpu::ROSTER_CAP;
+    assert_eq!(race_exec::RACE_MAXR, cap, "the kernel's roster cap");
+    assert_eq!(classic_exec::CLS_MAXR, cap, "the classic kernel's roster cap");
+    let counts: Vec<usize> =
+        if cap == 120 { vec![121, 128, 144, 145] } else { vec![cap + 1, 22, 24, 25, 121] };
+    for horse_count in counts {
         let request = text_of(&large_roster(1, horse_count));
         let engine = engine_reply(&request, 1);
         let parsed = json::parse(&engine).expect("reply");
         let results = parsed.get_array("results").expect("results");
         assert_eq!(results.len(), horse_count, "the engine answers all {horse_count} runners");
         let (kernel, gate) = kernel_refusals(&request);
-        assert_eq!(kernel, "roster size outside the kernel's range", "the kernel refuses past its cap of 120");
+        assert_eq!(kernel, "roster size outside the kernel's range", "the kernel refuses past its cap of {cap}");
         assert_eq!(gate.as_deref(), Some("roster size outside the kernel's range"), "gate_reasons matches");
         let mut gpu = facade::GpuRaces::new().expect("facade");
         let batch = gpu.run_batch(&[request.clone()], &[1]).expect("batch runs");
@@ -280,6 +284,7 @@ fn rosters_beyond_the_kernel_cap_refuse_by_size() {
 /// under the rail. Rosters past the 120-horse kernel cap refuse by size,
 /// pinned by `rosters_beyond_the_kernel_cap_refuse_by_size`.
 #[test]
+#[cfg_attr(not(feature = "wide-roster"), ignore = "19+ runner rosters need the wide-roster cap")]
 fn non_grid_crowds_above_24_refuse_the_kernel_band() {
     register_geometry(10504);
     assert_eq!(race_exec::NON_GRID_MAX_RUNNERS, 24, "the validated non-grid band");
@@ -544,6 +549,7 @@ fn later_stamina_mechanics_is_an_engine_mode_answered_by_both_lanes() {
 /// and the reply carries the engine's experimentalGridVersion tag
 /// (src/lib.rs:1135-1138).
 #[test]
+#[cfg_attr(not(feature = "wide-roster"), ignore = "grid rosters (21+) need the wide-roster cap")]
 fn grid_full_replies_are_byte_equal_to_the_engine() {
     register_geometry(10504);
     let mut kind4_total = 0usize;

@@ -102,6 +102,68 @@ subnormals, or correctly-rounded f32 divide/sqrt, and names the refusals. The
 program is built with `-cl-fp32-correctly-rounded-divide-sqrt` and the kernel
 source carries `#pragma FP_CONTRACT OFF` (`src/kernels/restricted_tick.cl`).
 
+## Runner cap: 18 by default, 120 under `wide-roster`
+
+The game never fields more than 18 runners, so every runner-indexed region of
+both kernels sizes to 18 by default. `gpu::ROSTER_CAP` is the one constant:
+the host strides (`race_exec::RACE_MAXR`, `classic_exec::CLS_MAXR`) read it,
+and `gpu::build_options()` passes it to every program as `-D RACE_MAXR` and
+`-D CLS_MAXR`, so kernel and host cannot disagree. A roster above the cap
+refuses by size ("roster size outside the kernel's range") and the CPU engine
+answers it, which covers the engine's experimentalGrid band (21 to 120). At 18
+the 24-runner band refusal is unreachable, because the size refusal comes
+first.
+
+`--features wide-roster` restores the 120 cap and with it the grid lane on the
+GPU, at about 1.5 MiB more scratch per race slot. The grid gates
+(`grid_gate`, `wave12c_modes::classic_grid_starts_answer_bit_exact`, the grid
+and 19 to 24 runner cases in `equivalence_gate`) and the 120-layout pins in
+`tests/layout.rs` run only there; at the default cap they are ignored with
+the reason, and `layout::default_layout_sizes_to_the_eighteen_horse_field`
+pins the 18 layout instead. Run both:
+
+```powershell
+cargo test --release --features race
+cargo test --release --features "race wide-roster"
+```
+
+What the cap does not shrink: the skill-record scratch (`SK_RMAX` 960 records)
+and the frame buffers (`RACE_MAX_TICKS` 6,144 ticks per runner) are sized
+independently of the runner count, and they are most of a race slot (see
+"Full-device throughput").
+
+## Full-device throughput (`saturate`)
+
+```powershell
+cargo run --release --features race --bin saturate -- [--course 10504] [--cpu-races 400] [--launches 3] [--max-races N]
+```
+
+The other benches launch at most a few hundred races, one work item each,
+which leaves most of a GPU idle. `saturate` reads the device's global memory
+and largest allocation, sizes one race slot, and sweeps the launch width up to
+what memory holds (`GSIM_GPU_FRAME_BUDGET_MB` lifts the 512 MiB frame budget
+per launch for this). It prints kernel-only races per second at each width
+(back-to-back launches, one sync), one end-to-end batch at the best width,
+and the CPU engine on one thread and on every core for the same request and
+seeds. A guard checks that a batched GPU seed 1 equals the CPU engine frame
+for frame first.
+
+B580, v77 line 1, course 10504, 9 runners (2026-11-21):
+
+| | 120 cap | 18 cap |
+| --- | --- | --- |
+| race slot | 7.81 MiB | 6.32 MiB |
+| widest launch | 1,291 races | 1,597 races |
+| kernel-only at the widest launch | 625 races/s | 822 races/s |
+| end to end at the widest launch | 182 races/s | 214 races/s |
+| CPU engine, 20 threads | 1,650 races/s | 1,532 races/s |
+
+One race takes about 0.9 s on a GPU lane (a 32-race launch still takes
+924 ms) against 4.9 ms on one CPU core, and widening the launch from 32 to
+1,597 races only doubles its time, so throughput is bound by how many races
+fit in memory, not by the device's arithmetic. End to end is dominated by the
+upload (about 3.5 s of 7.5 s, mostly zero-filled scratch sent from the host).
+
 ## Bench
 
 ```powershell

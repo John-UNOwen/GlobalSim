@@ -137,6 +137,7 @@ const GRID20: &str = r#"{"columns":20,"rowSpacing":3}"#;
 
 /// Grid starts replay bit-exact at the mandatory rosters, plus 120 horses.
 #[test]
+#[cfg_attr(not(feature = "wide-roster"), ignore = "grid rosters (21+) need the wide-roster cap")]
 fn grid_races_replay_bit_exact() {
     register_geometry(10504);
     register_geometry(10604);
@@ -173,6 +174,7 @@ fn grid_races_replay_bit_exact() {
 /// At 21 horses the grid start and the retail gate start must disagree at
 /// frame 0 while both replay bit-exact against the CPU engine.
 #[test]
+#[cfg_attr(not(feature = "wide-roster"), ignore = "grid rosters (21+) need the wide-roster cap")]
 fn grid_and_retail_starts_differ_at_21_horses() {
     register_geometry(10504);
     let seed = 1i64;
@@ -208,6 +210,7 @@ fn grid_and_retail_starts_differ_at_21_horses() {
 /// Grid with the world-geometry flag must fall back with the engine's own
 /// refusal (api.rs:68-71), and the engine must refuse the same request.
 #[test]
+#[cfg_attr(not(feature = "wide-roster"), ignore = "grid rosters (21+) need the wide-roster cap")]
 fn grid_with_geometry_quotes_the_engine_reason() {
     register_geometry(10504);
     let mut request = grid_request(10504, 1, 40, Some(GRID20));

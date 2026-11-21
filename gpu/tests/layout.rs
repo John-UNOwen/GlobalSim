@@ -4,7 +4,26 @@
 use globalsim_gpu::reference;
 use globalsim_gpu::retail_physics::{Acceleration, TargetSpeed};
 
-#[cfg(feature = "race")]
+/// The default build sizes every runner-indexed region to the game's 18-horse
+/// field. Host and kernel take the cap from one constant (`gpu::ROSTER_CAP`,
+/// passed to the kernels as `-D RACE_MAXR` / `-D CLS_MAXR`), so the literal
+/// pins below belong to the 120-horse wide-roster layout; this pins the
+/// default one.
+#[cfg(all(feature = "race", not(feature = "wide-roster")))]
+#[test]
+fn default_layout_sizes_to_the_eighteen_horse_field() {
+    use globalsim_gpu::{classic_exec as ce, gpu, race_exec as re};
+    assert_eq!(gpu::ROSTER_CAP, 18);
+    assert_eq!(re::RACE_MAXR, gpu::ROSTER_CAP);
+    assert_eq!(ce::CLS_MAXR, gpu::ROSTER_CAP);
+    assert!(gpu::build_options().contains("-D RACE_MAXR=18 -D CLS_MAXR=18"));
+    assert_eq!(re::SK_STRIDE, 55872, "the skill table does not depend on the roster cap");
+    assert_eq!(re::SCR_U_WORDS, 382813);
+    assert_eq!(ce::CLS_ST_STRIDE, 16 + 20 * ce::CLS_MAXR);
+    assert_eq!(ce::CLS_RI_STRIDE, ce::CLS_RI_RUN0 + 48 * ce::CLS_MAXR);
+}
+
+#[cfg(all(feature = "race", feature = "wide-roster"))]
 #[test]
 fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     // The kernel's retail_core.cl scratch map grows by the skill regions, and
@@ -102,7 +121,7 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     );
 }
 
-#[cfg(feature = "race")]
+#[cfg(all(feature = "race", feature = "wide-roster"))]
 #[test]
 fn classic_scratch_regions_match_the_kernel_mirrors() {
     use globalsim_gpu::classic_exec as ce;

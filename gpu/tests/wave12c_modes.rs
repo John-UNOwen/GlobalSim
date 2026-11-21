@@ -348,6 +348,7 @@ fn grid_shape() -> Value {
 /// experimentalGridVersion tag, and the staggered starts really move the
 /// physics against the same gate-order flag-off field.
 #[test]
+#[cfg_attr(not(feature = "wide-roster"), ignore = "grid rosters (21+) need the wide-roster cap")]
 fn classic_grid_starts_answer_bit_exact() {
     register_geometry(COURSE);
     let mut problems: Vec<String> = Vec::new();

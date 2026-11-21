@@ -38,6 +38,22 @@ pub const RACE_KERNEL_SOURCE: &str = concat!(
     include_str!("kernels/race.cl")
 );
 pub const BUILD_OPTIONS: &str = "-cl-fp32-correctly-rounded-divide-sqrt";
+
+/// The runner capacity every runner-indexed kernel region sizes to, on both
+/// lanes. The game never fields more than 18, so 18 is the default and keeps a
+/// race slot small enough to launch thousands at once. `wide-roster` restores
+/// the engine's 120-horse grid band (experimentalGrid 21 to 120) on the GPU;
+/// without it those rosters refuse by size and the CPU engine answers them.
+#[cfg(feature = "wide-roster")]
+pub const ROSTER_CAP: usize = 120;
+#[cfg(not(feature = "wide-roster"))]
+pub const ROSTER_CAP: usize = 18;
+
+/// `BUILD_OPTIONS` plus the capacity defines, so the kernels' `RACE_MAXR` and
+/// `CLS_MAXR` always equal the host's strides.
+pub fn build_options() -> String {
+    format!("{BUILD_OPTIONS} -D RACE_MAXR={ROSTER_CAP} -D CLS_MAXR={ROSTER_CAP}")
+}
 // The classic lane carries the bit-exact powf table for the mid-race stat
 // refresh (race_solver.rs:1330-1340 recomputes the guts and power derived
 // terms when a delivered stat effect lands); construction stays host side.
@@ -194,7 +210,7 @@ impl Spike {
     /// gated device, with the same exactness build options.
     pub fn build_program(&self, source: &str) -> Result<Program, String> {
         Program::builder()
-            .cmplr_opt(BUILD_OPTIONS)
+            .cmplr_opt(build_options())
             .source(source)
             .build(&self.context)
             .map_err(|e| e.to_string())

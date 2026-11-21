@@ -24,6 +24,9 @@ initialization = []
 # initialization and geometry hosts plus the device. Gated out of the lib's
 # test target, see src/lib.rs.
 race = ["gpu", "initialization", "geometry"]
+# Runner capacity 120 instead of 18 (gpu::ROSTER_CAP): the engine's
+# experimentalGrid band runs on the GPU, at about 6x the memory per race slot.
+wide-roster = []
 
 [dependencies]
 ocl = { version = "=0.19.7", optional = true }
@@ -57,4 +60,9 @@ required-features = ["race"]
 [[bin]]
 name = "grid_perf"
 path = "src/bin/grid_perf.rs"
+required-features = ["race"]
+
+[[bin]]
+name = "saturate"
+path = "src/bin/saturate.rs"
 required-features = ["race"]

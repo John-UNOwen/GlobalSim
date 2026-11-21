@@ -5,7 +5,10 @@
 // flag-only competition systems run here on the prepended powf and log10
 // ports.
 
+// The host passes -D CLS_MAXR (gpu::ROSTER_CAP); 120 is the wide default.
+#ifndef CLS_MAXR
 #define CLS_MAXR 120
+#endif
 #define CLS_MAX_TICKS 6144
 #define CLS_FRAME_COLS 14
 #define CLS_MAX_SLOPES 16
