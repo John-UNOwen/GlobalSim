@@ -1518,6 +1518,10 @@ impl RaceContext {
     // chunk's decode, so no batch pins more frames than its used ticks.
     let want_sk = m > 0
         && prepared.iter().any(|p| p.debug_scratch || p.full);
+    // Grouped reads with one event each and one decoder thread per group
+    // pipeline decode against the queue: group k decodes while the device
+    // reads group k+1. Two race kernels at once share the B580 poorly.
+    let groups = if mode.timed() { 1 } else { (m / 96).clamp(1, 4) };
     let mut decoded: Vec<Option<RaceGpu>> = (0..m).map(|_| None).collect();
     let mut upload_ms = 0.;
     let mut launch_ms = 0.;
@@ -1525,6 +1529,7 @@ impl RaceContext {
     let mut decode_ms = 0.;
     let mut bench_ticks = 0usize;
     let mut bench_launch_ms = 0.;
+    let prepared: &[Prepared] = prepared;
     for chunk_start in (0..m).step_by(chunk_len) {
         let mc = chunk_len.min(m - chunk_start);
         let chunk = &launched[chunk_start..chunk_start + mc];
@@ -1674,22 +1679,6 @@ impl RaceContext {
             }
             let mut c_frames = vec![0f64; frame_off[mc]];
             let mut c_tail = vec![0f64; tail_off[mc]];
-            for (slot, &i) in chunk.iter().enumerate() {
-                b_frames.cmd()
-                    .read(&mut c_frames[frame_off[slot]..frame_off[slot + 1]])
-                    .offset(slot * RACE_MAX_TICKS * n * 6)
-                    .enq()
-                    .map_err(|e| e.to_string())?;
-                if prepared[i].ri[RI_DEBUG_TICK] != 0 {
-                    // The debug blocks sit in the last 14 rows of the race's
-                    // frame window, past the used-tick prefix.
-                    b_frames.cmd()
-                        .read(&mut c_tail[tail_off[slot]..tail_off[slot + 1]])
-                        .offset((slot * RACE_MAX_TICKS + RACE_MAX_TICKS - 14) * n * 6)
-                        .enq()
-                        .map_err(|e| e.to_string())?;
-                }
-            }
             let mut c_skd: Vec<f64> = Vec::new();
             let mut c_sks: Vec<u32> = Vec::new();
             if want_sk && chunk.iter().any(|&i| prepared[i].debug_scratch || prepared[i].full) {
@@ -1698,16 +1687,79 @@ impl RaceContext {
                 b_scr_d.cmd().read(&mut c_skd).enq().map_err(|e| e.to_string())?;
                 b_scr_u.cmd().read(&mut c_sks).enq().map_err(|e| e.to_string())?;
             }
-            queue.finish().map_err(|e| e.to_string())?;
-            readback_ms += t_stage.elapsed().as_secs_f64() * 1e3;
-            let t_stage = std::time::Instant::now();
-            for (slot, &i) in chunk.iter().enumerate() {
-                decoded[slot0 + slot] = Some(decode_slot(
-                    &prepared[i], slot, n, &c_status, &c_events, &frame_off, &tail_off,
-                    &c_frames, &c_tail, &c_skd, &c_sks,
-                ));
+            let gspan = mc.div_ceil(groups.max(1)).max(1);
+            let mut sentinel = vec![0u32; 1];
+            let mut gevs: Vec<(usize, ocl::Event)> = Vec::new();
+            for lo in (0..mc).step_by(gspan) {
+                let hi = (lo + gspan).min(mc);
+                for slot in lo..hi {
+                    b_frames.cmd()
+                        .read(&mut c_frames[frame_off[slot]..frame_off[slot + 1]])
+                        .offset(slot * RACE_MAX_TICKS * n * 6)
+                        .enq()
+                        .map_err(|e| e.to_string())?;
+                    if prepared[chunk[slot]].ri[RI_DEBUG_TICK] != 0 {
+                        // The debug blocks sit in the last 14 rows of the race's
+                        // frame window, past the used-tick prefix.
+                        b_frames.cmd()
+                            .read(&mut c_tail[tail_off[slot]..tail_off[slot + 1]])
+                            .offset((slot * RACE_MAX_TICKS + RACE_MAX_TICKS - 14) * n * 6)
+                            .enq()
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                // This in-order queue runs the group's reads first, so the
+                // sentinel read closes the group and its event says the data
+                // landed.
+                let mut gev = ocl::Event::empty();
+                b_status.cmd()
+                    .read(&mut sentinel)
+                    .enew(&mut gev)
+                    .enq()
+                    .map_err(|e| e.to_string())?;
+                gevs.push((lo, gev));
             }
-            decode_ms += t_stage.elapsed().as_secs_f64() * 1e3;
+            let (st, evs) = (&c_status, &c_events);
+            let (foff, toff) = (&frame_off, &tail_off);
+            let (fr, tl) = (&c_frames, &c_tail);
+            let (skd, sks) = (&c_skd, &c_sks);
+            let races = prepared;
+            let idx = chunk;
+            let t_start = t_stage;
+            let mut slots: Vec<Option<RaceGpu>> = (0..mc).map(|_| None).collect();
+            let mut rb_max: f64 = 0.;
+            let mut dk_max: f64 = 0.;
+            std::thread::scope(|s| -> Result<(), String> {
+                let mut hs = Vec::new();
+                for (gi, part) in slots.chunks_mut(gspan).enumerate() {
+                    let (lo, gev) = (&gevs[gi].0, &gevs[gi].1);
+                    let lo = *lo;
+                    hs.push(s.spawn(move || -> Result<(f64, f64), String> {
+                        gev.wait_for().map_err(|e| e.to_string())?;
+                        let fire = t_start.elapsed().as_secs_f64() * 1e3;
+                        for (j, dest) in part.iter_mut().enumerate() {
+                            let slot = lo + j;
+                            *dest = Some(decode_slot(
+                                &races[idx[slot]], slot, n, st, evs, foff, toff, fr, tl, skd, sks,
+                            ));
+                        }
+                        Ok((fire, t_start.elapsed().as_secs_f64() * 1e3))
+                    }));
+                }
+                for h in hs {
+                    let (fire, done) = h
+                        .join()
+                        .unwrap_or_else(|_| Err("a decode thread panicked".to_string()))?;
+                    rb_max = rb_max.max(fire);
+                    dk_max = dk_max.max(done - fire);
+                }
+                Ok(())
+            })?;
+            for (j, d) in slots.into_iter().enumerate() {
+                decoded[slot0 + j] = d;
+            }
+            readback_ms += rb_max;
+            decode_ms += dk_max;
         } else {
             readback_ms += t_stage.elapsed().as_secs_f64() * 1e3;
         }
@@ -1831,13 +1883,14 @@ fn decode_slot(
     out.loop_end = loop_end(out.ticks);
     if out.fallback.is_none() {
         let base = frame_off[slot];
-        out.frames = (0..=out.ticks)
-            .map(|t| {
-                (0..n)
-                    .map(|r| {
+        let span = (out.ticks + 1) * n * 6;
+        out.frames = frames_all[base..base + span]
+            .chunks_exact(n * 6)
+            .map(|tick| {
+                tick.chunks_exact(6)
+                    .map(|w| {
                         let mut row = [0f64; 6];
-                        let at = base + t * n * 6 + r * 6;
-                        row.copy_from_slice(&frames_all[at..at + 6]);
+                        row.copy_from_slice(w);
                         row
                     })
                     .collect()

@@ -167,13 +167,13 @@ fit in memory, not by the device's arithmetic.
 
 The `saturate` end-to-end stage times, ms, per route:
 
-| | `18de461` | + A1 | + A2 | + A3 |
-| --- | --- | --- | --- | --- |
-| upload | 3,597 | 210 | 64 | 64 |
-| launch | 2,161 | 2,050 | 2,000 | 1,990 |
-| readback | 1,200 | 1,200 | 1,201 | 468 |
-| decode | 384 | 400 | 400 | 1,080 |
-| end to end | 7,619 | 4,150 | 3,950 | 3,740 |
+| | `18de461` | + A1 | + A2 | + A3 | + A4 |
+| --- | --- | --- | --- | --- | --- |
+| upload | 3,597 | 210 | 64 | 64 | 64 |
+| launch | 2,161 | 2,050 | 2,000 | 1,990 | 1,980 |
+| readback | 1,200 | 1,200 | 1,201 | 468 | 470 |
+| decode | 384 | 400 | 400 | 1,080 | 1,070 |
+| end to end | 7,619 | 4,150 | 3,950 | 3,740 | 3,760 |
 
 A1 uploads no zeros: the skill, scratch, status and event words the kernel
 may read before writing are cleared on the device, frames (the biggest buffer)
@@ -184,7 +184,15 @@ of 7.5 s, almost all zero-filled scratch sent from the host. A2 keeps the
 lane's launch buffers and the geometry table uploads in the context (a
 grow-only buffer set per lane, tables keyed by their course id list), so a
 batch allocates nothing and enqueues only its real bytes and its device-side
-clears on top.
+clears on top. A4 splits the frame reads into up to four groups, one event
+each, with a decoder thread per group, so the host decodes the races whose
+rows landed while the device still reads the next group (the readback row
+then measures until the last group landed, the decode row the longest
+per-thread span, and the two overlap). Two race kernels at once share the
+B580 badly, so one queue still launches every race kernel. What is left of
+the end to end time: about 2.0 s of kernel, about 0.5 s of frame reads, and
+about 1.1 s of decode, which is 2.3 million row-Vec allocations per launch
+and no longer shrinks with more threads.
 
 ## Bench
 
