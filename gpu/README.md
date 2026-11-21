@@ -161,8 +161,26 @@ B580, v77 line 1, course 10504, 9 runners (2026-11-21):
 One race takes about 0.9 s on a GPU lane (a 32-race launch still takes
 924 ms) against 4.9 ms on one CPU core, and widening the launch from 32 to
 1,597 races only doubles its time, so throughput is bound by how many races
-fit in memory, not by the device's arithmetic. End to end is dominated by the
-upload (about 3.5 s of 7.5 s, mostly zero-filled scratch sent from the host).
+fit in memory, not by the device's arithmetic.
+
+### Phase A: host overhead at the 1,597-race launch (18 cap)
+
+The `saturate` end-to-end stage times, ms, per route:
+
+| | `18de461` | + A1 |
+| --- | --- | --- |
+| upload | 3,597 | 210 |
+| launch | 2,161 | 2,050 |
+| readback | 1,200 | 1,200 |
+| decode | 384 | 400 |
+| end to end | 7,619 | 4,150 |
+
+A1 uploads no zeros: the skill, scratch, status and event words the kernel
+may read before writing are cleared on the device, frames (the biggest buffer)
+are not cleared at all because the kernel writes every frame word decode
+reads, and only the high-water prefix of a compiled skill row goes over
+PCIe. The end-to-end time before A1 was dominated by the upload, about 3.5 s
+of 7.5 s, almost all zero-filled scratch sent from the host.
 
 ## Bench
 

@@ -1439,22 +1439,39 @@ impl RaceContext {
         let t_stage = std::time::Instant::now();
         let mut ri_all = vec![0u32; mc * RI_STRIDE];
         let mut pd_all = vec![0f64; mc * RIL_STRIDE];
-        let mut sk_all = vec![0u32; mc * SK_STRIDE];
         for (slot, &i) in chunk.iter().enumerate() {
             ri_all[slot * RI_STRIDE..][..RI_STRIDE].copy_from_slice(&prepared[i].ri);
             pd_all[slot * RIL_STRIDE..][..RIL_STRIDE].copy_from_slice(&prepared[i].pd);
-            if !prepared[i].sk.is_empty() {
-                sk_all[slot * SK_STRIDE..][..SK_STRIDE].copy_from_slice(&prepared[i].sk);
-            }
         }
         let b_ri = read_write(&queue, &ri_all)?;
         let b_pd = read_write(&queue, &pd_all)?;
-        let b_sk = read_only(&queue, &sk_all)?;
-        let b_scr_u = read_write(&queue, &vec![0u32; mc * SCR_U_WORDS])?;
-        let b_scr_d = read_write(&queue, &vec![0f64; mc * SRL_WORDS])?;
-        let b_frames = read_write(&queue, &vec![0f64; mc * RACE_MAX_TICKS * n * 6])?;
-        let b_status = read_write(&queue, &vec![0u32; mc * ST_STRIDE])?;
-        let b_events = read_write(&queue, &vec![0u32; mc * EV_STRIDE])?;
+        // No host zeros go over PCIe. The device clears each buffer the
+        // kernel may read before writing. Frames need no clear: the kernel
+        // writes every frame word decode reads, debug tail blocks aside.
+        let b_sk = empty_buf(&queue, mc * SK_STRIDE, flags::MEM_READ_ONLY)?;
+        b_sk.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
+        for (slot, &i) in chunk.iter().enumerate() {
+            let hw = sk_high_water(&prepared[i].sk);
+            if hw > 0 {
+                b_sk.cmd()
+                    .write(&prepared[i].sk[..hw])
+                    .offset(slot * SK_STRIDE)
+                    .enq()
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        let b_scr_u = empty_buf(&queue, mc * SCR_U_WORDS, flags::MEM_READ_WRITE)?;
+        let b_scr_d = empty_buf(&queue, mc * SRL_WORDS, flags::MEM_READ_WRITE)?;
+        let b_frames = empty_buf(&queue, mc * RACE_MAX_TICKS * n * 6, flags::MEM_READ_WRITE)?;
+        let b_status = empty_buf(&queue, mc * ST_STRIDE, flags::MEM_READ_WRITE)?;
+        let b_events = empty_buf(&queue, mc * EV_STRIDE, flags::MEM_READ_WRITE)?;
+        b_scr_u.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
+        b_scr_d.cmd().fill(0.0f64, None).enq().map_err(|e| e.to_string())?;
+        b_status.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
+        b_events.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
+        if chunk.iter().any(|&i| prepared[i].ri[RI_DEBUG_TICK] != 0) {
+            b_frames.cmd().fill(0.0f64, None).enq().map_err(|e| e.to_string())?;
+        }
         let b_cs = read_only(&queue, &tables.cs)?;
         let b_sg_x = read_only(&queue, &tables.sg_x)?;
         let b_sg_xd = read_only(&queue, &tables.sg_xd)?;
@@ -1942,6 +1959,35 @@ fn read_write<T: ocl::OclPrm>(queue: &Queue, data: &[T]) -> Result<Buffer<T>, St
         .map_err(|e| e.to_string())?;
     buffer.cmd().write(data).enq().map_err(|e| e.to_string())?;
     Ok(buffer)
+}
+
+/// A device-side buffer with no host content. The caller clears it with a
+/// fill when the kernel could read a word before writing it.
+fn empty_buf<T: ocl::OclPrm>(
+    queue: &Queue,
+    len: usize,
+    mem_flags: flags::MemFlags,
+) -> Result<Buffer<T>, String> {
+    Buffer::<T>::builder()
+        .queue(queue.clone())
+        .flags(mem_flags)
+        .len(len)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// Words through the last non-zero one of a compiled skill row. Everything
+/// past it is zero, and the device fill covers it.
+fn sk_high_water(row: &[u32]) -> usize {
+    let mut end = row.len();
+    while end > 0 {
+        let lo = end.saturating_sub(4096);
+        if row[lo..end].iter().any(|&w| w != 0) {
+            return lo + row[lo..end].iter().rposition(|&w| w != 0).unwrap() + 1;
+        }
+        end = lo;
+    }
+    0
 }
 
 /// The whole-race GPU runner behind the handoff's RaceRunner seam. A race
