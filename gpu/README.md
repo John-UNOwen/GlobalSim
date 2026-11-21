@@ -167,20 +167,24 @@ fit in memory, not by the device's arithmetic.
 
 The `saturate` end-to-end stage times, ms, per route:
 
-| | `18de461` | + A1 |
-| --- | --- | --- |
-| upload | 3,597 | 210 |
-| launch | 2,161 | 2,050 |
-| readback | 1,200 | 1,200 |
-| decode | 384 | 400 |
-| end to end | 7,619 | 4,150 |
+| | `18de461` | + A1 | + A2 |
+| --- | --- | --- | --- |
+| upload | 3,597 | 210 | 64 |
+| launch | 2,161 | 2,050 | 2,000 |
+| readback | 1,200 | 1,200 | 1,201 |
+| decode | 384 | 400 | 400 |
+| end to end | 7,619 | 4,150 | 3,950 |
 
 A1 uploads no zeros: the skill, scratch, status and event words the kernel
 may read before writing are cleared on the device, frames (the biggest buffer)
 are not cleared at all because the kernel writes every frame word decode
 reads, and only the high-water prefix of a compiled skill row goes over
 PCIe. The end-to-end time before A1 was dominated by the upload, about 3.5 s
-of 7.5 s, almost all zero-filled scratch sent from the host.
+of 7.5 s, almost all zero-filled scratch sent from the host. A2 keeps the
+lane's launch buffers and the geometry table uploads in the context (a
+grow-only buffer set per lane, tables keyed by their course id list), so a
+batch allocates nothing and enqueues only its real bytes and its device-side
+clears on top.
 
 ## Bench
 

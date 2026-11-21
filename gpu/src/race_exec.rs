@@ -1139,6 +1139,61 @@ impl LaunchMode {
     }
 }
 
+/// Launch buffers for one race lane, bound to one queue. Grow-only: a set
+/// is rebuilt only when a launch needs more races or a wider runner count
+/// than its capacity holds.
+struct LaneSet {
+    cap: usize,
+    n: usize,
+    queue: Queue,
+    b_ri: Buffer<u32>,
+    b_pd: Buffer<f64>,
+    b_sk: Buffer<u32>,
+    b_scr_u: Buffer<u32>,
+    b_scr_d: Buffer<f64>,
+    b_frames: Buffer<f64>,
+    b_status: Buffer<u32>,
+    b_events: Buffer<u32>,
+}
+
+impl LaneSet {
+    fn new(queue: &Queue, cap: usize, n: usize) -> Result<LaneSet, String> {
+        Ok(LaneSet {
+            cap,
+            n,
+            queue: queue.clone(),
+            b_ri: empty_buf(queue, cap * RI_STRIDE, flags::MEM_READ_WRITE)?,
+            b_pd: empty_buf(queue, cap * RIL_STRIDE, flags::MEM_READ_WRITE)?,
+            b_sk: empty_buf(queue, cap * SK_STRIDE, flags::MEM_READ_ONLY)?,
+            b_scr_u: empty_buf(queue, cap * SCR_U_WORDS, flags::MEM_READ_WRITE)?,
+            b_scr_d: empty_buf(queue, cap * SRL_WORDS, flags::MEM_READ_WRITE)?,
+            b_frames: empty_buf(queue, cap * RACE_MAX_TICKS * n.max(1) * 6, flags::MEM_READ_WRITE)?,
+            b_status: empty_buf(queue, cap * ST_STRIDE, flags::MEM_READ_WRITE)?,
+            b_events: empty_buf(queue, cap * EV_STRIDE, flags::MEM_READ_WRITE)?,
+        })
+    }
+}
+
+/// Uploaded geometry tables for one course id list. The list order is the
+/// row order `RI_COURSE` indexes, so it is part of the key. Re-registered
+/// course geometry empties the cache.
+struct TableSet {
+    ids: Vec<i32>,
+    cs: Buffer<u32>,
+    sg_x: Buffer<f64>,
+    sg_xd: Buffer<f64>,
+    sg_z: Buffer<f64>,
+    sg_zd: Buffer<f64>,
+    sg_q: Buffer<f32>,
+    sg_qd: Buffer<f32>,
+    lm_b: Buffer<f32>,
+    lm_l: Buffer<f32>,
+    ce_b: Buffer<f32>,
+    ce_e: Buffer<f32>,
+    ce_i: Buffer<u32>,
+    ce_f: Buffer<u32>,
+}
+
 /// Launch state kept between batches: one gated device, one built race
 /// program, one built initialization program, engine data loaded once and
 /// the geometry registry (injected app copies ahead of the file fallback).
@@ -1152,6 +1207,8 @@ pub struct RaceContext {
     program: ocl::Program,
     init_program: ocl::Program,
     registry: GeometryRegistry,
+    lanes: Vec<LaneSet>,
+    table_cache: Vec<TableSet>,
     pub open_ms: OpenTimings,
 }
 
@@ -1182,6 +1239,8 @@ impl RaceContext {
             program,
             init_program,
             registry: GeometryRegistry::default(),
+            lanes: Vec::new(),
+            table_cache: Vec::new(),
             open_ms: OpenTimings {
                 spike_ms,
                 race_program_ms,
@@ -1213,13 +1272,33 @@ impl RaceContext {
     /// Register the app's course JSON as the kernel's geometry authority for
     /// the course, ahead of the file fallback (see `GeometryRegistry`).
     pub fn register_geometry(&mut self, course_id: i32, json_text: &str) -> Result<(), String> {
-        self.registry.register(course_id, json_text)
+        self.registry.register(course_id, json_text)?;
+        // Cached uploads stale out with the registry content they came from.
+        self.table_cache.clear();
+        Ok(())
     }
 
     /// One request into kernel inputs. The Err arm is a parse failure the
     /// batch caller reports per race instead of failing the batch.
     pub fn prepare(&mut self, request: &str, seed: i64) -> Result<Prepared, String> {
         prepare(request, seed, &self.globals, &self.grids, &self.courses, &mut self.registry)
+    }
+
+    /// Grows lane `k`'s buffer set to serve a launch of `mc` races and `n`
+    /// runners. Lanes stay grow-only, and a set rebuilt for a wider launch
+    /// keeps its queue, so a lane's buffers and commands never cross.
+    fn lane(&mut self, k: usize, mc: usize, n: usize) -> Result<(), String> {
+        if let Some(set) = self.lanes.get(k) {
+            if set.cap >= mc && set.n >= n {
+                return Ok(());
+            }
+            let queue = set.queue.clone();
+            self.lanes[k] = LaneSet::new(&queue, mc, n)?;
+        } else {
+            let queue = self.spike.queue();
+            self.lanes.push(LaneSet::new(&queue, mc, n)?);
+        }
+        Ok(())
     }
 
     /// Launches the unflagged entries in one kernel run and decodes every
@@ -1393,10 +1472,32 @@ impl RaceContext {
             final_corner_half: None,
         });
     }
-    let tables = crate::geometry::course_tables(&table_sets);
+    let table_ids: Vec<i32> = table_sets.iter().map(|c| c.course_id).collect();
+    let ti = match self.table_cache.iter().position(|t| t.ids == table_ids) {
+        Some(pos) => pos,
+        None => {
+            let tables = crate::geometry::course_tables(&table_sets);
+            let q = self.spike.queue();
+            self.table_cache.push(TableSet {
+                ids: table_ids,
+                cs: read_only(&q, &tables.cs)?,
+                sg_x: read_only(&q, &tables.sg_x)?,
+                sg_xd: read_only(&q, &tables.sg_xd)?,
+                sg_z: read_only(&q, &tables.sg_z)?,
+                sg_zd: read_only(&q, &tables.sg_zd)?,
+                sg_q: read_only(&q, &tables.sg_q)?,
+                sg_qd: read_only(&q, &tables.sg_qd)?,
+                lm_b: read_only(&q, &tables.lm_b)?,
+                lm_l: read_only(&q, &tables.lm_l)?,
+                ce_b: read_only(&q, &tables.ce_b)?,
+                ce_e: read_only(&q, &tables.ce_e)?,
+                ce_i: read_only(&q, &tables.ce_i)?,
+                ce_f: read_only(&q, &tables.ce_f)?,
+            });
+            self.table_cache.len() - 1
+        }
+    };
     let tables_ms = t_stage.elapsed().as_secs_f64() * 1e3;
-
-    let queue = self.spike.queue();
 
     let m = launched.len();
     // Frame-byte budget per launch. A full 144-horse race writes
@@ -1443,12 +1544,37 @@ impl RaceContext {
             ri_all[slot * RI_STRIDE..][..RI_STRIDE].copy_from_slice(&prepared[i].ri);
             pd_all[slot * RIL_STRIDE..][..RIL_STRIDE].copy_from_slice(&prepared[i].pd);
         }
-        let b_ri = read_write(&queue, &ri_all)?;
-        let b_pd = read_write(&queue, &pd_all)?;
-        // No host zeros go over PCIe. The device clears each buffer the
-        // kernel may read before writing. Frames need no clear: the kernel
-        // writes every frame word decode reads, debug tail blocks aside.
-        let b_sk = empty_buf(&queue, mc * SK_STRIDE, flags::MEM_READ_ONLY)?;
+        self.lane(0, mc, n)?;
+        let lane = &self.lanes[0];
+        let tabs = &self.table_cache[ti];
+        let queue = &lane.queue;
+        let b_ri = &lane.b_ri;
+        let b_pd = &lane.b_pd;
+        let b_sk = &lane.b_sk;
+        let b_scr_u = &lane.b_scr_u;
+        let b_scr_d = &lane.b_scr_d;
+        let b_frames = &lane.b_frames;
+        let b_status = &lane.b_status;
+        let b_events = &lane.b_events;
+        let b_cs = &tabs.cs;
+        let b_sg_x = &tabs.sg_x;
+        let b_sg_xd = &tabs.sg_xd;
+        let b_sg_z = &tabs.sg_z;
+        let b_sg_zd = &tabs.sg_zd;
+        let b_sg_q = &tabs.sg_q;
+        let b_sg_qd = &tabs.sg_qd;
+        let b_lm_b = &tabs.lm_b;
+        let b_lm_l = &tabs.lm_l;
+        let b_ce_b = &tabs.ce_b;
+        let b_ce_e = &tabs.ce_e;
+        let b_ce_i = &tabs.ce_i;
+        let b_ce_f = &tabs.ce_f;
+        b_ri.cmd().write(&ri_all).enq().map_err(|e| e.to_string())?;
+        b_pd.cmd().write(&pd_all).enq().map_err(|e| e.to_string())?;
+        // No host zeros go over PCIe. The device clears each reused buffer
+        // the kernel may read before writing, so a lane serves batches of
+        // any earlier width. Frames need no clear: the kernel writes every
+        // frame word decode reads, debug tail blocks aside.
         b_sk.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
         for (slot, &i) in chunk.iter().enumerate() {
             let hw = sk_high_water(&prepared[i].sk);
@@ -1460,11 +1586,6 @@ impl RaceContext {
                     .map_err(|e| e.to_string())?;
             }
         }
-        let b_scr_u = empty_buf(&queue, mc * SCR_U_WORDS, flags::MEM_READ_WRITE)?;
-        let b_scr_d = empty_buf(&queue, mc * SRL_WORDS, flags::MEM_READ_WRITE)?;
-        let b_frames = empty_buf(&queue, mc * RACE_MAX_TICKS * n * 6, flags::MEM_READ_WRITE)?;
-        let b_status = empty_buf(&queue, mc * ST_STRIDE, flags::MEM_READ_WRITE)?;
-        let b_events = empty_buf(&queue, mc * EV_STRIDE, flags::MEM_READ_WRITE)?;
         b_scr_u.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
         b_scr_d.cmd().fill(0.0f64, None).enq().map_err(|e| e.to_string())?;
         b_status.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
@@ -1472,19 +1593,6 @@ impl RaceContext {
         if chunk.iter().any(|&i| prepared[i].ri[RI_DEBUG_TICK] != 0) {
             b_frames.cmd().fill(0.0f64, None).enq().map_err(|e| e.to_string())?;
         }
-        let b_cs = read_only(&queue, &tables.cs)?;
-        let b_sg_x = read_only(&queue, &tables.sg_x)?;
-        let b_sg_xd = read_only(&queue, &tables.sg_xd)?;
-        let b_sg_z = read_only(&queue, &tables.sg_z)?;
-        let b_sg_zd = read_only(&queue, &tables.sg_zd)?;
-        let b_sg_q = read_only(&queue, &tables.sg_q)?;
-        let b_sg_qd = read_only(&queue, &tables.sg_qd)?;
-        let b_lm_b = read_only(&queue, &tables.lm_b)?;
-        let b_lm_l = read_only(&queue, &tables.lm_l)?;
-        let b_ce_b = read_only(&queue, &tables.ce_b)?;
-        let b_ce_e = read_only(&queue, &tables.ce_e)?;
-        let b_ce_i = read_only(&queue, &tables.ce_i)?;
-        let b_ce_f = read_only(&queue, &tables.ce_f)?;
         upload_ms += t_stage.elapsed().as_secs_f64() * 1e3;
 
         let t_stage = std::time::Instant::now();
@@ -1493,27 +1601,27 @@ impl RaceContext {
             .name("race")
             .queue(queue.clone())
             .global_work_size(mc)
-            .arg(&b_ri)
-            .arg(&b_pd)
-            .arg(&b_scr_u)
-            .arg(&b_scr_d)
-            .arg(&b_frames)
-            .arg(&b_status)
-            .arg(&b_cs)
-            .arg(&b_sg_x)
-            .arg(&b_sg_xd)
-            .arg(&b_sg_z)
-            .arg(&b_sg_zd)
-            .arg(&b_sg_q)
-            .arg(&b_sg_qd)
-            .arg(&b_lm_b)
-            .arg(&b_lm_l)
-            .arg(&b_ce_b)
-            .arg(&b_ce_e)
-            .arg(&b_ce_i)
-            .arg(&b_ce_f)
-            .arg(&b_sk)
-            .arg(&b_events)
+            .arg(b_ri)
+            .arg(b_pd)
+            .arg(b_scr_u)
+            .arg(b_scr_d)
+            .arg(b_frames)
+            .arg(b_status)
+            .arg(b_cs)
+            .arg(b_sg_x)
+            .arg(b_sg_xd)
+            .arg(b_sg_z)
+            .arg(b_sg_zd)
+            .arg(b_sg_q)
+            .arg(b_sg_qd)
+            .arg(b_lm_b)
+            .arg(b_lm_l)
+            .arg(b_ce_b)
+            .arg(b_ce_e)
+            .arg(b_ce_i)
+            .arg(b_ce_f)
+            .arg(b_sk)
+            .arg(b_events)
             .build()
             .map_err(|e| e.to_string())?;
         match mode {
@@ -1943,17 +2051,6 @@ fn read_only<T: ocl::OclPrm>(queue: &Queue, data: &[T]) -> Result<Buffer<T>, Str
     let buffer = Buffer::<T>::builder()
         .queue(queue.clone())
         .flags(flags::MEM_READ_ONLY)
-        .len(data.len())
-        .build()
-        .map_err(|e| e.to_string())?;
-    buffer.cmd().write(data).enq().map_err(|e| e.to_string())?;
-    Ok(buffer)
-}
-
-fn read_write<T: ocl::OclPrm>(queue: &Queue, data: &[T]) -> Result<Buffer<T>, String> {
-    let buffer = Buffer::<T>::builder()
-        .queue(queue.clone())
-        .flags(flags::MEM_READ_WRITE)
         .len(data.len())
         .build()
         .map_err(|e| e.to_string())?;
