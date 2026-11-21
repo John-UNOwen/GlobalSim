@@ -588,11 +588,6 @@ fn gate_reasons_enumerates_exactly_the_documented_fallbacks() {
             Some(accepted()),
         ),
         (
-            "retail later stamina",
-            format!(r#"{{"courseId":10504,"experimentalRetailRuntime":true,"experimentalLaterStaminaMechanics":true,"horses":[{}]}}"#, twenty_one()),
-            Some(accepted()),
-        ),
-        (
             "retail roster past 144",
             format!(r#"{{"courseId":10504,"experimentalRetailRuntime":true,"horses":[{}]}}"#, vec!["{}"; 145].join(",")),
             Some(accepted()),
@@ -616,7 +611,6 @@ fn gate_reasons_enumerates_exactly_the_documented_fallbacks() {
         "non-grid fields above 24 runners are outside the validated lane band",
         "non-retail runtime",
         "World geometry requires the experimental runtime and standard starting grid",
-        "experimentalLaterStaminaMechanics draws from a live solver stream the retail kernel resolves host-side",
     ]
     .into_iter()
     .map(str::to_string)

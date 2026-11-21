@@ -530,12 +530,6 @@ pub fn build(request: &str, seed: i64, race: &RaceGpu) -> Result<String, String>
     if root.get("traceConservePower").and_then(Value::as_bool) == Some(true) {
         return Err("traceConservePower is outside the full GPU lane".to_string());
     }
-    if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) == Some(true) {
-        return Err(
-            "experimentalLaterStaminaMechanics draws from a live solver stream \
-             the retail kernel resolves host-side".to_string(),
-        );
-    }
     let horses = root.get_array("horses")?;
     if horses.len() != n {
         return Err("roster length changed".to_string());

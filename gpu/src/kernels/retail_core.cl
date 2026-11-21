@@ -185,7 +185,12 @@
 #define PD_FC_HALF0 (PD_CF_DIST + 11)          // final_corner_half start, NaN when the course has none
 #define PD_FC_HALF1 (PD_CF_DIST + 12)          // final_corner_half end
 #define PD_RUN0 (PL_FRONT_LANE + 32)           // per runner, stride PD_RUN_STRIDE
-#define PD_RUN_STRIDE 11
+#define PD_RUN_STRIDE 14
+// The later-stamina request flag and the solver stream pair left by the
+// engine's construction draws, per runner (race_exec.rs PRD_LATER).
+#define PRD_LATER 11
+#define PRD_R30_HI 12
+#define PRD_R30_LO 13
 #define PRD_POWF 0             // per-runner spurt powf bits as the integer value
 #define PRD_DUEL_T 1           // duel target-speed modifier, f64
 #define PRD_DUEL_A 2           // duel accel modifier, f64
@@ -318,6 +323,9 @@
 #define CP_KAKARI 512u
 #define CP_FIRED 1024u
 #define CP_ASIT 2048u
+#define CP_KEEP 4096u    // stamina_keep_active
+#define CP_CMP 8192u     // compete_spurt_active
+#define CP_SEC 16384u    // secure_lead_active
 // Integer slots end.
 #define SCR_SF (SCR_STATE + SI_STRIDE)
 // f32 state (raw-bit floats), one RACE_MAXR-wide column per slot.
@@ -414,6 +422,8 @@
 #define SCR_SK (SCR_BANKS + RACE_MAXR * BANK_WORDS)
 #define SK_SEQN 40
 #define SK_TOK_SPOT 1u
+#define SK_TOK_CMP 2u    // the compete-before-spurt target receiver token
+#define SK_TOK_SEC 3u    // the secure-lead target receiver token
 #define SK_TOK_DUEL 4u
 #define SK_TOK_SKILL 16u
 // A skill token packs (record, effect slot): the slot lives in the low three
@@ -479,7 +489,7 @@
 // Per-race scratch f64, one RACE_MAXR-wide column per slot (field base +
 // runner index). Array fields keep RACE_MAXR slots per element:
 // base + element * RACE_MAXR + r.
-#define SD_SLOTS (2 * RACE_MAXR + 83)
+#define SD_SLOTS (2 * RACE_MAXR + 92)
 #define SD_STRIDE (SD_SLOTS * RACE_MAXR)
 #define SD_SLOT(n) ((n) * RACE_MAXR)
 #define SD_POS SD_SLOT(0)
@@ -546,6 +556,16 @@
 #define SD_SPOT_MOD (SD_STAM_A + RACE_MAXR) // spot struggle modifier, captured at entry
 #define SD_DUEL_T (SD_SPOT_MOD + RACE_MAXR) // duel target-speed modifier, captured at entry
 #define SD_DUEL_A (SD_DUEL_T + RACE_MAXR)   // duel accel modifier, captured at entry
+#define SD_RAWST (SD_DUEL_A + RACE_MAXR)    // horse.raw_stamina, initialization output 5
+#define SD_HPP (SD_RAWST + RACE_MAXR)       // horse.power field, f64, static on retail
+#define SD_CMPM (SD_HPP + RACE_MAXR)        // compete target modifier, f64, folded as f32
+#define SD_CMPT (SD_CMPM + RACE_MAXR)       // compete_spurt_timer, f64 (f32-rounded steps)
+#define SD_CMPCL (SD_CMPT + RACE_MAXR)      // compete_spurt_cooldown, f64 (f32-rounded steps)
+#define SD_SECM (SD_CMPCL + RACE_MAXR)      // secure target modifier, f64, folded as f32
+#define SD_SECT (SD_SECM + RACE_MAXR)       // secure_lead_timer, f64 (f32-rounded steps)
+#define SD_SECCL (SD_SECT + RACE_MAXR)      // secure_lead_cooldown, f64 (f32-rounded steps)
+#define SD_R30H (SD_SECCL + RACE_MAXR)      // solver stream hi, exact u32 in f64
+#define SD_R30L (SD_R30H + RACE_MAXR)       // solver stream lo, advanced per draw
 #define SRL_RUNNER 0
 #define SRL_HP SD_STRIDE          // hp columns, SH_STRIDE per runner
 #define SH_STRIDE 8
@@ -570,7 +590,7 @@
 
 // ---------------------------------------------------------------------------
 // Per-race status output, u32 words at status + id * ST_STRIDE.
-#define ST_STRIDE (ST_SPFIRST0 + RACE_MAXR)
+#define ST_STRIDE (ST_LATER_SYB + 1)
 #define ST_FALLBACK 0          // 0 none, 1 unsupported domain (tick in ST_ARG)
 #define ST_ARG 1               // tick or argument of the fallback
 #define ST_TICKS 2             // loop iterations (frames carry ST_TICKS+1)
@@ -593,6 +613,13 @@
 #define ST_SPURTT0 (ST_SNAPW0 + 2 * RACE_MAXR)  // actual spurt clock f64 bits
 #define ST_SPURTD0 (ST_SPURTT0 + 2 * RACE_MAXR) // actual spurt distance f64 bits
 #define ST_SPFIRST0 (ST_SPURTD0 + 2 * RACE_MAXR)
+// Per-race later-stamina activation counters: keep, compete, secure, the
+// keep-gated skips of both entry checks, and the staminasyoubu fires.
+#define ST_LATER_KEEP (ST_SPFIRST0 + RACE_MAXR)
+#define ST_LATER_CMP (ST_LATER_KEEP + 1)
+#define ST_LATER_SEC (ST_LATER_CMP + 1)
+#define ST_LATER_GATE (ST_LATER_SEC + 1)
+#define ST_LATER_SYB (ST_LATER_GATE + 1)
 
 // Race frames output: frames + (id * RACE_MAX_TICKS + tick) * n_runners * 6
 // + runner * 6, in the engine's row order pos, speed, hp, lane, rushing,
@@ -4684,14 +4711,18 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
     const int n, const double distance, __global uint* ev, __global uint* st,
     __global uint* bank, const int paired) {
     __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
-    // The engine's activation hook emits one skillEvents entry per Own-side
-    // fire (an immediate one, or a pending entry the deactivate hook or the
-    // race-end finalizer writes once). rd[0] is the wire skill id.
-    race_event(ev, st, r, rd[0]);
-    // additional_skill_event(2) runs before any effect draws: every running
-    // skill that still owns an open instance or a later turn queues one more
-    // activation, its own skill id excluded (race_solver.rs:1842-1855, 2472).
-    {
+    // The injected records carry the sid 0 sentinel. The engine's reply hooks
+    // parse the id and skip it everywhere (lib.rs:656-659, race_solver.rs
+    // :2448-2451, :2472), so no event or ledger entry is written for them.
+    const int sid0 = rd[0] == 0u;
+    if (!sid0) {
+        // The engine's activation hook emits one skillEvents entry per Own-side
+        // fire (an immediate one, or a pending entry the deactivate hook or the
+        // race-end finalizer writes once). rd[0] is the wire skill id.
+        race_event(ev, st, r, rd[0]);
+        // additional_skill_event(2) runs before any effect draws: every running
+        // skill that still owns an open instance or a later turn queues one more
+        // activation, its own skill id excluded (race_solver.rs:1842-1855, 2472).
         __global uint* list = scr + SK_RUN + r * (1 + SK_RUNN);
         const double floor = sd[SD_AFLOOR + r];
         for (int k = 1; k <= (int)list[0]; k++) {
@@ -4722,7 +4753,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
     __global uint* tgtp = 0;
     int tgt_res = 0;
     __global uint* tgt0 = 0;
-    if (scr[SCR_RC_ON] != 0u) {
+    if (scr[SCR_RC_ON] != 0u && !sid0) {
         tgt_res = 6 + n_eff * (1 + RACE_MAXR);
         __global uint* tgt = rc_take(scr, st, SCR_RC_TGT, RC_TGT_CAP, tgt_res);
         if (tgt != 0) {
@@ -4740,8 +4771,14 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
     for (int e = 0; e < n_eff; e++) {
         const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * (eff_base + e);
         const int kind = (int)ef[0];
-        const double modifier = as_double((ulong)ef[6] | ((ulong)ef[7] << 32))
+        double modifier = as_double((ulong)ef[6] | ((ulong)ef[7] << 32))
             * sk_vu_factor(bank, scr, si, r, kind, (int)ef[2], paired);
+        // The staminasyoubu wire modifier is replaced at activation by the
+        // live formula (race_solver.rs:2496-2498, race_solver_builder.rs:181-184):
+        // the packed distance factor times sqrt(raw stamina - 1200) times 0.0085.
+        if (kind == 27 && (rd[2] & SK_FLAG_SYOUBU) != 0u) {
+            modifier = (sqrt(fmax(sd[SD_RAWST + r] - 1200.0, 0.0)) * 0.0085) * modifier;
+        }
         sk_tok_stage(scr, SK_TOK_EFF((uint)rec, (uint)e), modifier);
         if (tgtp != 0) {
             // apply_activation selects per effect before any of its delivery
@@ -4840,6 +4877,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                         // caster.
                         sd[SD_PENDING_HP + j] += (double)(convert_float_rte(
                             shl[j * SH_STRIDE + SH_MAX]) * convert_float_rte(modifier));
+                        si[SI_CPFLAGS + j] &= ~CP_KEEP;
                     }
                     if (kind == SK_EFF_GOAL_OUT || kind == SK_EFF_GOAL_IN
                         || kind == SK_EFF_IMMUNE) {
@@ -4887,6 +4925,8 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                                 (float)sd[SD_STAM_A + j] + convert_float_rte(modifier);
                             sd[SD_STAM_A + j] = (double)value;
                             sd[SD_STAM + j] = fmin(fmax((double)value, 1.0), 2000.0);
+                            // Engine :2558 bumps raw_stamina beside the field.
+                            sd[SD_RAWST + j] = fmax(sd[SD_RAWST + j] + modifier, 1.0);
                         } else {
                             const float value =
                                 (float)sd[SD_HPG_A + j] + convert_float_rte(modifier);
@@ -4949,6 +4989,8 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
             }
             sd[SD_PENDING_HP + r] += (double)(convert_float_rte(shl[r * SH_STRIDE + SH_MAX])
                 * convert_float_rte(modifier));
+            // The same arm resets Stamina Keep (race_solver.rs:2632).
+            si[SI_CPFLAGS + r] &= ~CP_KEEP;
             continue;
         }
         if (kind == SK_EFF_SPEEDUP) {
@@ -4978,6 +5020,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                 const float value = (float)sd[SD_STAM_A + r] + convert_float_rte(modifier);
                 sd[SD_STAM_A + r] = (double)value;
                 sd[SD_STAM + r] = fmin(fmax((double)value, 1.0), 2000.0);
+                sd[SD_RAWST + r] = fmax(sd[SD_RAWST + r] + modifier, 1.0);
                 if (init_pass != 0) {
                     sk_hp_stamina_reset(si, sd, shl, pd, dist_f, r);
                 }
@@ -5075,7 +5118,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
     // live (runner, id) slot's ordinal, else takes the next sequence number
     // (lib.rs:660-682).
     __global uint* act = 0;
-    if (scr[SCR_RC_ON] != 0u) {
+    if (scr[SCR_RC_ON] != 0u && !sid0) {
         act = rc_take(scr, st, SCR_RC_ACT, RC_ACT_CAP, 10);
     }
     if (act != 0) {
@@ -5484,10 +5527,20 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
             if (init_pass != 0 && (rd[2] & SK_FLAG_INIT_DEFER) != 0u) {
                 continue;
             }
+            // The staminasyoubu extra condition (race_solver_builder.rs:833):
+            // raw stamina past 1200 and the current speed at or over the last
+            // spurt speed, both read live at the scan.
+            if ((rd[2] & SK_FLAG_SYOUBU) != 0u &&
+                (sd[SD_RAWST + r] <= 1200.0 || sd[SD_CS + r] < sd[SD_LSS + r])) {
+                continue;
+            }
             const double gap = sd[SD_POS + (int)rs[RS_ORDER + 0]] - pos;
             skills_fire(sk, sks, skd, scr, si, shl, sd, pd, sf, rs, rec, r,
                 shl[r * SH_STRIDE + SH_HP], fmax(gap, 0.0), dist_f, init_pass, n,
                 distance, ev, st, bank, paired);
+            if ((rd[2] & SK_FLAG_SYOUBU) != 0u) {
+                st[ST_LATER_SYB] += 1u;
+            }
         }
         if (p == 0) {
             // The pass end gives every running skill still short of a turn
@@ -5563,6 +5616,21 @@ static void sk_token_sync(__global uint* scr, __global const uint* si, const int
         } else {
             sk_seq_remove(tq, SK_TOK_SPOT);
         }
+        const uint cp = si[SI_CPFLAGS + r];
+        if ((cp & CP_CMP) != 0u) {
+            if (sk_seq_find(tq, SK_TOK_CMP) < 0) {
+                sk_seq_push(tq, SK_TOK_CMP);
+            }
+        } else {
+            sk_seq_remove(tq, SK_TOK_CMP);
+        }
+        if ((cp & CP_SEC) != 0u) {
+            if (sk_seq_find(tq, SK_TOK_SEC) < 0) {
+                sk_seq_push(tq, SK_TOK_SEC);
+            }
+        } else {
+            sk_seq_remove(tq, SK_TOK_SEC);
+        }
     }
 }
 
@@ -5633,6 +5701,10 @@ static int sk_has_speed(__global const uint* sk, __global const uint* scr,
                 target = target + convert_float_rte((int)pd[PD_LIVE_GUTS]
                     ? sd[SD_DUEL_T + r] : pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_DUEL_T]);
             }
+        } else if (tok == SK_TOK_CMP) {
+            target = target + convert_float_rte(sd[SD_CMPM + r]);
+        } else if (tok == SK_TOK_SEC) {
+            target = target + convert_float_rte(sd[SD_SECM + r]);
         } else {
             target = target + sk_tok_value(sk, scr, tok, SK_EFF_TARGET);
         }
@@ -5641,9 +5713,10 @@ static int sk_has_speed(__global const uint* sk, __global const uint* scr,
 }
 
 // The ordinary (token-excluded) receiver values for one physics chain, in
-// registration order, so the existing mods arguments keep the engine chain.
-static int sk_mods(__global const uint* sk, __global const uint* scr, const int r,
-    const int kind, __global float* out) {
+// registration order. The compete and secure tokens have no table record,
+// their values are the sd columns captured at activation.
+static int sk_mods(__global const uint* sk, __global const uint* scr,
+    __global const double* sd, const int r, const int kind, __global float* out) {
     const __global uint* q = scr + (kind == SK_EFF_TARGET ? SK_TSEQ
         : (kind == SK_EFF_ACCEL ? SK_ASEQ
             : (kind == SK_EFF_LANESPEED ? SK_LSEQ : SK_CSEQ))) + r * SK_SEQN;
@@ -5654,6 +5727,14 @@ static int sk_mods(__global const uint* sk, __global const uint* scr, const int 
             break;
         }
         if (tok == SK_TOK_SPOT || tok == SK_TOK_DUEL) {
+            continue;
+        }
+        if (tok == SK_TOK_CMP) {
+            out[m++] = convert_float_rte(sd[SD_CMPM + r]);
+            continue;
+        }
+        if (tok == SK_TOK_SEC) {
+            out[m++] = convert_float_rte(sd[SD_SECM + r]);
             continue;
         }
         out[m++] = sk_tok_value(sk, scr, tok, kind);

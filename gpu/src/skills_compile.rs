@@ -290,6 +290,13 @@ pub fn plan_classic_with(root: &Value, course: &Value, extras: &ClassicExtras) -
     plan_lane(root, course, Lane::Classic, Some(extras))
 }
 
+/// Compile against the retail profile with the host inputs the retail lane
+/// reads: only the later-stamina request flag drives the injected
+/// staminasyoubu records (lib.rs:547, race_solver_builder.rs:817-848).
+pub fn plan_retail_with(root: &Value, course: &Value, extras: &ClassicExtras) -> SkillsPlan {
+    plan_lane(root, course, Lane::Retail, Some(extras))
+}
+
 fn plan_lane(root: &Value, course: &Value, lane: Lane, extras: Option<&ClassicExtras>) -> SkillsPlan {
     let mut c = Compiler {
         words: vec![0; SK_STRIDE],
@@ -325,6 +332,10 @@ fn plan_lane(root: &Value, course: &Value, lane: Lane, extras: Option<&ClassicEx
                 .and_then(Value::as_array)
                 .map(|a| a.len())
                 .unwrap_or(0);
+            c.retail_injections(course, extras, runners);
+            if c.reason.is_some() {
+                return c.finish();
+            }
             c.classic_injections(course, extras, runners);
             return c.finish();
         }
@@ -339,6 +350,12 @@ fn plan_lane(root: &Value, course: &Value, lane: Lane, extras: Option<&ClassicEx
     }
     let entries: Vec<&Value> = horses.as_array().map(|a| a.iter().collect()).unwrap_or_default();
     c.pack_team_stats(horses);
+    // The injected staminasyoubu records must precede the wire records in
+    // the table, so they are packed before the wire loop.
+    c.retail_injections(course, extras, entries.len());
+    if c.reason.is_some() {
+        return c.finish();
+    }
     // The engine defaults wisdomChecks to true (lib.rs:341) and the classic
     // builder then rolls the wisdom lottery per wisdomCheck entry
     // (race_solver_builder.rs:1006-1012), so the host replays it per runner.
@@ -2422,6 +2439,39 @@ impl Compiler {
         self.nrec += 1;
     }
 
+    /// The engine's staminasyoubu hook on the retail lane. The engine appends
+    /// these records last, so its descending pending scan visits them before
+    /// every wire record of the runner (race_solver.rs:2188-2321). The kernel
+    /// scan visits the table in ascending order, so the records land at the
+    /// front of the table to keep that visit order.
+    fn retail_injections(&mut self, course: &Value, extras: Option<&ClassicExtras>, runners: usize) {
+        if self.lane != Lane::Retail {
+            return;
+        }
+        let Some(extras) = extras else {
+            return;
+        };
+        if !extras.later_stamina {
+            return;
+        }
+        let distance = match course.get_f64("distance") {
+            Ok(v) => v,
+            Err(why) => {
+                self.unsupported(format!("course distance: {why}"));
+                return;
+            }
+        };
+        if distance <= 2100.0 {
+            return;
+        }
+        for r in 0..runners {
+            self.pack_staminasyoubu(r, distance);
+            if self.reason.is_some() {
+                return;
+            }
+        }
+    }
+
     /// The engine's two construction hooks, replayed after the wire skills:
     /// asitame for every runner past the 1200 raw power arm, and staminasyoubu
     /// for every runner when the request flagged later stamina on a course
@@ -2494,7 +2544,10 @@ impl Compiler {
         self.words[at + 3] = w[1];
         self.nreg += 1;
         let prog = self.nprog;
+        // The retail evaluator reads the truthy constant from the operand
+        // word; the classic evaluator ignores it.
         self.words[SK_PROGRAMS + SK_PSTRIDE * self.nprog] = OP_TRUE;
+        self.words[SK_PROGRAMS + SK_PSTRIDE * self.nprog + 1] = 1;
         self.nprog += 1;
         let arm = self.narm;
         let at = SK_ARMS + SK_ASTRIDE * self.narm;

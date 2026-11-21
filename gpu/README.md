@@ -1756,12 +1756,12 @@ as flat word streams, one header word per channel.
 | `runningStyle`, `rushingStartCount`, `rushingPenaltyCount`, `hpEmptyOnRace`, `startDelayTime`, `lastSpurtStartDistance`, `finishTime`, `finishTimeRaw`, `finishOrder`, frames, version keys | unchanged | the compact exports, replay capture and static keys |
 
 The full lane refuses, by name at `full_reply::build` and by gate before the
-run: `singleMode`, `traceConservePower` and `experimentalLaterStaminaMechanics`
-(wave 11 moved the `singleMode` and `experimentalLaterStaminaMechanics`
-refusals onto both lanes and ported the compact `traceConservePower` ignore,
-see "Wave-11 equivalence closures"). Grid races answer full too: wave 13b
-rebuilt the staggered roster ranks from the grid starts, see "Wave 13b"
-below.
+run: `singleMode` and `traceConservePower` (wave 11 moved the `singleMode`
+refusal onto both lanes and ported the compact `traceConservePower` ignore,
+see "Wave-11 equivalence closures"; wave 18 ported
+`experimentalLaterStaminaMechanics` on the retail lane, see "Wave 18"). Grid
+races answer full too: wave 13b rebuilt the staggered roster ranks from the
+grid starts, see "Wave 13b" below.
 
 ## Wave-11 equivalence closures
 
@@ -1809,8 +1809,9 @@ The four wave-10 named refusals, each classified against the engine:
   stamina keep, compete-before-spurt and secure-lead per-tick systems
   (`race_solver.rs:2767,2948,2998`, `update_competition_mechanics:2746`) and
   the reply echoes the flag (`lib.rs:1071`). Wave 11 refused the `true` form
-  by name on both lanes; wave 13a ports it to the classic lane up to 2100 m
-  and keeps the retail refusal, see "Wave 13a" in the wave history above.
+  by name on both lanes; wave 13a ported it to the classic lane up to 2100 m
+  and wave 18 closed the retail lane, see "Wave 18" in the wave history
+  below.
 - Grid mode is engine-supported end to end: a 21-horse grid request runs and
   the engine answers full, with `experimentalGridVersion` (`lib.rs:1137`).
   Wave 11 ran grid compact bit-exactly and refused only the full reply,
@@ -1908,7 +1909,6 @@ and proves every one of them is reachable, nothing else is (`gate_reasons_enumer
 | `experimentalLaterStaminaMechanics must be a boolean.`, `traceConservePower must be a boolean`, `experimentalRetailStartup must be a boolean` | engine parse errors, `lib.rs:343-349` | quoted verbatim | engine errors, `equivalence_gate::engine_rejected_request_shapes_quote_their_error_texts` proves each byte-equal on kernel and gate, `parity_audit` probes each |
 | `non-retail runtime` | the engine answers on its classic solver | the retail kernel is a retail-runtime port, it refuses rather than approximate, `race_exec::prepare` | limit, `parity_audit` probe. Not closable on this lane: the classic physics is a separate kernel, the classic lane answers these requests |
 | `retail runtime belongs to the retail lane` | the retail config switches the solver (`lib.rs:1514-1523`) | the classic kernel is a classic-runtime port, `classic_exec::prepare` | limit, `facade_gate` quotes it, `parity_audit` probes it. Not closable on this lane: the mirror of the row above |
-| `experimentalLaterStaminaMechanics draws from a live solver stream the retail kernel resolves host-side` | the three systems draw live (`race_solver.rs:2751-2756`) | retail lane, `race_exec::prepare` | limit, `facade_gate` quotes it, `parity_audit` probes it. The classic lane ports the systems and the staminasyoubu injection (wave 13a and 16), the retail kernel cannot host them: it carries no live stream consumer |
 | `traceConservePower is outside the full GPU lane` | the mode only adds reply keys (`lib.rs:1115-1123`) | `full_reply::build`, the compact lane answers | limit, `equivalence_gate::trace_conserve_power_is_reply_diagnostics_only` asserts the reason. Not closable yet: the conserve reply channels ride the compact classic lane only |
 | a horse skill with no entry in the request's skillData | the retail config errors at the init lookup, `Err("Missing retail initialization field {id}")` (`retail_initialization.rs:222`), the classic lane hits `Err("bad skill ID {id}")` (`race_solver_builder.rs:496`) and retries after dropping the skill (`lib.rs:726-739`) | retail lane, `skills_compile` refuses with the engine's init text, the classic lane drops the skill and answers | engine error, `equivalence_gate::a_missing_skill_data_entry_quotes_the_engine_error` proves retail kernel equals engine, `classic_folds::a_classic_build_error_drops_only_that_skill` and `wave12c_classic_gate::a_missing_skill_data_entry_drops_and_answers_like_the_engine` prove the classic drop |
 | `roster size outside the kernel's range` | the engine answers any roster it is given | capacity refusal past `RACE_MAXR` (120 retail) or `CLS_MAXR` (120 classic) | limit, `equivalence_gate::rosters_beyond_the_kernel_cap_refuse_by_size` plus the parity probes. Not closable at the strides: every kernel buffer is sized at 120 |
@@ -1933,6 +1933,11 @@ answers after dropping the skill (`lib.rs:726-739`), so the classic compiler
 now drops it too, and the retail kernel quotes the engine's own init lookup
 error, "Missing retail initialization field {id}"
 (`retail_initialization.rs:222`).
+
+Wave 18 removed the row "experimentalLaterStaminaMechanics draws from a live
+solver stream the retail kernel resolves host-side": the retail lane now
+ports the flag, the systems and the injection (see "Wave 18: the retail
+later-stamina port").
 
 Wave 12b landed the classic skill runtime end to end. The compiler profile
 (`skills_compile::plan_classic`) compiles the classic effect-value chain
@@ -2057,13 +2062,11 @@ drift scenes (see "Wave 17: the classic-lane section bake"). This wave's
 scene set keeps the four clean-tier courses, whose bit-exactness now also
 exercises the fixed bake.
 
-The retail lane keeps its refusal, now with the architectural reason: the
-three systems draw live from the shared solver stream whose positions follow
-the physics, while the retail runtime kernel carries no live stream consumer
-at all (randomness enters as host-resolved reservations, `SI_RESRV`
-`retail_core.cl:307`, and precomputed sub-streams), so the draws cannot be
-placed there. The reason text is "experimentalLaterStaminaMechanics draws
-from a live solver stream the retail kernel resolves host-side".
+The retail refusal that closed this era ("experimentalLaterStaminaMechanics
+draws from a live solver stream the retail kernel resolves host-side") was
+removed by wave 18: the stream is not host-only after all, the construction
+pair is seed-only and host-replayable, and the live draws advance a scratch
+pair inside the kernel. See "Wave 18: the retail later-stamina port" below.
 
 For activation evidence the kernel counts, per race, keep sets, compete
 activations, secure activations, keep's gate stops and staminasyoubu fires
@@ -2216,6 +2219,91 @@ seventeen scenes answer with every frame column `to_bits`-equal against the
 CPU engine and the full reply byte-equal. `wave13a_later_stamina` keeps its
 four clean-tier courses unchanged.
 
+## Wave 18: the retail later-stamina port and the high-power asitame rosters
+
+`experimentalLaterStaminaMechanics` moves from the classic lane (wave 13a) to
+the retail lane. The engine's three per-tick systems (`race_solver.rs:2751-2756`)
+run in `update_competition_mechanics`, which retail reaches once per tick
+through `step_field_conditions` (`race_field_retail.rs:335-341`), and the
+kernel's field block (`race.cl:906-924`) sits at the same point. The three
+draws come from each runner's `Rule30CARng` solver stream: the keep latch
+(`race_solver.rs:2778`), `roll_competition_wisdom` for compete (`:2973`) and
+the secure roll (`:3024`). The retail kernel has no solver, so the host
+replays the construction consumption order at prepare (`race_exec.rs:865-896`)
+into the pd runner row: the gate roll, the wisdom lottery, the start-delay
+random, the two hill int32s per slope (the hill roll itself reads a separate
+`hill_rng` and never moves the pair), the kakari roll and the 28 randoms
+after it leave the pair exactly where the engine's stream stands at race
+start, and the kernel advances the pair from there in its writable sd
+scratch. The
+staminasyoubu injection above 2100 m (`race_solver_builder.rs:817-848`) is
+packed per runner ahead of the wire records (`skills_compile.rs:2447-2473`):
+retained, primary, region `[2d/3, d]`, effect kind 27 value_usage 1 with the
+course distance factor, cooldown 0, and the extra condition gate in the scan
+(`retail_core.cl:5530-5536`) reads raw stamina over 1200 and current speed at
+or over the last spurt speed live at the visit. The five counters
+(`ST_LATER_KEEP` to `ST_LATER_SYB`) read back in `later_stats`.
+
+The injection carried one real port bug, found by the gate. The retail
+condition evaluator pushes `nd[1] != 0` for `OP_TRUE` (`retail_core.cl:3710`),
+while the classic evaluator treats `OP_TRUE` as unconditional true. The
+injection pack, written for the classic lane, left the operand word zero, so
+the injected record's one-arm condition was always false on retail and the
+record never fired, silently. The pack now writes the truthy operand
+(`skills_compile.rs:2546-2551`), which the classic evaluator ignores.
+
+`wave18_gate::retail_later_stamina_answers_bit_exact` runs three retail
+scenes, seeds 1 to 3, with a flag-off control per scene (all five counters
+zero there). The plain v77 roster at 2000 m proves the keep latch and its
+gating live (the injection stays absent, the engine never injects at or below
+2100 m, and the staminasyoubu counter there is the boundary check). The same
+roster with the wave 12b mid-race recovery (669606, kind 9 at
+`distance_rate>=55`) proves compete and secure live: the recovery activation
+is the engine's in-window clear of the keep latch (`race_solver.rs:2632`,
+kernel `retail_core.cl:4993`), without which the latch, armed from the start
+whenever the HP ratio runs under the remaining fraction times 1.04, blocks
+every roll in the window. The 2400 m course 10108 with stamina 30000 and
+power 600 proves the injection: nine fires per race, matching the engine. Frame
+columns are `to_bits`-equal against the CPU engine and the full replies are
+byte-equal per scene. Battery totals: keep 81, compete 23, secure 11, gated
+rolls 48780, staminasyoubu 27.
+
+The asitame release, restated for this wave's readers:
+
+| facet | engine | GPU |
+| --- | --- | --- |
+| arm | `with_asitame`, injected unconditionally for every runner at construction (`lib.rs:546`, `race_solver_builder.rs:786-814`), gated by raw power past 1200 | the classic lane arms it host-side at compile from `extras.raw_power` (`skills_compile.rs:2479-2517`); retail keeps its kernel-native release path |
+| fire | once, in the skills priority scan, parked at cooldown `INFINITY` (`race_solver.rs:2167-2169`) | one record visit, no rng draw, value_usage 1, fired once |
+| release | `release_conserve_power_now` (`race_solver.rs:2365-2380`) | `asitame_release` (`retail_core.cl:3124`), the classic CONS channel |
+| events | `conservePowerEvents` (`lib.rs:637-643`), never `skillEvents` | the same channel, the classic `skcns` release count |
+
+`wave18_gate::asitame_high_power_rosters_answer_bit_exact` deepens the
+classic asitame verification onto full-field rosters past the raw 1200 power
+arm (wisdom, stamina and power rewritten, guts and speed at 600): 10504
+without the flag, and the same roster on 2400 m 10108 with the flag, where
+the asitame releases and the staminasyoubu injection coexist in one runner
+without interference. Frames and replies match the engine and the kernel's
+conserve release count equals the engine's `conservePowerEvents` count
+(`lib.rs:637-643`, asitame releases are never `skillEvents`).
+
+Scratch deltas: `SD_SLOTS` 2·120+83 to 2·120+92, `PD_RUN_STRIDE` 11 to 14,
+`ST_STRIDE` 2168 to 2173, `SRL_WORDS` 356840 to 357920, `RIL_STRIDE` 2432 to
+2792; `SCR_U_WORDS` and `RI_STRIDE` unchanged.
+
+Sharp edges. The retail last-spurt speed enters the staminasyoubu condition
+through the kernel's `SD_LSS` and `SD_CS` columns, which the spurt transition
+and the movement step maintain; the engine refreshes `last_spurt_speed` from
+the live plan every tick (`race_solver_retail.rs:961`), and the two agree at
+every fired tick in the gate set. The classic lane scans runners in
+engine-descending field order while the kernel scans ascending; the wave 13a
+gate set is bit-exact under the ascending order and the residual stands as
+accepted. The extreme overcap rewrite (stamina and power 30000 on 10504)
+diverges from the engine on the retail lane even with the flag off, at tick
+1021 and position 1337 in the last-spurt transition zone: that is the
+validated-band edge noted since wave 15, outside the later-stamina port, and
+the retail gate scenes stay inside the band (the same rewrite passes on the
+classic lane).
+
 ## Grid mode
 
 `experimentalGrid` puts the field in 20-lane rows behind the line: rank 119
@@ -2271,19 +2359,20 @@ kernel `#define` chains were checked line by line against them):
 The plan's estimate "120, `SK_RMAX` 960: 367,772 / 198,264" undershot
 because the per-runner stats and hp scratch columns ride the init strides
 (384 / 144), not the old 96 / 48. Scratch is sized once, so a 24-horse race
-now uploads 5.27 MB of scratch against 0.48 MB before (11x), frames aside.
+now uploads 5.28 MB of scratch against 0.48 MB before (11x), frames aside.
 Slope packing gained a real bound too: `pack_course_scalars` now stops at
 `RACE_MAX_SLOPES` (16, the kernel's `RACE_MAX_SLOPES`) instead of whatever
 fitted the buffer, keeping the pc block clear of the moved PL block.
 
 The values above are the grid-port history; the shipped values now are:
 `RACE_MAXR` 120 (grid validation stays 21 to 120, the engine's own shape
-check), `RI_STRIDE` 1,592, `RIL_STRIDE` 2,432, `ST_STRIDE` 2,168,
+check), `RI_STRIDE` 1,592, `RIL_STRIDE` 2,792, `ST_STRIDE` 2,173,
 `IIU` / `IIL` 384 / 144, `OOU` / `OOL` 3,840 / 144, `SCR_U_WORDS` 602,999
-and `SRL_WORDS` 356,840, together 5.27 MB of scratch per race slot, plus
-2.85 MB of f64 in the double block. That is the 120-era capacity back after
-wave 13b's raise to 144, given back by wave 15's band refusal (see
-"Wave 15: the non-grid band refusal and the cap back at 120"). `SK_RMAX`
+and `SRL_WORDS` 357,920, together 5.28 MB of scratch per race slot, plus
+2.86 MB of f64 in the double block (the wave-18 later-stamina columns). That
+is the 120-era capacity back after wave 13b's raise to 144, given back by
+wave 15's band refusal (see "Wave 15: the non-grid band refusal and the cap
+back at 120"). `SK_RMAX`
 stays 960, the record cap the grid was sized for. All pinned in
 `tests/layout.rs`.
 
@@ -2295,7 +2384,7 @@ minimum 1 race per launch. A 120-horse race writes 33.75 MB of frames, so
 15 races launch per chunk at the cap. Every existing suite (up to 96 races
 at 9 runners, 2.65 MB frames) stays a single launch. Buffers exist per chunk
 and are released before the next one, which keeps the driver's resident set
-bounded when scratch is 5.27 MB per race slot.
+bounded when scratch is 5.28 MB per race slot.
 
 ### Triage of the literal 24s
 

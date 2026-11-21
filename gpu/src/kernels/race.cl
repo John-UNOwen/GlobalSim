@@ -305,7 +305,7 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
     if (!finished) {
         const float slope = convert_float_rte(slope_per / 10000.);
         __global float* tmods = (__global float*)(scr + SK_STAGED);
-        const int ntm = sk_mods(skt, scr, r, SK_EFF_TARGET, tmods);
+        const int ntm = sk_mods(skt, scr, sd, r, SK_EFF_TARGET, tmods);
         sd[SD_TS + r] = (double)phys_target_speed(pd, base, section,
             convert_float_rte(sd[SD_PKCOEF + r]),
             (int)si[SI_L_FORCEIN + r] ? sf[SF_FORCE_IN + r] : 0.f,
@@ -323,7 +323,7 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
 
     // Movement step over the collect side room.
     __global float* lmods = (__global float*)(scr + SK_STAGED + SK_RMAX);
-    const int nlm = sk_mods(skt, scr, r, SK_EFF_LANESPEED, lmods);
+    const int nlm = sk_mods(skt, scr, sd, r, SK_EFF_LANESPEED, lmods);
     si[SI_L_MOVED + r] = (uint)lane_move_step(si, sf, r, pd,
         finished && sf[SF_AFTER_GOAL + r] >= 1.f, position_f, power, phase,
         (int)si[SI_RANKCOL + r], convert_float_rte(pd[PC_FIRST_MOVE_POINT]),
@@ -355,7 +355,7 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
             race_apt_distance((int)si[SI_DISTAPT + r]),
             strategy, phase, slope_per > 0.);
         __global float* amods = (__global float*)(scr + SK_STAGED);
-        const int nam = sk_mods(skt, scr, r, SK_EFF_ACCEL, amods);
+        const int nam = sk_mods(skt, scr, sd, r, SK_EFF_ACCEL, amods);
         acceleration = phys_acceleration_from_base(pd, base_accel,
             (int)si[SI_DASH + r], amods, nam,
             convert_float_rte((int)pd[PD_LIVE_GUTS] ? sd[SD_DUEL_A + r]
@@ -411,6 +411,217 @@ static float race_step(__global uint* si, __global uint* scr, __global float* sf
     // it for the next tick, as the engine's early return does.
     sd[SD_OFA + r] = 0.0;
     return advance_distance;
+}
+
+// The shared solver stream pair (PRD_R30_HI/LO seeded into sd at init), a
+// draw advances the pair in place. Exact u32 values ride the f64 columns.
+static double r_solver_draw(__global double* sd, const int r) {
+    uint hi = (uint)sd[SD_R30H + r];
+    uint lo = (uint)sd[SD_R30L + r];
+    const double v = r30_random(&hi, &lo);
+    sd[SD_R30H + r] = (double)hi;
+    sd[SD_R30L + r] = (double)lo;
+    return v;
+}
+
+// competition_distance_coefficient (race_solver.rs:142-156), shared by the
+// two later-stamina stamina costs.
+static double r_competition_dist_coef(const double distance) {
+    if (distance < 1801.0) {
+        return 0.3;
+    }
+    if (distance < 2101.0) {
+        return 0.5;
+    }
+    if (distance < 2201.0) {
+        return 0.8;
+    }
+    if (distance < 2401.0) {
+        return 1.0;
+    }
+    if (distance < 2601.0) {
+        return 1.1;
+    }
+    return 1.2;
+}
+
+// is_solo_front_runner (race_field.rs:694-704): true when no other runner
+// carries a Nige-family strategy.
+static int r_solo_front(__global const uint* si, const int r, const int n) {
+    for (int j = 0; j < n; j++) {
+        if (j == r) {
+            continue;
+        }
+        const int s = (int)si[SI_STRATEGY + j];
+        if (s == 1 || s == 5) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// distance_to_behind (race_field.rs:541-548), -1.0 means None.
+static double r_distance_to_behind(__global const uint* si, __global const uint* rs,
+    __global const double* sd, const int r, const int n) {
+    const int rank = (int)si[SI_RANKCOL + r];
+    if (rank >= n) {
+        return -1.0;
+    }
+    const int b = (int)rs[RS_ORDER + rank];
+    return fmax(sd[SD_POS + r] - sd[SD_POS + b], 0.0);
+}
+
+// update_stamina_keep (race_solver.rs:2767-2781).
+static void r_stamina_keep(__global uint* si, __global double* sd,
+    __global const double* shl, __global const double* pd, __global uint* st,
+    const int r, const double dt) {
+    if ((si[SI_CPFLAGS + r] & CP_KEEP) != 0u || pd[PI_DISTANCE] <= 0.0) {
+        return;
+    }
+    const double distance = pd[PI_DISTANCE];
+    const double remaining_frac =
+        fmax((distance - sd[SD_POS + r]) / distance, 0.0);
+    if (fmax(shl[r * SH_STRIDE + SH_HP] / shl[r * SH_STRIDE + SH_MAX], 0.0)
+        >= remaining_frac * 1.04) {
+        return;
+    }
+    const double wisdom = fmax(sd[SD_HPW + r], 1.0);
+    const double pct = 30.0 * (wisdom / 1000.0 + gs_pow(wisdom, 0.03));
+    const double per_tick =
+        1.0 - gs_pow(1.0 - fmin(pct, 100.0) / 100.0, dt / 2.0);
+    if (r_solver_draw(sd, r) < per_tick) {
+        si[SI_CPFLAGS + r] |= CP_KEEP;
+        st[ST_LATER_KEEP] += 1u;
+    }
+}
+
+// update_compete_before_spurt (race_solver.rs:2948-2992). The near window
+// mirrors race_field.rs:878-891, the leader gap race_field.rs:511-515. The
+// RTM register rides sk_token_sync, which reads the same flag column.
+static void r_compete_before_spurt(__global uint* si, __global double* sd,
+    __global double* shl, __global const uint* rs, __global const double* pd,
+    __global uint* st, const int r, const int n, const double section,
+    const double dt) {
+    uint flags = si[SI_CPFLAGS + r];
+    if ((flags & CP_CMP) != 0u) {
+        if (sd[SD_CMPT + r] >= 0.0) {
+            flags &= ~CP_CMP;
+            sd[SD_CMPCL + r] = -1.0;
+            si[SI_CPFLAGS + r] = flags;
+        }
+        return;
+    }
+    const double pos = sd[SD_POS + r];
+    if (!(section * 10.0 <= pos && pos < section * 15.0) || sd[SD_CMPCL + r] < 0.0) {
+        return;
+    }
+    if ((flags & CP_KEEP) != 0u) {
+        st[ST_LATER_GATE] += 1u;
+        return;
+    }
+    const int strategy = (int)si[SI_STRATEGY + r];
+    const double threshold = (strategy == 1 || strategy == 5) ? 0.0
+        : (strategy == 2 ? 2.5 : (strategy == 3 ? 5.0 : 10.0));
+    const int leader = (int)rs[RS_ORDER];
+    const double leader_pos = leader == r ? pos : sd[SD_POS + leader];
+    const int far = fmax(leader_pos - pos, 0.0) > threshold;
+    const double lane = sd[SD_LANE + r];
+    const double tol = (double)(float)0.16666;
+    int near = 0;
+    for (int j = 0; j < n; j++) {
+        if (j == r) {
+            continue;
+        }
+        if (fabs(sd[SD_POS + j] - pos) <= 3.0 && fabs(sd[SD_LANE + j] - lane) <= tol) {
+            near = 1;
+        }
+    }
+    if (!(far || near)) {
+        return;
+    }
+    // roll_competition_wisdom (race_solver.rs:1534-1538) draws either way.
+    const double wisdom = fmax(sd[SD_HPW + r], 1.0);
+    const double pct = fmax(15.0 * engine_log10(wisdom * 0.1), 0.0);
+    const double per_tick =
+        1.0 - gs_pow(1.0 - fmin(pct, 100.0) / 100.0, dt / 2.0);
+    if (!(r_solver_draw(sd, r) < per_tick)) {
+        return;
+    }
+    const double strat_coef = strategy == 5 ? 0.2 : (strategy == 1 ? 0.8 : 1.0);
+    double solo_bonus = 1.0;
+    if ((strategy == 1 || strategy == 5) && r_solo_front(si, r, n)) {
+        solo_bonus = strategy == 5 ? 2.0 : 1.1;
+    }
+    const double modifier = (gs_pow(fmax(sd[SD_HPP + r], 0.0) / 1500.0, 0.5) * 2.0
+        + gs_pow(fmax(sd[SD_HPG + r], 0.0) / 3000.0, 0.2))
+        * 0.1 * strat_coef * solo_bonus;
+    const double stamina_strat_coef = strategy == 5 ? 1.5 : (strategy == 1 ? 1.2 : 1.0);
+    const double near_factor = (near && !far) ? 0.5 : 0.0;
+    const double stamina_cost = 20.0
+        * (stamina_strat_coef * r_competition_dist_coef(pd[PI_DISTANCE]) + near_factor)
+        * 2.0;
+    si[SI_CPFLAGS + r] = flags | CP_CMP;
+    st[ST_LATER_CMP] += 1u;
+    sd[SD_CMPM + r] = modifier;
+    sd[SD_CMPT + r] = -2.0;
+    // GameHpState::spend on the retail branch (hp_policy.rs:273-277).
+    shl[r * SH_STRIDE + SH_HP] = (double)fmin(fmax(
+        convert_float_rte(shl[r * SH_STRIDE + SH_HP]) - convert_float_rte(stamina_cost), 0.f),
+        convert_float_rte(shl[r * SH_STRIDE + SH_MAX]));
+}
+
+// update_secure_lead (race_solver.rs:2998-3043), flat lead coefficient.
+static void r_secure_lead(__global uint* si, __global double* sd,
+    __global double* shl, __global const uint* rs, __global const double* pd,
+    __global uint* st, const int r, const int n, const double section,
+    const double dt) {
+    uint flags = si[SI_CPFLAGS + r];
+    if ((flags & CP_SEC) != 0u) {
+        if (sd[SD_SECT + r] >= 0.0) {
+            flags &= ~CP_SEC;
+            sd[SD_SECCL + r] = -1.0;
+            si[SI_CPFLAGS + r] = flags;
+        }
+        return;
+    }
+    const double pos = sd[SD_POS + r];
+    if (!(section * 10.0 <= pos && pos < section * 15.0) || sd[SD_SECCL + r] < 0.0) {
+        return;
+    }
+    if ((flags & CP_KEEP) != 0u) {
+        st[ST_LATER_GATE] += 1u;
+        return;
+    }
+    const double gap_behind = r_distance_to_behind(si, rs, sd, r, n);
+    if (gap_behind < 0.0) {
+        return;
+    }
+    const double desirable = 3.0 + 0.0003 * (pd[PI_DISTANCE] + 1000.0);
+    if (gap_behind >= desirable) {
+        return;
+    }
+    if (r_solver_draw(sd, r) >= 0.20 * (dt / 2.0)) {
+        return;
+    }
+    const int strategy = (int)si[SI_STRATEGY + r];
+    const double strat_coef = strategy == 5 ? 0.2
+        : (strategy == 3 ? 0.8 : 1.0);
+    double solo_bonus = 1.0;
+    if ((strategy == 1 || strategy == 5) && r_solo_front(si, r, n)) {
+        solo_bonus = strategy == 5 ? 7.0 : 2.0;
+    }
+    const double modifier = gs_pow(fmax(sd[SD_HPG + r], 0.0) / 2000.0, 0.5)
+        * 0.3 * strat_coef * solo_bonus;
+    const double stamina_strat_coef = strategy == 5 ? 1.2 : (strategy == 1 ? 1.0 : 0.8);
+    const double stamina_cost = 20.0 * stamina_strat_coef
+        * r_competition_dist_coef(pd[PI_DISTANCE]) * 2.0;
+    si[SI_CPFLAGS + r] = flags | CP_SEC;
+    st[ST_LATER_SEC] += 1u;
+    sd[SD_SECM + r] = modifier;
+    sd[SD_SECT + r] = -2.0;
+    shl[r * SH_STRIDE + SH_HP] = (double)fmin(fmax(
+        convert_float_rte(shl[r * SH_STRIDE + SH_HP]) - convert_float_rte(stamina_cost), 0.f),
+        convert_float_rte(shl[r * SH_STRIDE + SH_MAX]));
 }
 
 // One full step_all_retail pass over the scratch columns: straight flags,
@@ -513,6 +724,12 @@ static int race_tick(__global uint* scr, __global uint* si, __global float* sf,
                 si[SI_CPFLAGS + r] &= ~CP_ASIT;
             }
         }
+        // The later-stamina timers step in the same engine timer pass; the
+        // expiry itself is evaluated in the competition functions.
+        sd[SD_CMPT + r] = (double)(convert_float_rte((float)sd[SD_CMPT + r]) + dt);
+        sd[SD_CMPCL + r] = (double)(convert_float_rte((float)sd[SD_CMPCL + r]) + dt);
+        sd[SD_SECT + r] = (double)(convert_float_rte((float)sd[SD_SECT + r]) + dt);
+        sd[SD_SECCL + r] = (double)(convert_float_rte((float)sd[SD_SECCL + r]) + dt);
         if (geom_on) {
             geo_corner_state(cb, ce_b, ce_e, ce_i, ce_f,
                 convert_float_rte(sd[SD_POS + r]),
@@ -684,14 +901,24 @@ static int race_tick(__global uint* scr, __global uint* si, __global float* sf,
             si[SI_SPOT_LATCH + r] = 1u;
         }
     }
-    // step_field_conditions: near-lane timers, spot struggle then duel
-    // per advanced row.
+    // step_field_conditions: near-lane timers, the flag-gated stamina
+    // systems, spot struggle then duel per advanced row.
     for (int r = 0; r < n; r++) {
         if (!rs[RS_ADV + r]) {
             continue;
         }
+        const int later = (int)pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_LATER];
         near_lane_timers(si, sd, rs, r, n, (double)dt);
+        if (later) {
+            r_stamina_keep(si, sd, shl, pd, st, r, (double)dt);
+        }
         spot_update(scr, st, si, sd, r, n, pd, section_length);
+        if (later) {
+            r_compete_before_spurt(si, sd, shl, rs, pd, st, r, n,
+                section_length, (double)dt);
+            r_secure_lead(si, sd, shl, rs, pd, st, r, n,
+                section_length, (double)dt);
+        }
         duel_update(scr, st, si, sf, sd, shl, pd, r, n, course_distance,
             has_corner_events);
     }
@@ -720,6 +947,11 @@ static void sk_init_stat_bump(__global const uint* sk, __global const uint* sks,
         for (int e = 0; e < (int)rd[5]; e++) {
             const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * ((int)rd[6] + e);
             const int kind = (int)ef[0];
+            // Engine :2558 moves the raw stamina field at the same moment.
+            if (kind == 2) {
+                scol[5] = as_ulong(fmax(as_double(scol[5])
+                    + as_double((ulong)ef[6] | ((ulong)ef[7] << 32)), 1.0));
+            }
             const int slot = kind == 2 ? 8 : kind == 4 ? 10 : kind == 5 ? 11 : -1;
             if (slot < 0) continue;
             const float value = convert_float_rte(as_double(scol[slot]))
@@ -1225,6 +1457,15 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         // the engine's stat writes and refresh around race_solver.rs:2646.
         sd[SD_STAM + r] = as_double(scol[8]);
         sd[SD_STAM_A + r] = (double)convert_float_rte(as_double(scol[8]));
+        // The raw stamina field is the wire stat times the mood coefficient
+        // (race_solver_builder.rs:290), the initialization output 5 column.
+        // PowerUp is refused on this lane, so the power field stays static.
+        sd[SD_RAWST + r] = as_double(scol[5]);
+        sd[SD_HPP + r] = as_double(scol[9]);
+        // The host replays the construction seed chain into the pd row; the
+        // live solver pair then advances in sd (PRD_R30_HI/LO seed it).
+        sd[SD_R30H + r] = pd[PD_RUN0 + PD_RUN_STRIDE * r + PRD_R30_HI];
+        sd[SD_R30L + r] = pd[PD_RUN0 + PD_RUN_STRIDE * r + PRD_R30_LO];
         // The wisdom field and accumulator mirror the speed pair. The NaN
         // accumulator word means no construction bump: the seed is then the
         // unwrap_or seed. A bump carries the unclamped chain instead.

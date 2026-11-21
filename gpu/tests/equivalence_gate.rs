@@ -517,23 +517,24 @@ fn trace_conserve_power_is_reply_diagnostics_only() {
 
 /// experimentalLaterStaminaMechanics is a real engine mode: it adds the
 /// stamina keep, compete-before-spurt, and secure-lead per-tick systems
-/// (race_solver.rs:2751-2756) and the reply echoes the flag (lib.rs:1071).
-/// The classic lane ports them (gpu/tests/wave13a_later_stamina.rs); the
-/// retail lane refuses by name because its kernel resolves randomness on the
-/// host.
+/// (race_solver.rs:2751-2756) and the staminasyoubu injection
+/// (race_solver_builder.rs:817-848), and the reply echoes the flag
+/// (lib.rs:1071). Both lanes port them; the wave 18 port adds the retail
+/// lane, and the activation evidence lives in wave18_gate.
 #[test]
-fn later_stamina_mechanics_is_an_engine_mode_refused_by_name() {
+fn later_stamina_mechanics_is_an_engine_mode_answered_by_both_lanes() {
     register_geometry(10504);
     let on = patched(&[("experimentalLaterStaminaMechanics", Value::Bool(true))], None, 1);
     let reply = json::parse(&engine_reply(&on, 1)).expect("reply");
     assert_eq!(reply.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool), Some(true));
-    let want = "experimentalLaterStaminaMechanics draws from a live solver stream \
-                the retail kernel resolves host-side";
-    let (kernel, gate) = kernel_refusals(&on);
-    assert_eq!(kernel, want);
-    assert_eq!(gate.as_deref(), Some(want));
-    let run = race_exec::run_full(&[(on, 1i64)]).expect("kernel run");
-    assert_eq!(run.races[0].fallback.as_deref(), Some(want));
+    let run = race_exec::run_full(&[(on.clone(), 1i64)]).expect("kernel run");
+    let race = &run.races[0];
+    assert!(race.fallback.is_none(), "the retail lane ports the flag");
+    assert_eq!(
+        full_reply::build(&on, 1, race).expect("full reply builds"),
+        engine_reply(&on, 1),
+        "the full reply equals the engine with the mode on"
+    );
 }
 
 /// Grid mode is a fully engine-supported race shape. The GPU lane runs grid

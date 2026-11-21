@@ -10,6 +10,7 @@ use crate::dep_cpu;
 use crate::initialization::{self, Case, Out, StatsCase};
 use crate::json::{self, Value};
 use crate::race::{FallbackReason, RaceOutcome, RaceRunner};
+use crate::random_gen::Rule30CARng;
 use crate::retail_geometry;
 use ocl::{Buffer, Queue, flags};
 
@@ -30,7 +31,7 @@ pub const RACE_MAX_TICKS: usize = 6144;
 pub const RACE_MAX_SLOPES: usize = 16;
 pub const RI_STRIDE: usize = RI_DEBUG_TICK + 16;
 pub const RIL_STRIDE: usize = PD_RUN0 + PD_RUN_STRIDE * RACE_MAXR;
-pub const ST_STRIDE: usize = ST_SPFIRST0 + RACE_MAXR;
+pub const ST_STRIDE: usize = ST_LATER_SYB + 1;
 // Skill scratch mirrors of retail_core.cl and skills.cl.
 pub const SK_STRIDE: usize = crate::skills_compile::SK_STRIDE;
 const SK_RMAX: usize = crate::skills_compile::SK_RMAX;
@@ -126,7 +127,7 @@ pub const PD_FC_HALF1: usize = PD_CF_DIST + 12;
 // then recomputes the guts-derived powf words from the live field.
 pub const PD_LIVE_GUTS: usize = PD_CF_DIST + 13;
 pub const PD_RUN0: usize = PL_FRONT_LANE + 32;
-pub const PD_RUN_STRIDE: usize = 11;
+pub const PD_RUN_STRIDE: usize = 14;
 pub const PRD_POWF: usize = 0;
 pub const PRD_DUEL_T: usize = 1;
 pub const PRD_DUEL_A: usize = 2;
@@ -145,6 +146,11 @@ pub const PRD_WIS_ACC: usize = 8;
 // the live spot duration scales by.
 pub const PRD_GUTS_ACC: usize = 9;
 pub const PRD_SPOT_PROF: usize = 10;
+// The later-stamina request flag and the shared solver stream pair left by
+// the engine's construction draws, one row per runner (Job B, wave 18).
+pub const PRD_LATER: usize = 11;
+pub const PRD_R30_HI: usize = 12;
+pub const PRD_R30_LO: usize = 13;
 pub const PC_LAST_STRAIGHT_START: usize = 184;
 pub const PC_LAST_CORNER_START: usize = 186;
 pub const PC_FIRST_MOVE_POINT: usize = 187;
@@ -177,6 +183,13 @@ pub const ST_SNAPW0: usize = ST_SNAPG0 + 2 * RACE_MAXR;
 pub const ST_SPURTT0: usize = ST_SNAPW0 + 2 * RACE_MAXR;
 pub const ST_SPURTD0: usize = ST_SPURTT0 + 2 * RACE_MAXR;
 pub const ST_SPFIRST0: usize = ST_SPURTD0 + 2 * RACE_MAXR;
+// Per-race later-stamina activation counters: keep, compete, secure, the
+// keep-gated skips of both entry checks, and the staminasyoubu fires.
+pub const ST_LATER_KEEP: usize = ST_SPFIRST0 + RACE_MAXR;
+pub const ST_LATER_CMP: usize = ST_LATER_KEEP + 1;
+pub const ST_LATER_SEC: usize = ST_LATER_CMP + 1;
+pub const ST_LATER_GATE: usize = ST_LATER_SEC + 1;
+pub const ST_LATER_SYB: usize = ST_LATER_GATE + 1;
 // skillEvents log, mirror of retail_core.cl: word 0 is the entry count,
 // then (runner, id) pairs, id EV_KAKARI for a completed rush episode.
 pub const EV_MAX: usize = 512;
@@ -211,7 +224,7 @@ const RS_COUNTS: usize = (RS_PM + 8 + 7) & !7;
 const RS_ADV: usize = RS_COUNTS + 8 + 4 * RACE_MAXR;
 const SCR_BANKS: usize = SCR_RACE + RS_ADV + RACE_MAXR; // paired mode: one RUN bank per runner
 const BANK_WORDS: usize = 60;
-const SRL_HP: usize = (2 * RACE_MAXR + 83) * RACE_MAXR;
+const SRL_HP: usize = (2 * RACE_MAXR + 92) * RACE_MAXR;
 const RD_WORDS: usize = 8 * RACE_MAXR + SRL_HP + 32;
 const SRL_STATS_IN_L: usize = RD_WORDS;
 const SRL_INIT_IN_L: usize = SRL_STATS_IN_L + RACE_MAXR * IIL;
@@ -227,6 +240,15 @@ pub const FB_GEOMETRY: u32 = 6;
 pub const FB_EVENT: u32 = 7;
 pub const FB_SKILL_SEQ: u32 = 8;
 pub const FB_RC: u32 = 9;
+
+/// Mirror of race_solver_builder.rs race_seed_hi, pinned to the engine source.
+fn ref_race_seed_hi(horse_seed: u32) -> u32 {
+    let mut seed = horse_seed ^ 0x52414345 ^ 0x57495344;
+    seed = (seed ^ (seed >> 16)).wrapping_mul(0x85ebca6b);
+    seed = (seed ^ (seed >> 13)).wrapping_mul(0xc2b2ae35);
+    seed ^= seed >> 16;
+    if seed == 0 { 1 } else { seed }
+}
 
 /// The kernel's raw full-reply channel streams, in write order. The
 /// full_reply module decodes these into the engine's reply shape.
@@ -289,6 +311,9 @@ pub struct RaceGpu {
     pub tempt_all: Vec<u32>,
     pub rscore_all: Vec<u32>,
     pub hp_empty_all: Vec<bool>,
+    /// Later-stamina activation counters: keep, compete, secure, gated,
+    /// staminasyoubu. Zero while the request flag is off.
+    pub later_stats: [u32; 5],
     pub delay_all: Vec<f64>,
     pub lss_all: Vec<f64>,
     /// The race's skillEvents (horseIndex, id) pairs in kernel order, id
@@ -754,15 +779,16 @@ fn prepare(
     if grid && root.get("experimentalRetailGeometry").and_then(Value::as_bool) == Some(true) {
         return flagged("World geometry requires the experimental runtime and standard starting grid");
     }
-    // The three later-stamina systems draw live from the shared solver
-    // stream (race_solver.rs:2767-3043). The retail kernel has no live
-    // stream consumer, its randomness is host-reserved (retail_core.cl SI_RESRV).
-    if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) == Some(true) {
-        return flagged(
-            "experimentalLaterStaminaMechanics draws from a live solver stream \
-             the retail kernel resolves host-side",
-        );
-    }
+    // The three later-stamina systems draw from the shared solver stream,
+    // whose only host-side use is construction (race_solver.rs:2767-3043).
+    // The kernel replays the construction pair and keeps the stream live.
+    let later_stamina = match root.get("experimentalLaterStaminaMechanics") {
+        None => false,
+        Some(value) => match value.as_bool() {
+            Some(b) => b,
+            None => return flagged("experimentalLaterStaminaMechanics must be a boolean"),
+        },
+    };
     // singleMode is ported: the +400 lands inside the im_stats clamps
     // (race_solver_builder.rs:304-321). A non-boolean flag is ignored (lib.rs:342).
     let single_mode = root.get("singleMode").and_then(Value::as_bool).unwrap_or(false);
@@ -836,6 +862,39 @@ fn prepare(
         geometry = Some(flat);
     }
 
+    // The solver stream state after the engine's construction draws, one
+    // pair per runner (RaceSolver::new, race_solver.rs:975-1067). Runtime
+    // retail spends no other draw on this stream.
+    for r in 0..horses.len() {
+        let seed_lo = (seed_i32 as i64 + r as i64 * 7919) as u32;
+        let mut builder = Rule30CARng::new(seed_lo, ref_race_seed_hi(seed_lo));
+        let d1 = builder.int32();
+        let _d2 = builder.int32();
+        let mut solver = Rule30CARng::new(d1, 0);
+        let _hp_seed = solver.int32();
+        let _gorosi = solver.int32();
+        let _pace = solver.int32();
+        let _gate_roll = solver.uniform(12252240.0);
+        let _random_lot = solver.uniform(100.0);
+        let _start_delay = solver.random();
+        for _ in 0..nslopes {
+            let _hill_lo = solver.int32();
+            let _hill_hi = solver.int32();
+        }
+        let _kakari = solver.uniform(7.0);
+        let _kakari_skip = solver.random();
+        let _r1 = solver.random();
+        let _r2 = solver.random();
+        let _r3 = solver.random();
+        for _ in 0..24 {
+            let _section = solver.random();
+        }
+        let base = PD_RUN0 + PD_RUN_STRIDE * r;
+        pd[base + PRD_LATER] = later_stamina as u8 as f64;
+        pd[base + PRD_R30_HI] = solver.hi as f64;
+        pd[base + PRD_R30_LO] = solver.lo as f64;
+    }
+
     // Dense gate rank drives the retail starting lane.
     let mut gate_order: Vec<usize> = (0..horses.len()).collect();
     gate_order.sort_by_key(|&i| horses[i].get_i64("gateIndex").unwrap_or(0));
@@ -843,7 +902,12 @@ fn prepare(
 
     // Hand the skill set to the kernel's numeric table. One unsupported
     // construct flags the whole race rather than approximating the engine.
-    let sk_plan = crate::skills_compile::plan(&root, course);
+    let extras = crate::skills_compile::ClassicExtras {
+        raw_power: Vec::new(),
+        strategy: Vec::new(),
+        later_stamina,
+    };
+    let sk_plan = crate::skills_compile::plan_retail_with(&root, course, &extras);
     if let Some(reason) = &sk_plan.reason {
         return flagged(reason);
     }
@@ -1488,6 +1552,7 @@ impl RaceContext {
             tempt_all: Vec::new(),
             rscore_all: Vec::new(),
             hp_empty_all: Vec::new(),
+            later_stats: [0; 5],
             delay_all: Vec::new(),
             lss_all: Vec::new(),
             events: Vec::new(),
@@ -1558,6 +1623,13 @@ impl RaceContext {
                 out.tempt_all = (0..race.n).map(|r| st[ST_TEMPT0 + r]).collect();
                 out.rscore_all = (0..race.n).map(|r| st[ST_RSCORE0 + r]).collect();
                 out.hp_empty_all = (0..race.n).map(|r| st[ST_HPEMPTY0 + r] != 0).collect();
+                out.later_stats = [
+                    st[ST_LATER_KEEP],
+                    st[ST_LATER_CMP],
+                    st[ST_LATER_SEC],
+                    st[ST_LATER_GATE],
+                    st[ST_LATER_SYB],
+                ];
                 out.delay_all = (0..race.n)
                     .map(|r| f64::from(f32::from_bits(st[ST_DELAY0 + r])))
                     .collect();

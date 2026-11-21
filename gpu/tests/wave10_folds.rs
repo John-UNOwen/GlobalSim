@@ -547,7 +547,6 @@ fn requests_outside_the_full_lane_stay_refused() {
     register_geometry(10504);
     for (key, expect) in [
         ("traceConservePower", "traceConservePower"),
-        ("experimentalLaterStaminaMechanics", "experimentalLaterStaminaMechanics"),
     ] {
         let request = with_seed(v77_value(), &[(key, Value::Bool(true))]);
         let run = race_exec::run_full(&[(request.clone(), 1i64)]).expect("kernel run");
@@ -560,4 +559,15 @@ fn requests_outside_the_full_lane_stay_refused() {
         };
         assert!(reason.contains(expect), "{key}: refusal names it, got {reason}");
     }
+    // Wave 18 moved experimentalLaterStaminaMechanics from this set to
+    // answered on the retail lane (wave18_gate proves the answer).
+    let request = with_seed(
+        v77_value(),
+        &[("experimentalLaterStaminaMechanics", Value::Bool(true))],
+    );
+    let run = race_exec::run_full(&[(request, 1i64)]).expect("kernel run");
+    assert!(
+        run.races[0].fallback.is_none(),
+        "the retail lane answers the later-stamina flag"
+    );
 }

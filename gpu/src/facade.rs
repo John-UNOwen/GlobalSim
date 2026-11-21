@@ -636,12 +636,6 @@ pub fn gate_reasons(request: &str, device: Option<&DeviceFacts>) -> Option<Strin
                 "World geometry requires the experimental runtime and standard starting grid".into(),
             );
         }
-        if root.get("experimentalLaterStaminaMechanics").and_then(Value::as_bool) == Some(true) {
-            return Some(
-                "experimentalLaterStaminaMechanics draws from a live solver stream \
-                 the retail kernel resolves host-side".into(),
-            );
-        }
         if !(1..=race_exec::RACE_MAXR).contains(&horse_count) {
             Some("roster size outside the kernel's range".into())
         } else if !grid_valid && horse_count > race_exec::NON_GRID_MAX_RUNNERS {

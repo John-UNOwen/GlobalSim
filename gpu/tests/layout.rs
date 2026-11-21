@@ -29,15 +29,20 @@ fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
     // Wave 10 adds the reply channel block plus the shifts from the record
     // state 24 to 26 words and the scalar block 89 to 90 slots (plus 102978).
     assert_eq!(re::SCR_U_WORDS, 602999);
-    assert_eq!(re::SRL_WORDS, 356840);
+    // Wave 18 adds nine sd columns (raw stamina and power, the compete and
+    // secure modifiers and timers, and the solver stream pair) to the sd
+    // block, 9 * RACE_MAXR (plus 1080).
+    assert_eq!(re::SRL_WORDS, 357920);
     // Input and status strides track RACE_MAXR.
     assert_eq!(re::RI_STRIDE, 1592);
     // Wave 7 grew the pd runner block from 8 to 9 words for the unclamped
     // wisdom accumulator word (RIL_STRIDE 2072 to 2192). Wave 8 added the
-    // guts accumulator and the spot proficiency word (2192 to 2432).
-    assert_eq!(re::RIL_STRIDE, 2432);
+    // guts accumulator and the spot proficiency word (2192 to 2432). Wave 18
+    // added the later-stamina flag and the solver stream pair (2432 to 2792).
+    assert_eq!(re::RIL_STRIDE, 2792);
     // Wave 10 adds the snapshot, spurt and first-spurt columns (1080 words).
-    assert_eq!(re::ST_STRIDE, 2168);
+    // Wave 18 adds the five later-stamina activation counters (plus 5).
+    assert_eq!(re::ST_STRIDE, 2173);
     // The pd runner block, race scalars and per-runner precompute block stack
     // in that order, each behind the last per the kernel's formulas.
     assert_eq!(re::PL_FRONT_LANE, re::PI_RUNNER0 + re::PI_RUN_STRIDE * re::RACE_MAXR);
