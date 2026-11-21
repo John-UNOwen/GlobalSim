@@ -517,7 +517,7 @@
 #define SD_CP_INITPW (SD_SPOT_TIMER + 3 * RACE_MAXR)  // conserve initial_power
 #define SD_CP_ACC (SD_SPOT_TIMER + 4 * RACE_MAXR)     // legacy cp_acc accumulate
 #define SD_AS_TIMER (SD_SPOT_TIMER + 5 * RACE_MAXR)   // asitame effect duration timer, counts up to zero
-#define SD_RAWPW (SD_SPOT_TIMER + 6 * RACE_MAXR)      // horse raw_power from initialization output 2
+#define SD_RAWPW (SD_SPOT_TIMER + 6 * RACE_MAXR)      // horse raw_power from initialization output 6
 #define SD_CLOCK (SD_SPOT_TIMER + 7 * RACE_MAXR)      // accumulatetime race clock, f64 (f32-rounded steps)
 #define SD_BSIDE (SD_SPOT_TIMER + 8 * RACE_MAXR)      // blocked_side_continuetime, f64
 #define SD_IFNEAR (SD_SPOT_TIMER + 9 * RACE_MAXR)     // infront_near_lane_time, f64

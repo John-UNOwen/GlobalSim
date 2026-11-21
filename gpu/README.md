@@ -86,6 +86,7 @@ Suites:
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 | `parity_audit` (gpu + initialization + geometry + race) | Engine parity audit: the app comparison traffic on both lanes compact bit-exact and full byte-equal, all 751 merged skill ids through both compilers against pinned refusal-family lists, and the `gate_reasons` fallback set pinned exactly (see "Engine parity audit" under "Wave 13b") |
 | `wave17_classic_drift` (gpu + initialization + geometry + race) | The scenes the classic-lane base physics drifted 1 to 2 ulp in speed on: plain v77 10105 seed 2, 10404 seed 1, 10810 seeds 1 and 2, 10908 seed 1, plus 10312, 10506, 10511 and 10607 high-stamina seeds 1..3, every frame column `to_bits`-equal against the CPU engine and full replies byte-equal (see "Wave 17: the classic-lane section bake") |
+| `wave19_overcap` (gpu + initialization + geometry + race) | The retail overcap raw-power family: the reported 10504 stamina and power 30000 scene seeds 1..3, the mild 2000/2000 band, the same rewrite on 10108 with the recovery record armed, and the flagged 10108 variant with both injected records live, every frame column `to_bits`-equal and full replies byte-equal (see "Wave 19: the retail overcap raw power") |
 
 ### What the gate proves
 
@@ -2298,11 +2299,59 @@ every fired tick in the gate set. The classic lane scans runners in
 engine-descending field order while the kernel scans ascending; the wave 13a
 gate set is bit-exact under the ascending order and the residual stands as
 accepted. The extreme overcap rewrite (stamina and power 30000 on 10504)
-diverges from the engine on the retail lane even with the flag off, at tick
-1021 and position 1337 in the last-spurt transition zone: that is the
-validated-band edge noted since wave 15, outside the later-stamina port, and
-the retail gate scenes stay inside the band (the same rewrite passes on the
-classic lane).
+diverged from the engine on the retail lane even with the flag off, at tick
+1021 and position 1337 in the last-spurt transition zone. Wave 19 closed it:
+the kernel's raw-power column was fed the base power, and the two part ways
+for every wire power past 1200. The retail gate scenes stay inside the band
+(the same rewrite passes on the classic lane, whose raw power is host-side).
+
+## Wave 19: the retail overcap raw power
+
+The wave 18 sharp edge was an initialization slot read, not a spurt formula.
+The scene: v77 retail, 10504, every wire stat rewritten (wisdom 1000, stamina
+and power 30000, guts and speed 600), flag off. The kernel's raw-power column
+`SD_RAWPW` was fed initialization output 2, the base power, instead of output
+6, the raw power. The engine's raw power is the ranked base plus half the
+overcap (`race_solver_builder.rs:295-296`), so at wire 30000 (mood 2) it is
+2000 (the clamped base) plus 14400: 16400. The asitame release arms on that
+value past 1200 and its accel modifier is `sqrt((P - 1200) * 130) * 0.001 *
+coef` (`race_solver_builder.rs:149-156`), so the kernel, reading the base
+2000, produced 0.29024127 against the engine's 1.2651324 (10504 is distance
+type 3, Senkou coefficient 0.9). The two releases fired on the same ticks with
+the same counts. Only the modifier differed, and at dt 0.0666 the 0.97489116
+gap is 0.0649281 per tick, exactly the speed column's first divergence:
+engine 19.93206787109375 against kernel 19.86713981628418 at tick 1020,
+seed 1 (1021 seed 2, 1022 seed 3), runner 0, the tick its plan takes the
+runner into the last spurt.
+
+The initialization chain's per-runner stats block is laid out `0..4` base
+stats, `5` raw stamina, `6` raw power (`initialization.cl:118`), and the
+im_stats body writes the overcap half only into output 6
+(`initialization.cl:292`). The race kernel's seed read (`race.cl:1364`) took
+output 2. The two slots are equal while the wire power stays at or under
+1200, the whole validated band, which is why no earlier gate saw it. The fix
+reads output 6. The classic lane was never exposed: its raw power rides the
+host-side asitame bake (`skills_compile.rs:2479-2517`), which always carried
+the overcap half.
+
+The family, swept pre-fix on 10504 and 10108, seeds 1 and 3, over the stat
+pairs (1200, 1200), (1200, 30000), (30000, 1200), (2000, 2000), (5000, 5000)
+and (30000, 30000): every pair with wire power past 1200 diverged, 10504 at
+ticks 1020 to 1023 and 10108 at ticks 1250 to 1251, all in the last-spurt
+transition. Wire stamina alone never diverged (raw stamina was already read
+from output 5). The skills variant (the wave 12b recovery record on every
+runner) and the flagged variant diverged identically. Post-fix all of it
+matches, frames and full replies.
+
+`wave19_overcap.rs` gates it: `retail_extreme_overcap_answers_bit_exact` pins
+the reported scene, 10504 seeds 1 to 3, frames `to_bits`-equal and full
+replies byte-equal (pre-fix the frame check fails there at the pinned ticks);
+`retail_overcap_bands_and_skills_answer_bit_exact` runs the mild 2000/2000
+band on 10504 and the extreme rewrite on 10108 with the recovery record
+armed, seeds 1 to 3; `retail_overcap_flagged_injections_answer_bit_exact`
+runs the extreme rewrite flagged on 10108 with the recovery armed, seeds 1 to
+3, where keep 27, compete 32, secure 12 and staminasyoubu 27 prove the three
+systems and both injected records live beside every overcap release.
 
 ## Grid mode
 

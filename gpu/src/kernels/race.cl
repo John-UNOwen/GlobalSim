@@ -1358,7 +1358,10 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
 
         sf[SF_FORCE_IN + r] = as_float(scr[runb + OR_FORCE]);
         sf[SF_ACCEL_BASE + r] = convert_float_rte(as_double(scol[9]));
-        sd[SD_RAWPW + r] = as_double(scol[2]);
+        // Raw power is the base plus the overcap half (race_solver_builder.rs:295),
+        // the initialization output 6 column; the base in column 2 only equals
+        // it while the wire power stays at or under 1200.
+        sd[SD_RAWPW + r] = as_double(scol[6]);
         sf[SF_PENDING_HP + r] = 0.f;
         sf[SF_AFTER_GOAL + r] = 0.f;
         sf[SF_DELAY + r] = as_float(scr[runb + OR_DELAY]);
