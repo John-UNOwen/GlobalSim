@@ -242,7 +242,8 @@ fn zero_skill_mixed_style_fields_are_bit_exact() {
         std::fs::read_to_string(repo_file("data/course_geometry/10604.json")).expect("geometry file");
     globalsim::register_course_geometry(10604, geometry2);
 
-    let mut all: Vec<String> = Vec::new();
+    // Every shape is independent. They run side by side (crate::par).
+    let mut shapes: Vec<(&str, i32, Vec<Value>)> = Vec::new();
 
     // Two-runner controls: the smallest field that can block.
     let n2_uniform = vec![uma("Senkou", 0), mob("Senkou", 1, (0., 0.))];
@@ -263,12 +264,12 @@ fn zero_skill_mixed_style_fields_are_bit_exact() {
         ("oikomi-pair", n3_oikomi_pair),
         ("sasi-oikomi-nige", n3_all_mixed),
     ] {
-        all.extend(check_shape(name, &base, 10504, horses));
+        shapes.push((name, 10504, horses));
     }
 
     // The app's mob-layout field and the extra-lane 18-runner field.
-    all.extend(check_shape("mob9", &base, 10504, field9(3)));
-    all.extend(check_shape("mob18", &base, 10504, field18()));
+    shapes.push(("mob9", 10504, field9(3)));
+    shapes.push(("mob18", 10504, field18()));
 
     // The nine-style mixed field, uniform mob stats. It reproduced the
     // tick-579 passing-search divergence: the crowd walk needs the cached
@@ -277,31 +278,35 @@ fn zero_skill_mixed_style_fields_are_bit_exact() {
         .map(|g| mob(["Nige", "Nige", "Senkou", "Senkou", "Senkou", "Sasi", "Sasi",
             "Oikomi", "Oikomi"][g], g, (0., 0.)))
         .collect();
-    all.extend(check_shape("all9-mixed", &base, 10504, all9_mixed.clone()));
+    shapes.push(("all9-mixed", 10504, all9_mixed.clone()));
 
     // A second course: different corner layout and distance for the same
     // fields.
-    all.extend(check_shape("mob9", &base, 10604, field9(3)));
-    all.extend(check_shape("all9-mixed", &base, 10604, all9_mixed));
+    shapes.push(("mob9", 10604, field9(3)));
+    shapes.push(("all9-mixed", 10604, all9_mixed));
 
     // The Oonige shapes: the 4-runner probe, the mob9 layout with its
     // gate-0 Nige swapped to an Oonige, and the 18-runner field with the
     // gate-10 Nige swapped.
-    all.extend(check_shape("4r-oonige", &base, 10504, oonige4()));
-    all.extend(check_shape("4r-oonige", &base, 10604, oonige4()));
+    shapes.push(("4r-oonige", 10504, oonige4()));
+    shapes.push(("4r-oonige", 10604, oonige4()));
     let mut mob9_oonige = field9(3);
     mob9_oonige[0] = with_style(mob9_oonige[0].clone(), "Oonige");
-    all.extend(check_shape("mob9-oonige", &base, 10504, mob9_oonige.clone()));
-    all.extend(check_shape("mob9-oonige", &base, 10604, mob9_oonige));
+    shapes.push(("mob9-oonige", 10504, mob9_oonige.clone()));
+    shapes.push(("mob9-oonige", 10604, mob9_oonige));
     let mut field18_oonige = field18();
     let slot10 = field18_oonige
         .iter()
         .position(|h| h.get_i64("gateIndex").unwrap_or(-1) == 10)
         .expect("field18 has a gate-10 row");
     field18_oonige[slot10] = with_style(field18_oonige[slot10].clone(), "Oonige");
-    all.extend(check_shape("mob18-oonige", &base, 10504, field18_oonige.clone()));
-    all.extend(check_shape("mob18-oonige", &base, 10604, field18_oonige));
+    shapes.push(("mob18-oonige", 10504, field18_oonige.clone()));
+    shapes.push(("mob18-oonige", 10604, field18_oonige));
 
+    let all: Vec<String> = crate::par::map(shapes, |(name, course, horses)| check_shape(name, &base, course, horses))
+        .into_iter()
+        .flatten()
+        .collect();
     if !all.is_empty() {
         panic!("{} problems:\n{}", all.len(), all.join("\n"));
     }

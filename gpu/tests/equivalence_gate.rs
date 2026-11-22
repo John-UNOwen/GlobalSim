@@ -1,14 +1,14 @@
 //! Wave-11 equivalence gates: every construct the GPU lane refuses comes
 //! with a quote of what the CPU engine does on the same request. Effect kinds
 //! the engine has no SkillType variant for, request shapes the engine itself
-//! errors on, the kernel-capacity rosters past the cap, the wave-15 non-grid
-//! band refusal, and the four wave-10 named full-lane refusals each get their
-//! engine behavior pinned here, error text verbatim.
+//! errors on, the kernel-capacity rosters past the cap, and the four wave-10
+//! named full-lane refusals each get their engine behavior pinned here, error
+//! text verbatim.
 
 #![cfg(feature = "race")]
 
 use globalsim_gpu::facade::{self, DeviceFacts, GpuRaces};
-use globalsim_gpu::{classic_exec, dep_cpu, full_reply, json, race_exec};
+use globalsim_gpu::{classic_exec, full_reply, json, race_exec};
 use json::Value;
 
 fn repo_file(rel: &str) -> std::path::PathBuf {
@@ -231,20 +231,16 @@ fn a_missing_skill_data_entry_quotes_the_engine_error() {
     assert_eq!(kernel, engine, "the retail kernel quotes the engine text");
 }
 
-/// The kernel cap is `gpu::ROSTER_CAP`: 18 by default (the game's field
-/// limit), 120 under wide-roster (the grid-mode band). Rosters past it do
-/// not run: they refuse by size from the run gate and `gate_reasons` alike,
-/// compact and full, while the engine answers them all. Under wide-roster
-/// the band refusal covers non-grid 25 through 120 and is pinned by
-/// `non_grid_crowds_above_24_refuse_the_kernel_band`.
+/// The kernel cap is `gpu::ROSTER_CAP`, the game's 18-horse field limit.
+/// Rosters past it do not run: they refuse by size from the run gate and
+/// `gate_reasons` alike, compact and full, while the engine answers them all.
 #[test]
 fn rosters_beyond_the_kernel_cap_refuse_by_size() {
     register_geometry(10504);
     let cap = globalsim_gpu::gpu::ROSTER_CAP;
     assert_eq!(race_exec::RACE_MAXR, cap, "the kernel's roster cap");
     assert_eq!(classic_exec::CLS_MAXR, cap, "the classic kernel's roster cap");
-    let counts: Vec<usize> =
-        if cap == 120 { vec![121, 128, 144, 145] } else { vec![cap + 1, 22, 24, 25, 121] };
+    let counts = [cap + 1, 22, 24, 25, 121];
     for horse_count in counts {
         let request = text_of(&large_roster(1, horse_count));
         let engine = engine_reply(&request, 1);
@@ -268,117 +264,6 @@ fn rosters_beyond_the_kernel_cap_refuse_by_size() {
             "n={horse_count}: run_batch_full falls back"
         );
     }
-}
-
-/// Wave-15 band gate, the user decision of 2026-11-20: a non-grid field
-/// above 24 runners refuses the kernel on both lanes and stays on the
-/// host. The band stops at 24 because dense non-grid crowds stack at the
-/// inside rail (laneMax 12000, rail 1.2, one 0.4/18 overlap push away),
-/// and there the kernel's resolve_overlaps parks runners at rail+0.4/18
-/// unclamped while the engine's settles them at the rail. The wave-14
-/// experiment made 25 to 144 byte-exact; the user kept the game's and the
-/// app's 18-horse ceiling plus margin as the validated band instead. 22,
-/// 23 and 24 stay byte-exact here, and 25 and up refuse by name, compact
-/// and full, with the engine answering each one. Grid mode is unaffected
-/// at any size it admits because the staggered starts keep every lane
-/// under the rail. Rosters past the 120-horse kernel cap refuse by size,
-/// pinned by `rosters_beyond_the_kernel_cap_refuse_by_size`.
-#[test]
-#[cfg_attr(not(feature = "wide-roster"), ignore = "19+ runner rosters need the wide-roster cap")]
-fn non_grid_crowds_above_24_refuse_the_kernel_band() {
-    register_geometry(10504);
-    assert_eq!(race_exec::NON_GRID_MAX_RUNNERS, 24, "the validated non-grid band");
-    // 22 through 24 stay bit-exact end to end.
-    for horse_count in [22usize, 23, 24] {
-        let request = text_of(&large_roster(1, horse_count));
-        let run = race_exec::run_full(&[(request.clone(), 1i64)]).expect("kernel run");
-        let race = &run.races[0];
-        assert!(race.fallback.is_none(), "n={horse_count}: {:?}", race.fallback);
-        let cpu = dep_cpu::run_cpu_race(&request, 1).expect("cpu race");
-        assert_eq!(cpu.frames.len(), race.frames.len(), "n={horse_count}: tick count");
-        for (tick, (cpu_frame, gpu_frame)) in cpu.frames.iter().zip(race.frames.iter()).enumerate() {
-            for (runner, (cpu_row, gpu_row)) in cpu_frame.iter().zip(gpu_frame.iter()).enumerate() {
-                for (column, (cpu, gpu)) in cpu_row.iter().zip(gpu_row.iter()).enumerate() {
-                    assert_eq!(
-                        cpu.to_bits(),
-                        gpu.to_bits(),
-                        "n={horse_count}: tick {tick} runner {runner} column {column}"
-                    );
-                }
-            }
-        }
-    }
-    // 25, 28 and 40 refuse with the band reason, compact and full, and
-    // the engine answers each one.
-    for horse_count in [25usize, 28, 40] {
-        let request = text_of(&large_roster(1, horse_count));
-        let (kernel, gate) = kernel_refusals(&request);
-        assert_eq!(kernel, race_exec::NON_GRID_BAND_REFUSAL, "n={horse_count}: the run gate flags with the band reason");
-        assert_eq!(
-            gate.as_deref(),
-            Some(race_exec::NON_GRID_BAND_REFUSAL),
-            "n={horse_count}: the app prefilter names the band reason"
-        );
-        let mut gpu = facade::GpuRaces::new().expect("facade");
-        let batch = gpu.run_batch(&[request.clone()], &[1]).expect("batch runs");
-        assert_eq!(
-            batch[0].fallback.as_deref(),
-            Some(race_exec::NON_GRID_BAND_REFUSAL),
-            "n={horse_count}: run_batch falls back"
-        );
-        let full = gpu.run_batch_full(&[request.clone()], &[1]).expect("full batch runs");
-        assert_eq!(
-            full[0].fallback.as_deref(),
-            Some(race_exec::NON_GRID_BAND_REFUSAL),
-            "n={horse_count}: run_batch_full falls back"
-        );
-        let parsed = json::parse(&engine_reply(&request, 1)).expect("reply");
-        let results = parsed.get_array("results").expect("results");
-        assert_eq!(results.len(), horse_count, "the engine answers all {horse_count} runners");
-    }
-    // The classic lane carries the same band (it was only ever validated
-    // to 18 runners and the gate band is uniform), and its measured
-    // 25/26/28 crowds were bit-exact at HEAD f86a15d.
-    for horse_count in [25usize, 28] {
-        let request = classic_large_roster(horse_count);
-        let run = classic_exec::run(&[(request.clone(), 1i64)]).expect("classic run");
-        let kernel = run.races[0]
-            .fallback
-            .clone()
-            .unwrap_or_else(|| panic!("classic n={horse_count}: the classic lane answered a banded request"));
-        assert_eq!(kernel, race_exec::NON_GRID_BAND_REFUSAL, "classic n={horse_count}: the run gate flags with the band reason");
-        let facts = DeviceFacts {
-            extensions: "cl_khr_fp64".into(),
-            single_fp_config: 0x81,
-            double_fp_config: 0x81,
-        };
-        assert_eq!(
-            facade::gate_reasons(&request, Some(&facts)).as_deref(),
-            Some(race_exec::NON_GRID_BAND_REFUSAL),
-            "classic n={horse_count}: the app prefilter names the band reason"
-        );
-        let parsed = json::parse(&engine_reply(&request, 1)).expect("reply");
-        let results = parsed.get_array("results").expect("results");
-        assert_eq!(results.len(), horse_count, "the engine answers the classic field of {horse_count}");
-    }
-}
-
-/// The v77 shared fields with the four retail flags off and the dense
-/// large_roster field: a non-grid classic crowd.
-fn classic_large_roster(horse_count: usize) -> String {
-    let mut value = large_roster(1, horse_count);
-    {
-        let Value::Object(map) = &mut value else { unreachable!() };
-        for key in [
-            "experimentalRetailInitialization",
-            "experimentalRetailSections",
-            "experimentalRetailRuntime",
-            "experimentalRetailGeometry",
-        ] {
-            map.insert(key.into(), Value::Bool(false));
-        }
-    }
-    text_of(&value)
 }
 
 /// v77 grown to the given size with dense gate indices and a deterministic
@@ -540,71 +425,4 @@ fn later_stamina_mechanics_is_an_engine_mode_answered_by_both_lanes() {
         engine_reply(&on, 1),
         "the full reply equals the engine with the mode on"
     );
-}
-
-/// Grid mode is a fully engine-supported race shape. The GPU lane runs grid
-/// compact bit-exactly (gpu/tests/grid_gate.rs) and answers the full reply
-/// byte-equal too: the staggered roster ranks the engine's competition
-/// reorder sorts by are rebuilt from the grid starts (src/race_field.rs:118-125)
-/// and the reply carries the engine's experimentalGridVersion tag
-/// (src/lib.rs:1135-1138).
-#[test]
-#[cfg_attr(not(feature = "wide-roster"), ignore = "grid rosters (21+) need the wide-roster cap")]
-fn grid_full_replies_are_byte_equal_to_the_engine() {
-    register_geometry(10504);
-    let mut kind4_total = 0usize;
-    for horse_count in [21usize, 120] {
-        for seed in [1i64, 2, 3] {
-            let request = text_of(&grid_value(seed, horse_count));
-            let engine = engine_reply(&request, seed);
-            let reply = json::parse(&engine).expect("engine reply");
-            assert_eq!(
-                reply.get_f64("experimentalGridVersion"),
-                Ok(1.0),
-                "the engine tags the grid reply, n={horse_count} seed {seed}"
-            );
-            kind4_total += reply
-                .get_array("competitionEvents")
-                .expect("competitionEvents")
-                .iter()
-                .filter(|event| event.get_f64("type") == Ok(4.0))
-                .count();
-            let run = race_exec::run_full(&[(request.clone(), seed)]).expect("kernel run");
-            let race = &run.races[0];
-            assert!(race.fallback.is_none(), "n={horse_count} seed {seed}: the kernel runs grid full");
-            let gpu = full_reply::build(&request, seed, race).expect("grid full reply");
-            assert_eq!(gpu, engine, "n={horse_count} seed {seed}: grid full reply is byte-equal");
-        }
-    }
-    assert!(kind4_total >= 2, "the grid replies must carry kind-4 competition events, the reordered ones, found {kind4_total}");
-}
-
-/// The grid variant of the patched v77 request: geometry off (the engine
-/// refuses geometry with grid starts, api.rs:68-71), a valid columns/rowSpacing
-/// shape, dense gate indices 0..n-1, and cycled styles so the recording set
-/// (Nige and Oonige) spans grid rows, the case the staggered ranks decide.
-fn grid_value(seed: i64, horse_count: usize) -> Value {
-    let mut value = value_patched(
-        &[
-            ("experimentalRetailGeometry", Value::Bool(false)),
-            ("experimentalGrid", Value::Object(
-                [("columns".to_string(), json::num(20.0)), ("rowSpacing".to_string(), json::num(3.0))]
-                    .into_iter()
-                    .collect(),
-            )),
-        ],
-        Some(horse_count),
-        seed,
-    );
-    {
-        let Value::Object(map) = &mut value else { unreachable!() };
-        let Value::Array(entries) = map.get_mut("horses").expect("horses") else { unreachable!() };
-        let styles = ["Nige", "Nige", "Senkou", "Senkou", "Sasi", "Sasi", "Oikomi", "Oonige"];
-        for (index, entry) in entries.iter_mut().enumerate() {
-            let Value::Object(horse) = entry else { unreachable!() };
-            horse.insert("gateIndex".into(), Value::Number(index as f64));
-            horse.insert("strategy".into(), Value::String(styles[index % styles.len()].into()));
-        }
-    }
-    value
 }

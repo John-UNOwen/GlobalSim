@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Spike: OpenCL port of the GlobalSim restricted flat no-skills loop vs a 20-thread Rust baseline"
+# tests/*.rs are modules of the one suite binary below, not binaries of their
+# own: one binary runs its tests on every core and shares GPU launches.
+autotests = false
+
+[[test]]
+name = "suite"
+path = "tests/suite/main.rs"
 
 # The engine package root must stay a single package (the app's globalsim-wasm
 # depends on it by path), so this crate keeps its own empty workspace root.
@@ -24,12 +31,12 @@ initialization = []
 # initialization and geometry hosts plus the device. Gated out of the lib's
 # test target, see src/lib.rs.
 race = ["gpu", "initialization", "geometry"]
-# Runner capacity 120 instead of 18 (gpu::ROSTER_CAP): the engine's
-# experimentalGrid band runs on the GPU, at about 6x the memory per race slot.
-wide-roster = []
 
 [dependencies]
 ocl = { version = "=0.19.7", optional = true }
+# The compact fold writes the app fold's JSON tree, so it shares the app's
+# writer (globalsim-wasm's compact_record uses serde_json too).
+serde_json = "1"
 # The full engine as a library for the whole-race comparison tool. Path dep
 # only, no copy. default-features off keeps mimalloc and its C toolchain out.
 # external-geometry lets the tool register course geometry like the wasm host.
@@ -65,4 +72,9 @@ required-features = ["race"]
 [[bin]]
 name = "saturate"
 path = "src/bin/saturate.rs"
+required-features = ["race"]
+
+[[bin]]
+name = "skill_coverage"
+path = "src/bin/skill_coverage.rs"
 required-features = ["race"]

@@ -249,9 +249,9 @@ fn unsupported_construct_flags_the_whole_race() {
 }
 
 /// A condition naming a random trigger the kernel has no sampler for must
-/// refuse the whole race by that name, not run on a wrong or empty window. The
-/// merged skill set the app ships carries several such terms (random_lot and
-/// corner_random), so a refusal names the term.
+/// refuse the whole race by that name, not run on a wrong or empty window.
+/// Every random term the app's merged set ships is ported now, so the probe
+/// uses a synthetic name to hold the rule for the next one.
 #[test]
 fn unsupported_random_term_refuses_by_name() {
     let base = v77_line();
@@ -268,7 +268,7 @@ fn unsupported_random_term_refuses_by_name() {
                     if let Some(json::Value::Object(alt)) = alts.get_mut(0) {
                         alt.insert(
                             "condition".into(),
-                            json::Value::String("random_lot==1".into()),
+                            json::Value::String("hypothetical_random==1".into()),
                         );
                     }
                 }
@@ -281,7 +281,7 @@ fn unsupported_random_term_refuses_by_name() {
     let out = race_exec::run(&[(request.clone(), 1i64)]).expect("kernel run");
     match &out.races[0].fallback {
         Some(reason) => assert!(
-            reason.contains("random_lot"),
+            reason.contains("hypothetical_random"),
             "fallback reason should name the unsupported term, got {reason}"
         ),
         None => panic!("a race with an unported random term ran on the kernel"),

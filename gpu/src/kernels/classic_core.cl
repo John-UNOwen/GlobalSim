@@ -5,9 +5,9 @@
 // flag-only competition systems run here on the prepended powf and log10
 // ports.
 
-// The host passes -D CLS_MAXR (gpu::ROSTER_CAP); 120 is the wide default.
+// The host passes -D CLS_MAXR (gpu::ROSTER_CAP), the only cap the lane builds.
 #ifndef CLS_MAXR
-#define CLS_MAXR 120
+#define CLS_MAXR 18
 #endif
 #define CLS_MAX_TICKS 6144
 #define CLS_FRAME_COLS 14
@@ -105,6 +105,10 @@
 #define S_FALLBACK 0
 #define S_TICKS 1
 #define S_END 2
+// F7 slice accounting, as in the retail lane. S_DONE marks the loop's own
+// end, and S_RPOVER carries the record-overflow flag across slice launches.
+#define S_RPOVER 4
+#define S_DONE 5
 #define CLS_ST_RUN0 16
 #define CLS_ST_RUN_STRIDE 20
 #define S_FIN0 16
@@ -3573,16 +3577,31 @@ static void cc_sk_finalize_pending(Cc* c) {
 
 // The race driver (lib.rs:876-970), one work item per race.
 static void cc_run(Cc* c, __global const unsigned int* ri,
-    __global unsigned int* st, __global double* fr) {
+    __global unsigned int* st, __global double* fr,
+    const unsigned int slice_end, const unsigned int resume) {
     const int nmax = (int)ri[CLS_RI_NMAX];
     const double dist = c->cd[D_DISTANCE];
-    cc_prepare(c, ri);
+    if (resume == 0u) {
+        cc_prepare(c, ri);
+        c->rp_over = 0;
+    } else {
+        c->rp_over = (int)st[S_RPOVER];
+    }
     // Classic has no pre-loop frame. Each loop pass captures one frame after
     // advancing t, exactly like the engine (lib.rs:939-960, no capture at :855
     // for non-retail), so the replay holds `ticks` frames, not `ticks + 1`.
     double t = 0.0;
     int ticks = 0;
-    c->rp_over = 0;
+    if (resume != 0u) {
+        // The loop clock adds the same double step each tick, so re-adding
+        // it from the stored tick count reproduces t bit for bit. The
+        // scratch and the record counters carry everything else.
+        ticks = (int)st[S_TICKS];
+        for (int i = 0; i < ticks; i++) {
+            t += CLS_DT;
+        }
+    }
+    int ended = 0;
     for (;;) {
         int active = 0;
         for (int r = 0; r < c->n; r++) {
@@ -3593,6 +3612,10 @@ static void cc_run(Cc* c, __global const unsigned int* ri,
             c->su[U_TICKRANK + r] = c->su[U_RANK + r];
         }
         if (!active || t >= CLS_MAX_RACE_SECONDS) {
+            ended = 1;
+            break;
+        }
+        if ((unsigned int)ticks >= slice_end) {
             break;
         }
         cc_next_overtake(c, CLS_DT);
@@ -3687,8 +3710,15 @@ static void cc_run(Cc* c, __global const unsigned int* ri,
         ticks++;
         if (ticks >= CLS_MAX_TICKS) {
             st[S_FALLBACK] = 2u;
+            ended = 1;
             break;
         }
+    }
+    st[S_TICKS] = (unsigned int)ticks;
+    st[S_RPOVER] = (unsigned int)c->rp_over;
+    st[S_DONE] = (unsigned int)ended;
+    if (ended == 0) {
+        return;
     }
     // The race-end pending finalizer (lib.rs:1005-1017) appends the events
     // of still-open activations, in activation order.
@@ -3717,7 +3747,6 @@ static void cc_run(Cc* c, __global const unsigned int* ri,
             st[rb + S_STAT4] = c->su[U_STAT_SYB];
         }
     }
-    st[S_TICKS] = (unsigned int)ticks;
     cc_bits(st, S_END, t);
     if (c->rp_over && !st[S_FALLBACK]) {
         st[S_FALLBACK] = 4u;

@@ -4,12 +4,11 @@
 use globalsim_gpu::reference;
 use globalsim_gpu::retail_physics::{Acceleration, TargetSpeed};
 
-/// The default build sizes every runner-indexed region to the game's 18-horse
-/// field. Host and kernel take the cap from one constant (`gpu::ROSTER_CAP`,
-/// passed to the kernels as `-D RACE_MAXR` / `-D CLS_MAXR`), so the literal
-/// pins below belong to the 120-horse wide-roster layout; this pins the
-/// default one.
-#[cfg(all(feature = "race", not(feature = "wide-roster")))]
+/// Every runner-indexed region sizes to the game's 18-horse field. Host and
+/// kernel take the cap from one constant (`gpu::ROSTER_CAP`, passed to the
+/// kernels as `-D RACE_MAXR` / `-D CLS_MAXR`), and the literal pins below
+/// follow it.
+#[cfg(feature = "race")]
 #[test]
 fn default_layout_sizes_to_the_eighteen_horse_field() {
     use globalsim_gpu::{classic_exec as ce, gpu, race_exec as re};
@@ -18,177 +17,39 @@ fn default_layout_sizes_to_the_eighteen_horse_field() {
     assert_eq!(ce::CLS_MAXR, gpu::ROSTER_CAP);
     assert!(gpu::build_options().contains("-D RACE_MAXR=18 -D CLS_MAXR=18"));
     assert_eq!(re::SK_STRIDE, 55872, "the skill table does not depend on the roster cap");
-    assert_eq!(re::SCR_U_WORDS, 382813);
+    // The default race program compiles the journal out, the diag variant
+    // carries its 16,384-word window. The reply channels live in their own
+    // rc buffer, outside the scratch stride, sized only for full requests.
+    assert_eq!(re::SCR_U_WORDS, 265537);
+    assert_eq!(re::SCR_U_WORDS_DIAG, 281921);
+    assert_eq!(re::RC_WORDS, 100892);
+    // Scratch follows the record bucket, 244 u32 words and 276 doubles per
+    // record slot. A launch takes the smallest bucket that holds the batch.
+    assert_eq!(re::sk_rcap(0), 64);
+    assert_eq!(re::sk_rcap(64), 64);
+    assert_eq!(re::sk_rcap(65), 128);
+    assert_eq!(re::sk_rcap(960), 960);
+    assert_eq!(re::sk_rcap(961), 960);
+    assert_eq!(re::scr_u_words(64, false), 46913);
+    assert_eq!(re::scr_u_words(128, false), 62529);
+    assert_eq!(re::scr_u_words(256, false), 93761);
+    // The start-delay column the is_badstart port adds widens the sd stride,
+    // so every record bucket's d64 scratch grows by RACE_MAXR words again.
+    assert_eq!(re::srl_words(64), 28244);
+    assert_eq!(re::srl_words(128), 45908);
+    assert_eq!(re::srl_words(256), 81236);
+    // The frame window follows the course, clamped to the engine ceiling.
+    assert_eq!(re::course_tick_bound(0.0), 640);
+    assert_eq!(re::course_tick_bound(500.0), 1475);
+    assert_eq!(re::course_tick_bound(1000.0), 2309);
+    assert_eq!(re::course_tick_bound(1600.0), 3310);
+    assert_eq!(re::course_tick_bound(3200.0), 5979);
+    assert_eq!(re::course_tick_bound(100000.0), 6144);
+    assert!(gpu::diag_build_options().ends_with("-D SK_DIAG"));
+    assert!(!gpu::build_options().contains("SK_DIAG"));
     assert_eq!(ce::CLS_ST_STRIDE, 16 + 20 * ce::CLS_MAXR);
     assert_eq!(ce::CLS_RI_STRIDE, ce::CLS_RI_RUN0 + 48 * ce::CLS_MAXR);
-}
-
-#[cfg(all(feature = "race", feature = "wide-roster"))]
-#[test]
-fn skill_scratch_and_table_sizes_match_the_kernel_mirrors() {
-    // The kernel's retail_core.cl scratch map grows by the skill regions, and
-    // the host mirror must keep the same layout the work item reads.
-    use globalsim_gpu::race_exec as re;
-    assert_eq!(re::SK_STRIDE, 55872);
-    // The full scratch mirrors: stat rows, race state, banks, then the skill
-    // state block, five token orders, the substream bank, the staging, the
-    // additional-activation token pool and the per-runner running lists.
-    // Sized to the grid-mode roster cap RACE_MAXR 120 and SK_RMAX 960.
-    // Wave 6b grew the record state 8 to 20 words per record (plus 11520),
-    // the token pool 128 x 6 (plus 768) and the running lists (plus 1080),
-    // the scalar block 83 to 89 slots per runner (plus 720 plus alignment),
-    // one staged value per effect slot of every record (plus 15360), and the
-    // double block gained 6 columns of RACE_MAXR (SRL plus 720).
-    // Wave 8 grew the pd runner block 9 to 11 words (RIL plus 240) and the
-    // double block 5 more guts columns of RACE_MAXR (SRL plus 600).
-    // Wave 9c grew the record state 20 to 24 words per record (plus 3840),
-    // the double block 2 more stat columns (plus 1920) and the record double
-    // block 148 to 276 for four-arm window chains (plus 122880).
-    // The fan hunt journal adds 16384 words plus the tick mirror (plus 16385).
-    // Wave 10 adds the reply channel block plus the shifts from the record
-    // state 24 to 26 words and the scalar block 89 to 90 slots (plus 102978).
-    assert_eq!(re::SCR_U_WORDS, 602999);
-    // Wave 18 adds nine sd columns (raw stamina and power, the compete and
-    // secure modifiers and timers, and the solver stream pair) to the sd
-    // block, 9 * RACE_MAXR (plus 1080).
-    assert_eq!(re::SRL_WORDS, 357920);
-    // Input and status strides track RACE_MAXR.
-    assert_eq!(re::RI_STRIDE, 1592);
-    // Wave 7 grew the pd runner block from 8 to 9 words for the unclamped
-    // wisdom accumulator word (RIL_STRIDE 2072 to 2192). Wave 8 added the
-    // guts accumulator and the spot proficiency word (2192 to 2432). Wave 18
-    // added the later-stamina flag and the solver stream pair (2432 to 2792).
-    assert_eq!(re::RIL_STRIDE, 2792);
-    // Wave 10 adds the snapshot, spurt and first-spurt columns (1080 words).
-    // Wave 18 adds the five later-stamina activation counters (plus 5).
-    assert_eq!(re::ST_STRIDE, 2173);
-    // The pd runner block, race scalars and per-runner precompute block stack
-    // in that order, each behind the last per the kernel's formulas.
-    assert_eq!(re::PL_FRONT_LANE, re::PI_RUNNER0 + re::PI_RUN_STRIDE * re::RACE_MAXR);
-    assert_eq!(re::PD_CF_DIST, re::PL_FRONT_LANE + 16);
-    assert_eq!(re::PD_RUN0, re::PL_FRONT_LANE + 32);
-    assert_eq!(re::RIL_STRIDE, re::PD_RUN0 + re::PD_RUN_STRIDE * re::RACE_MAXR);
-    // The init program's per-case strides fit the 120-runner IM_INIT block.
-    assert!(globalsim_gpu::initialization::OS_RUN0
-        + globalsim_gpu::initialization::IRS_STRIDE
-            * globalsim_gpu::initialization::MAX_RUNNERS
-        <= globalsim_gpu::initialization::OS_CONT_I);
-    assert!(
-        globalsim_gpu::initialization::OUT_U_STRIDE
-            >= globalsim_gpu::initialization::OS_CONT_I + 16 + 60 + 32
-    );
-    assert_eq!(
-        globalsim_gpu::initialization::OUT_L_STRIDE,
-        globalsim_gpu::initialization::MAX_RUNNERS + 24
-    );
-    // Table areas stay inside the stride, header first, then course lists,
-    // records, effects, programs, arms, regions, terms and tags.
-    assert!(16 <= globalsim_gpu::skills_compile::SK_STRAIGHTS);
-    assert!(
-        globalsim_gpu::skills_compile::SK_TAGS
-            + globalsim_gpu::skills_compile::SK_TMAX
-            <= globalsim_gpu::skills_compile::SK_STRIDE
-    );
-    assert_eq!(
-        globalsim_gpu::skills_compile::SK_RECORDS + globalsim_gpu::skills_compile::SK_RSTRIDE
-            * globalsim_gpu::skills_compile::SK_RMAX,
-        globalsim_gpu::skills_compile::SK_EFFECTS
-    );
-    assert_eq!(
-        globalsim_gpu::skills_compile::SK_EFFECTS + globalsim_gpu::skills_compile::SK_ESTRIDE
-            * globalsim_gpu::skills_compile::SK_EMAX,
-        globalsim_gpu::skills_compile::SK_PROGRAMS
-    );
-    assert_eq!(
-        globalsim_gpu::skills_compile::SK_PROGRAMS + globalsim_gpu::skills_compile::SK_PSTRIDE
-            * globalsim_gpu::skills_compile::SK_PMAX,
-        globalsim_gpu::skills_compile::SK_ARMS
-    );
-    assert_eq!(
-        globalsim_gpu::skills_compile::SK_ARMS + globalsim_gpu::skills_compile::SK_ASTRIDE
-            * globalsim_gpu::skills_compile::SK_AMAX,
-        globalsim_gpu::skills_compile::SK_REGIONS
-    );
-    assert_eq!(
-        globalsim_gpu::skills_compile::SK_REGIONS + globalsim_gpu::skills_compile::SK_GSTRIDE
-            * globalsim_gpu::skills_compile::SK_GMAX,
-        globalsim_gpu::skills_compile::SK_TERMS
-    );
-    assert_eq!(
-        globalsim_gpu::skills_compile::SK_TERMS + globalsim_gpu::skills_compile::SK_MSTRIDE
-            * globalsim_gpu::skills_compile::SK_MMAX,
-        globalsim_gpu::skills_compile::SK_TAGS
-    );
-}
-
-#[cfg(all(feature = "race", feature = "wide-roster"))]
-#[test]
-fn classic_scratch_regions_match_the_kernel_mirrors() {
-    use globalsim_gpu::classic_exec as ce;
-    use globalsim_gpu::skills_compile as sk;
-    assert_eq!(ce::CLS_MAXR, 120);
-    assert_eq!(ce::CLS_MAX_TICKS, 6144);
-    // Frame rows carry the six replay columns plus eight debug columns
-    // (target speed, lane target, pos-keep coef and mode, spot, duel,
-    // active slope, downhill mode).
-    assert_eq!(ce::CLS_FRAME_COLS, 14);
-    // Input and status strides stack exactly.
-    assert_eq!(ce::CLS_RI_STRIDE, ce::CLS_RI_RUN0 + 48 * ce::CLS_MAXR);
-    assert_eq!(ce::CLS_RI_STRIDE, 5776);
-    assert_eq!(ce::CLS_RD_STRIDE, ce::CLS_RD_SLOPES + 3 * ce::CLS_MAX_SLOPES);
-    assert_eq!(ce::CLS_RD_STRIDE, 7744);
-    assert_eq!(ce::CLS_ST_STRIDE, ce::CLS_ST_RUN0 + ce::CLS_ST_RUN_STRIDE * ce::CLS_MAXR);
-    assert_eq!(ce::CLS_ST_STRIDE, 16 + 20 * ce::CLS_MAXR);
-    assert_eq!(ce::CLS_ST_STRIDE, 2416);
-    // SU stacks the uint scratch, the compiled skill table, and the classic
-    // skill runtime block (queue, consumption, pending, sequences, meta, the
-    // per-record prerequisite latches).
-    assert_eq!(ce::CLS_SU_STRIDE, 24400 + sk::SK_STRIDE + 26664);
-    assert_eq!(ce::CLS_SU_STRIDE, 106936);
-    assert_eq!(ce::CLS_SD_STRIDE, 118336);
-    // uint scratch stacking per classic_core.cl: header words 0..512, runner
-    // blocks (72 words each, the reply-mirror slots included), target map
-    // 120x120, blocker words, target list, owner map, tick-rank snapshot and
-    // the style-leader scan.
-    assert_eq!(512 + 72 * ce::CLS_MAXR, 9152);
-    assert!(9152 <= 9168);
-    assert_eq!(9168 + ce::CLS_MAXR * ce::CLS_MAXR, 23568);
-    assert_eq!(23568 + 128, 23696);
-    assert_eq!(23696 + 128, 23824);
-    assert!(23824 + ce::CLS_MAXR <= 23952);
-    assert!(23952 + ce::CLS_MAXR <= 24080);
-    assert!(24080 + 6 <= 24400);
-    // The classic skill runtime block ends exactly at its region end: the
-    // queue meta at +23656 spans the 2048-word queue cap.
-    assert_eq!(ce::CLS_SKD, 24400 + sk::SK_STRIDE);
-    assert_eq!(ce::CLS_SKD_QMETA + 2048 - ce::CLS_SKD, 25704);
-    assert_eq!(ce::CLS_SKD_PRE - ce::CLS_SKD, 25704);
-    assert_eq!(ce::CLS_SKD_PRE + sk::SK_RMAX, ce::CLS_SKD + 26664);
-    assert_eq!(ce::CLS_SKD_PENDING - ce::CLS_SKD, 976);
-    assert_eq!(ce::CLS_SKD_SEQLEN - ce::CLS_SKD, 3856);
-    assert_eq!(ce::CLS_SKD_SEQ - ce::CLS_SKD, 4456);
-    // Reply record channels: header, competition triples, phase pairs, the
-    // unified skillEvents stream, detail, target and conserve channels.
-    assert_eq!(ce::CLS_RP_STRIDE, ce::CLS_RP_CNS0 + ce::CLS_RP_CNS_CAP);
-    assert_eq!(ce::CLS_RP_STRIDE, 21896);
-    assert_eq!(ce::S_LSTTRANS + 2, ce::S_SPURTT);
-    assert_eq!(ce::S_SPURTT + 2, ce::S_SPURTD);
-    assert!(ce::S_SPURTTICK + 2 < ce::CLS_ST_RUN_STRIDE);
-    // The activation diagnostics sit right after the tick mirror, in slots
-    // 15..20 of the widened runner block.
-    assert_eq!(ce::S_STAT_KEEP, ce::S_SPURTTICK + 1);
-    assert!(ce::S_STAT_SYB < ce::CLS_ST_RUN_STRIDE);
-    // double scratch stacking: field tables below the runner block (duel park
-    // and proximity mirrors each span 120*120), runner blocks, then the skill
-    // runtime mirrors in kernel order: record windows, slot cooldown clocks,
-    // instance timers, pending pairs, queue durations.
-    assert_eq!(14912 + ce::CLS_MAXR * ce::CLS_MAXR, 29312);
-    assert_eq!(41216 + 120 * ce::CLS_MAXR, 55616);
-    assert_eq!(55808 + 40 * 960, 94208);
-    assert_eq!(94208 + 960 + 120 * 5 * 32, 114368);
-    assert_eq!(114368 + 120 * 8 * 2 + 2048, ce::CLS_SD_STRIDE);
-    // The per-race frame buffer matches the kernel capture row stride.
-    assert!(55616 <= ce::CLS_SD_STRIDE);
+    assert!(re::RI_REQ < re::RI_STRIDE);
 }
 
 #[test]
@@ -310,4 +171,31 @@ fn packed_kernel_params_match_the_engine_parameters() {
         let actual = speed.min(30.).max(packed.target_min);
         assert_eq!(expected.to_bits(), actual.to_bits(), "target_speed {base} {slope}");
     }
+}
+
+/// The retail effect-cap buckets derive every region offset after the effect
+/// pool, mirroring the skills.cl define chain, so a wider table needs no new
+/// literals anywhere.
+#[cfg(feature = "race")]
+#[test]
+fn effect_cap_buckets_derive_the_table_layout() {
+    use globalsim_gpu::skills_compile as sk;
+    assert_eq!(sk::SK_EMAX_BUCKETS, [256, 512, 1024, 2048]);
+    assert_eq!(sk::sk_programs_at(sk::SK_EMAX), sk::SK_PROGRAMS);
+    assert_eq!(sk::sk_stride_at(sk::SK_EMAX), sk::SK_STRIDE);
+    for bucket in sk::SK_EMAX_BUCKETS.iter().copied().chain([sk::SK_EMAX]) {
+        let l = sk::sk_layout(bucket);
+        assert_eq!(l.emax, bucket);
+        assert_eq!(l.programs, sk::SK_EFFECTS + sk::SK_ESTRIDE * bucket);
+        assert_eq!(l.programs, sk::sk_programs_at(bucket));
+        assert_eq!(l.arms, l.programs + sk::SK_PSTRIDE * sk::SK_PMAX);
+        assert_eq!(l.regions, l.arms + sk::SK_ASTRIDE * sk::SK_AMAX);
+        assert_eq!(l.terms, l.regions + sk::SK_GSTRIDE * sk::SK_GMAX);
+        assert_eq!(l.tags, l.terms + sk::SK_MSTRIDE * sk::SK_MMAX);
+        assert_eq!(l.stride, l.tags + sk::SK_TMAX + 16);
+        assert_eq!(l.stride, sk::sk_stride_at(bucket));
+        assert!(l.programs <= l.arms, "regions stack at bucket {bucket}");
+    }
+    assert_eq!(sk::sk_stride_at(256), sk::SK_STRIDE + 640);
+    assert_eq!(sk::sk_stride_at(2048), sk::SK_STRIDE + 18560);
 }

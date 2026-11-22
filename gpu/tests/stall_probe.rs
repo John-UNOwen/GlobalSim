@@ -9,8 +9,10 @@
 //!   stagger K R N    like threads, thread i sleeps i*400 ms before entering
 //!
 //! Run: cargo test --features gpu,initialization,geometry,race --release \
-//!        --test stall_probe -- --ignored --nocapture
+//!        --test suite stall_probe:: -- --ignored --nocapture
 //! One mode per invocation via PROBE_MODE (plus PROBE_K PROBE_R PROBE_N).
+
+#![cfg(feature = "race")]
 
 use globalsim_gpu::race_exec::{self, Prepared, RaceContext};
 use std::sync::{Arc, Barrier, Mutex};

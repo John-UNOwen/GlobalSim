@@ -29,6 +29,21 @@ pub struct BatchOutcome {
     pub reply: Option<String>,
 }
 
+/// What a compact launch reads back: the tracked skill id for the activation
+/// count (empty skips it) and the second player's roster index, -1 for none.
+/// A second player joins the launch's kept rows and the record's `opp` block.
+pub struct CompactOptions {
+    pub track_skill_id: String,
+    pub second_player_index: i32,
+}
+
+/// One request's answer from a compact launch: the compact record string, or
+/// `fallback` for a race the compact path does not take.
+pub struct CompactOutcome {
+    pub record: Option<String>,
+    pub fallback: Option<String>,
+}
+
 pub struct GpuRaces {
     ctx: race_exec::RaceContext,
     classic: Option<classic_exec::ClassicContext>,
@@ -131,6 +146,89 @@ impl GpuRaces {
                 slots.into_iter().zip(build_classic_outcomes(&run, players.into_iter()))
             {
                 outcomes[index] = Some(outcome);
+            }
+        }
+        Ok(outcomes.into_iter().map(|outcome| outcome.unwrap()).collect())
+    }
+
+    /// Runs one batch as a compact launch. Each race writes only the frame
+    /// rows the compact fold reads: the player's, plus the second player's
+    /// when `second_player_index` names one, and the outcome carries the
+    /// compact record built straight from the race's meta and those kept
+    /// rows. The record is byte-identical to `run_batch`'s meta and packet
+    /// through `globalsim-wasm::compact_record`, at a fraction of the frame
+    /// traffic. Classic-lane requests carry a fallback (their lane keeps the
+    /// full path), and so does a race whose player or second index sits
+    /// outside the roster. Like `run_batch`, the launchable races must share
+    /// one runner count.
+    pub fn run_compact_batch(
+        &mut self,
+        requests: &[String],
+        seeds: &[i32],
+        opts: &CompactOptions,
+    ) -> Result<Vec<CompactOutcome>, String> {
+        if requests.len() != seeds.len() {
+            return Err(format!(
+                "run_compact_batch needs one seed per request ({} requests, {} seeds)",
+                requests.len(),
+                seeds.len()
+            ));
+        }
+        let mut outcomes: Vec<Option<CompactOutcome>> =
+            (0..requests.len()).map(|_| None).collect();
+        let mut launch: Vec<(usize, race_exec::Prepared)> = Vec::new();
+        for (index, (request, seed)) in requests.iter().zip(seeds).enumerate() {
+            if takes_classic_lane(request) {
+                outcomes[index] = Some(CompactOutcome {
+                    record: None,
+                    fallback: Some("the compact launch runs the retail kernel only".into()),
+                });
+                continue;
+            }
+            let mut prepared = match self.ctx.prepare(request, *seed as i64) {
+                Ok(prepared) => prepared,
+                Err(reason) => {
+                    outcomes[index] =
+                        Some(CompactOutcome { record: None, fallback: Some(reason) });
+                    continue;
+                }
+            };
+            let mut rows = vec![player_horse_index(request) as usize];
+            if opts.second_player_index >= 0 {
+                rows.push(opts.second_player_index as usize);
+            }
+            if !prepared.set_frame_rows(&rows) {
+                outcomes[index] = Some(CompactOutcome {
+                    record: None,
+                    fallback: Some(format!(
+                        "compact frame rows {:?} sit outside the {}-runner roster",
+                        rows,
+                        prepared.runners()
+                    )),
+                });
+                continue;
+            }
+            launch.push((index, prepared));
+        }
+        if !launch.is_empty() {
+            let slots: Vec<usize> = launch.iter().map(|&(index, _)| index).collect();
+            let mut prepared: Vec<race_exec::Prepared> =
+                launch.drain(..).map(|(_, prepared)| prepared).collect();
+            let (run, _) = self.ctx.run_prepared(&mut prepared, None)?;
+            for (slot, &index) in slots.iter().enumerate() {
+                let race = &run.races[slot];
+                outcomes[index] = Some(match &race.fallback {
+                    Some(reason) => {
+                        CompactOutcome { record: None, fallback: Some(reason.clone()) }
+                    }
+                    None => compact_outcome(
+                        race,
+                        &prepared[slot],
+                        &requests[index],
+                        seeds[index],
+                        opts,
+                    ),
+                });
             }
         }
         Ok(outcomes.into_iter().map(|outcome| outcome.unwrap()).collect())
@@ -306,6 +404,34 @@ fn build_outcomes(
             }
         })
         .collect()
+}
+
+/// One launch's compact record: the fold over the race's meta and kept rows,
+/// with the frame clocks the packet would have carried (`loop_end(tick)`) and
+/// the course length the kernel ran against.
+fn compact_outcome(
+    race: &race_exec::RaceGpu,
+    prepared: &race_exec::Prepared,
+    request: &str,
+    seed: i32,
+    opts: &CompactOptions,
+) -> CompactOutcome {
+    let meta = compact_meta(race, player_horse_index(request));
+    let meta_text = json::to_string(&meta);
+    let times: Vec<f64> = (0..race.frames.len()).map(race_exec::loop_end).collect();
+    match crate::compact::record(
+        &meta_text,
+        prepared.kept_frame_rows(),
+        &times,
+        &race.frames,
+        seed as f64,
+        &opts.track_skill_id,
+        opts.second_player_index,
+        prepared.course_distance(),
+    ) {
+        Ok(record) => CompactOutcome { record: Some(record), fallback: None },
+        Err(reason) => CompactOutcome { record: None, fallback: Some(reason) },
+    }
 }
 
 /// Which kernel lane a request belongs to. The engine builds its retail

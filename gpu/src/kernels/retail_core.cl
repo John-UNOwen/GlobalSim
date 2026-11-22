@@ -21,9 +21,9 @@
 
 // Course and runner caps. Every runner-indexed region sizes to RACE_MAXR.
 // The host passes it as -D RACE_MAXR (gpu::ROSTER_CAP: 18, the game's field
-// limit, or 120 for the engine's grid band under the wide-roster feature).
+// limit).
 #ifndef RACE_MAXR
-#define RACE_MAXR 120
+#define RACE_MAXR 18
 #endif
 // 400 s of race time at dt=0.0666 is under 6007 ticks.
 #define RACE_MAX_TICKS 6144
@@ -72,7 +72,21 @@
 #define RR_TEAM 12           // fixed team id, 0 no team (race_field.rs:461 drop)
 #define RI_DEBUG_TICK (RI_RUN0 + RI_RUN_STRIDE * RACE_MAXR)
 #define RI_FULL (RI_DEBUG_TICK + 14) // 1: write the full-reply channels and exports
-#define RI_STRIDE (RI_DEBUG_TICK + 16)
+// Compact launch: 1 or 2 kept frame rows instead of every runner's. The
+// frame block then strides by that row count, and RI_ROW0/RI_ROW1 name the
+// runner index written into frame slot 0 and 1 (RI_ROW1 unused at 1).
+#define RI_FRAMES (RI_DEBUG_TICK + 15)
+#define RI_ROW0 (RI_DEBUG_TICK + 16)
+#define RI_ROW1 (RI_DEBUG_TICK + 17)
+// Reply-channel slot in the rc buffer. Full requests get a dedicated slot
+// from the host. Other races point at the shared first block, whose ON flag
+// is 0, so they read the channels off and never write them.
+#define RI_RC (RI_DEBUG_TICK + 18)
+// Row of the shared request table this slot reads: the pd row and the skill
+// table, uploaded once per distinct request in the launch. The seed lives in
+// RI_SEED, so the seeds of one request share this row.
+#define RI_REQ (RI_DEBUG_TICK + 19)
+#define RI_STRIDE (RI_DEBUG_TICK + 24)
 
 // ---------------------------------------------------------------------------
 // Race input, f64 words (raw bits) per race, stride RIL_STRIDE. Float
@@ -433,12 +447,12 @@
 #define SK_TOK_EFF(rec, slot) (SK_TOK_SKILL + ((rec) << 3) + (slot))
 #define SK_TOK_REC(tok) (((tok) - SK_TOK_SKILL) >> 3)
 #define SK_TOK_SLOT(tok) ((tok) & 7u)
-#define SK_TSEQ (SCR_SK + SK_RMAX * SKR_STRIDE)
-#define SK_ASEQ (SK_TSEQ + SK_RMAX * SK_SEQN)
-#define SK_CSEQ (SK_ASEQ + SK_RMAX * SK_SEQN)
-#define SK_LSEQ (SK_CSEQ + SK_RMAX * SK_SEQN)
-#define SK_VSEQ (SK_LSEQ + SK_RMAX * SK_SEQN)
-#define SK_SUB (SK_VSEQ + SK_RMAX * SK_SEQN)
+#define SK_TSEQ (SCR_SK + SK_RCAP * SKR_STRIDE)
+#define SK_ASEQ (SK_TSEQ + SK_RCAP * SK_SEQN)
+#define SK_CSEQ (SK_ASEQ + SK_RCAP * SK_SEQN)
+#define SK_LSEQ (SK_CSEQ + SK_RCAP * SK_SEQN)
+#define SK_VSEQ (SK_LSEQ + SK_RCAP * SK_SEQN)
+#define SK_SUB (SK_VSEQ + SK_RCAP * SK_SEQN)
 // A skill duration order full past SK_SEQN flags the race instead of
 // silently dropping a receiver.
 #define FB_SKILL_SEQ 8u
@@ -447,10 +461,10 @@
 // pending application of an additionalActivate effect, and its kind, value
 // and duration live here (not in the record timer chain) so a re-dispatched
 // draw or tier reads back exactly what was registered.
-#define SK_TOK_AA (SK_TOK_SKILL + (SK_RMAX << 3) + 8)
+#define SK_TOK_AA (SK_TOK_SKILL + (SK_RCAP << 3) + 8)
 #define SK_AAPN 128
 #define SK_AAPW 6      // kind|slot|rec, value bits, timer bits per entry
-#define SK_AAP (SK_STAGED + 2 * SK_RMAX)
+#define SK_AAP (SK_STAGED + 2 * SK_RCAP)
 // The running-skill lists, in application order, cap 8 per runner.
 #define SK_RUNN 8
 #define SK_RUN (SK_AAP + SK_AAPN * SK_AAPW)
@@ -460,15 +474,25 @@
 #define SK_VVAL (SCR_SK_WORDS)
 // Diagnostics only, free-form per wave: the additionalActivate traffic
 // journal (word 0 the used word count, then ten-word records) plus the tick
-// mirror race_tick writes. No layout meaning beyond the scratch total that
-// tests/layout.rs pins.
-#define SK_JRN (SK_VVAL + SK_RMAX * 16)
+// mirror race_tick writes. The journal window lives behind -D SK_DIAG, so
+// the default program carries the tick mirror alone and every region behind
+// it shifts down. No layout meaning beyond the scratch totals tests/layout.rs
+// pins, one per variant.
+#define SK_JRN (SK_VVAL + SK_RCAP * 16)
+#ifdef SK_DIAG
 #define SK_JRN_N 16384
+#else
+#define SK_JRN_N 0
+#endif
 #define SK_JRN_T (SK_JRN + SK_JRN_N)
-// Full-reply channels, live only while scr[SCR_RC_ON] is set. Channel bases
-// hold a word count; data follows the header word. A cap overflow flags the
-// race (FB_RC), which the host answers with the vendored engine.
-#define SCR_RC_ON (SK_JRN_T + 1)
+// Words of per-race u32 scratch, the scr_u stride. The full-reply channels
+// live in their own buffer, so only full-request slots carry them.
+#define SCR_WORDS (SK_JRN_T + 1)
+// Full-reply channels, rc-relative. Live only while rc[SCR_RC_ON] is set.
+// Channel bases hold a word count; data follows the header word. A cap
+// overflow flags the race (FB_RC), which the host answers with the vendored
+// engine.
+#define SCR_RC_ON 0
 #define SCR_RC_SEQ (SCR_RC_ON + 1)   // shared activation ordinal counter
 #define SCR_RC_LEAD (SCR_RC_SEQ + 1) // per-tick style leader flags
 #define SCR_RC_RPT (SCR_RC_LEAD + RACE_MAXR) // 1 during the constructor repeat
@@ -486,12 +510,12 @@
 #define RC_PHR_CAP 8192
 #define SCR_RC_KAK (SCR_RC_PHR + 1 + RC_PHR_CAP)
 #define RC_KAK_CAP 1024
-#define SCR_U_WORDS (SCR_RC_KAK + 1 + RC_KAK_CAP)
+#define RC_WORDS (SCR_RC_KAK + 1 + RC_KAK_CAP)
 
 // Per-race scratch f64, one RACE_MAXR-wide column per slot (field base +
 // runner index). Array fields keep RACE_MAXR slots per element:
 // base + element * RACE_MAXR + r.
-#define SD_SLOTS (2 * RACE_MAXR + 92)
+#define SD_SLOTS (2 * RACE_MAXR + 94)
 #define SD_STRIDE (SD_SLOTS * RACE_MAXR)
 #define SD_SLOT(n) ((n) * RACE_MAXR)
 #define SD_POS SD_SLOT(0)
@@ -559,7 +583,7 @@
 #define SD_DUEL_T (SD_SPOT_MOD + RACE_MAXR) // duel target-speed modifier, captured at entry
 #define SD_DUEL_A (SD_DUEL_T + RACE_MAXR)   // duel accel modifier, captured at entry
 #define SD_RAWST (SD_DUEL_A + RACE_MAXR)    // horse.raw_stamina, initialization output 5
-#define SD_HPP (SD_RAWST + RACE_MAXR)       // horse.power field, f64, static on retail
+#define SD_HPP (SD_RAWST + RACE_MAXR)       // horse.power field, f64
 #define SD_CMPM (SD_HPP + RACE_MAXR)        // compete target modifier, f64, folded as f32
 #define SD_CMPT (SD_CMPM + RACE_MAXR)       // compete_spurt_timer, f64 (f32-rounded steps)
 #define SD_CMPCL (SD_CMPT + RACE_MAXR)      // compete_spurt_cooldown, f64 (f32-rounded steps)
@@ -568,6 +592,8 @@
 #define SD_SECCL (SD_SECT + RACE_MAXR)      // secure_lead_cooldown, f64 (f32-rounded steps)
 #define SD_R30H (SD_SECCL + RACE_MAXR)      // solver stream hi, exact u32 in f64
 #define SD_R30L (SD_R30H + RACE_MAXR)       // solver stream lo, advanced per draw
+#define SD_HPP_A (SD_R30L + RACE_MAXR)      // retail_stat_values[2], f64 of an f32 accumulator
+#define SD_START (SD_HPP_A + RACE_MAXR)     // solver.start_delay, f64 (race_solver_retail.rs:623)
 #define SRL_RUNNER 0
 #define SRL_HP SD_STRIDE          // hp columns, SH_STRIDE per runner
 #define SH_STRIDE 8
@@ -585,7 +611,7 @@
 #define SRL_HP_IN_L (SRL_INIT_OUT_L + OOL)                 // RACE_MAXR * IIL
 #define SRL_HP_OUT_L (SRL_HP_IN_L + RACE_MAXR * IIL)       // RACE_MAXR * OOL
 #define SRL_SKD (SRL_HP_OUT_L + RACE_MAXR * OOL)           // per-record skill doubles
-#define SRL_WORDS (SRL_SKD + SK_RMAX * SKD_STRIDE)
+#define SRL_WORDS (SRL_SKD + SK_RCAP * SKD_STRIDE)
 
 // SectionModifier length.
 #define SEC_MOD 25
@@ -596,6 +622,10 @@
 #define ST_FALLBACK 0          // 0 none, 1 unsupported domain (tick in ST_ARG)
 #define ST_ARG 1               // tick or argument of the fallback
 #define ST_TICKS 2             // loop iterations (frames carry ST_TICKS+1)
+// F7 slice accounting. A launch covers one tick range, so ST_DONE 0 without a
+// fallback means the tick loop stopped at the slice edge and the host
+// relaunches the lane at the next range. ST_DONE 1 is the race's own end.
+#define ST_DONE 3              // 1 once the tick loop ended for good
 #define ST_FINISH0 8           // per runner: finish_step bits then finish_raw
 // Compact-reply exports, per runner in roster order, one word each. The last
 // three are f32 bit patterns, widened by the host like the engine's f64 casts.
@@ -604,7 +634,7 @@
 #define ST_HPEMPTY0 (ST_RSCORE0 + RACE_MAXR)    // hp_empty_on_race, 0 or 1
 #define ST_DELAY0 (ST_HPEMPTY0 + RACE_MAXR)     // start_delay f32 bits (startDelayTime)
 #define ST_LSS0 (ST_DELAY0 + RACE_MAXR)         // SF_SP_START f32 bits (lastSpurtStartDistance)
-// Full-reply exports, written only when scr[SCR_RC_ON] is set. The snapshot
+// Full-reply exports, written only when rc[SCR_RC_ON] is set. The snapshot
 // pair is the live guts and wisdom field at the engine's parameter_orders
 // point: after every constructor activation, before the startup pass. The
 // spurt pair is the clock and position at the last start edge, valid when
@@ -657,28 +687,28 @@ static void race_event(__global uint* ev, __global uint* st, const int runner,
 // Reserve len channel words and return the write pointer, or 0 when full
 // mode is off. An overflow flags the race once and stops further channel
 // writes so the host falls back cleanly instead of reading a torn record.
-static __global uint* rc_take(__global uint* scr, __global uint* st,
+static __global uint* rc_take(__global uint* rcb, __global uint* st,
     const int base, const int cap, const int len) {
-    if (scr[SCR_RC_ON] == 0u) {
+    if (rcb[SCR_RC_ON] == 0u) {
         return 0;
     }
-    const uint used = scr[base];
+    const uint used = rcb[base];
     if (used + (uint)len > (uint)cap) {
         if (st[ST_FALLBACK] == 0u) {
             st[ST_FALLBACK] = 1u;
             st[ST_ARG] = FB_RC;
         }
-        scr[SCR_RC_ON] = 0u;
+        rcb[SCR_RC_ON] = 0u;
         return 0;
     }
-    scr[base] = used + (uint)len;
-    return scr + base + 1 + used;
+    rcb[base] = used + (uint)len;
+    return rcb + base + 1 + used;
 }
 
 // Return words a reservation did not use. Only the newest reservation of a
 // channel may be given back, which the capture sites guarantee.
-static void rc_give(__global uint* scr, const int base, const int words) {
-    scr[base] -= (uint)words;
+static void rc_give(__global uint* rcb, const int base, const int words) {
+    rcb[base] -= (uint)words;
 }
 
 // ---------------------------------------------------------------------------
@@ -2765,7 +2795,7 @@ static void duel_collect(__global uint* si, __global float* sf, __global double*
     }
 }
 
-static void duel_activate(__global uint* scr, __global uint* st,
+static void duel_activate(__global uint* scr, __global uint* rcb, __global uint* st,
     __global uint* si, __global double* sd, __global const double* pd, const int x) {
     si[SI_DUEL_ACTIVE + x] = 1u;
     si[SI_DUEL_FIGHT + x] += 1u;
@@ -2776,7 +2806,7 @@ static void duel_activate(__global uint* scr, __global uint* st,
         sd[SD_DUEL_A + x] = sk_duel_modifier(pd, PD_CF_ACCEL, sd[SD_HPG + x]);
     }
     // The engine pushes the CompeteFight record right after activation.
-    __global uint* rc = rc_take(scr, st, SCR_RC_COMP, RC_COMP_CAP, 3);
+    __global uint* rc = rc_take(rcb, st, SCR_RC_COMP, RC_COMP_CAP, 3);
     if (rc) {
         rc[0] = scr[SK_JRN_T];
         rc[1] = 5u;
@@ -2787,7 +2817,7 @@ static void duel_activate(__global uint* scr, __global uint* st,
 // update_dueling, the retail path. duel_low_hp uses the plain f64 ratio,
 // eligible_straight uses the preupdate snapshots with the corner state, and
 // the duel draws no RNG.
-static void duel_update(__global uint* scr, __global uint* st,
+static void duel_update(__global uint* scr, __global uint* rcb, __global uint* st,
     __global uint* si, __global const float* sf,
     __global double* sd, __global double* shl, __global const double* pd, const int r, const int n,
     const double course_distance, const int has_corner_events) {
@@ -2867,16 +2897,16 @@ static void duel_update(__global uint* scr, __global uint* st,
         : (own_group >= 0 ? own_group : (r < j ? r : j));
     if (own_group < 0) si[SI_DUEL_GROUP + r] = (uint)group;
     if (peer_group < 0) si[SI_DUEL_GROUP + j] = (uint)group;
-    duel_activate(scr, st, si, sd, pd, r);
+    duel_activate(scr, rcb, st, si, sd, pd, r);
     if (!(int)si[SI_DUEL_ACTIVE + j] && (int)si[SI_DUEL_FIGHT + j] == 0) {
-        duel_activate(scr, st, si, sd, pd, j);
+        duel_activate(scr, rcb, st, si, sd, pd, j);
     }
 }
 
 // latch_active_spot_cutoff plus update_spot_struggle, the Nige/Oonige state
 // machine. Timers were advanced in prepare, the token bit drives the target
 // chain, and no part of it draws RNG.
-static void spot_update(__global uint* scr, __global uint* st, __global uint* si, __global double* sd,
+static void spot_update(__global uint* scr, __global uint* rcb, __global uint* st, __global uint* si, __global double* sd,
     const int r, const int n, __global const double* pd, const double section_length) {
     const int strategy = (int)si[SI_STRATEGY + r];
     if (strategy != 1 && strategy != 5) {
@@ -2985,7 +3015,7 @@ static void spot_update(__global uint* scr, __global uint* st, __global uint* si
     }
     // The engine records the leader before its partners, partners in roster
     // order; the field reorders these slots before serialization.
-    __global uint* rc = rc_take(scr, st, SCR_RC_COMP, RC_COMP_CAP, 3);
+    __global uint* rc = rc_take(rcb, st, SCR_RC_COMP, RC_COMP_CAP, 3);
     if (rc) {
         rc[0] = scr[SK_JRN_T];
         rc[1] = 4u;
@@ -2995,7 +3025,7 @@ static void spot_update(__global uint* scr, __global uint* st, __global uint* si
         if (!started[j] || j == front_idx) {
             continue;
         }
-        rc = rc_take(scr, st, SCR_RC_COMP, RC_COMP_CAP, 3);
+        rc = rc_take(rcb, st, SCR_RC_COMP, RC_COMP_CAP, 3);
         if (rc) {
             rc[0] = scr[SK_JRN_T];
             rc[1] = 4u;
@@ -3126,7 +3156,7 @@ static void cp_update(__global uint* si, __global float* sf, __global double* sd
 // activate_skill for the injected asitame Accel effect, from the release
 // path. The modifier follows the release-conserve parameters and the effect
 // timer counts up from the negated scaled duration.
-static void asitame_release(__global uint* scr, __global uint* st,
+static void asitame_release(__global uint* scr, __global uint* rcb, __global uint* st,
     __global uint* si, __global float* sf,
     __global double* sd, const int r, __global const double* pd,
     const double distance, const int strategy) {
@@ -3181,7 +3211,7 @@ static void asitame_release(__global uint* scr, __global uint* st,
     si[SI_CPFLAGS + r] = flags;
     // The engine's activate hook records the conserve event with the clock.
     const ulong cbits = as_ulong(sd[SD_CLOCK + r]);
-    __global uint* rc = rc_take(scr, st, SCR_RC_CONS, RC_CONS_CAP, 3);
+    __global uint* rc = rc_take(rcb, st, SCR_RC_CONS, RC_CONS_CAP, 3);
     if (rc) {
         rc[0] = (uint)r;
         rc[1] = (uint)cbits;
@@ -3468,6 +3498,8 @@ static double sk_feat_value(const uint code, const double arg,
             : fmax(sd[SD_POS + r] - sd[SD_POS + j], 0.0);
         return d / 2.5;
     }
+    case FEAT_BADSTART:
+        return sd[SD_START + r];
     case FEAT_LASTSPURT: {
         if ((int)si[SI_SP_ACTIVE + r]) return 1.0;
         const int res = (int)si[SI_SP_RESULT + r];
@@ -3476,6 +3508,11 @@ static double sk_feat_value(const uint code, const double arg,
             return 0.0;
         }
         return convert_float_rte(sd[SD_POS + r]) >= sf[SF_SP_START + r] ? 1.0 : 0.0;
+    }
+    case FEAT_LSCALC: {
+        if ((int)si[SI_SP_COUNT + r] == 0) return SK_NAN;
+        const int res = (int)si[SI_SP_RESULT + r];
+        return res == 1 ? 2.0 : (res == 2 ? 1.0 : 0.0);
     }
     case FEAT_SLOPE:
         return sf[SF_SL_VALUE + r] > 0.f
@@ -3600,17 +3637,31 @@ static double sk_feat_value(const uint code, const double arg,
         return out && front && behind ? 1.0 : 0.0;
     }
     case FEAT_TEMPT_B:
-    case FEAT_TEMPT_F: {
+    case FEAT_TEMPT_F:
+    case FEAT_TEMPT_B_O:
+    case FEAT_TEMPT_F_O: {
         // Published-order slices around the runner, counting kakari rows.
+        // The _O pair mirrors the engine's is_opponent team filter
+        // (race_field.rs:913-915) used by the temptation_opponent_* names.
+        const int opp = feat == FEAT_TEMPT_B_O || feat == FEAT_TEMPT_F_O;
+        const uint team = si[SI_TEAM + r];
         const int rank = (int)si[SI_RANKCOL + r];
         int c = 0;
-        if (feat == FEAT_TEMPT_F) {
+        if (feat == FEAT_TEMPT_F || feat == FEAT_TEMPT_F_O) {
             for (int k = 0; k < rank - 1; k++) {
-                if ((int)si[SI_KAKARI + (int)rs[RS_ORDER + k]] != 0) c++;
+                const int j = (int)rs[RS_ORDER + k];
+                if (opp && team != 0u && si[SI_TEAM + j] == team) {
+                    continue;
+                }
+                if ((int)si[SI_KAKARI + j] != 0) c++;
             }
         } else {
             for (int k = rank; k < n; k++) {
-                if ((int)si[SI_KAKARI + (int)rs[RS_ORDER + k]] != 0) c++;
+                const int j = (int)rs[RS_ORDER + k];
+                if (opp && team != 0u && si[SI_TEAM + j] == team) {
+                    continue;
+                }
+                if ((int)si[SI_KAKARI + j] != 0) c++;
             }
         }
         return (double)c;
@@ -3626,12 +3677,16 @@ static double sk_feat_value(const uint code, const double arg,
         // running_style_temptation_count_{nige,senko,sashi,oikomi}: the
         // base-style group's kakari rows. The plain arm counts the querying
         // runner when it is in the group and rushing, the _opponent_ arm
-        // drops it (race_field.rs:945).
+        // drops it and same-team runners (race_field.rs:913-915, 945).
         const int opp = feat >= FEAT_RTEMP_OPP;
+        const uint team = si[SI_TEAM + r];
         const int group = 1 + (int)(feat - (opp ? FEAT_RTEMP_OPP : FEAT_RTEMP));
         int c = 0;
         for (int j = 0; j < n; j++) {
             if (j == r) continue;
+            if (opp && team != 0u && si[SI_TEAM + j] == team) {
+                continue;
+            }
             if (field_style((int)si[SI_STRATEGY + j]) == group
                 && (int)si[SI_KAKARI + j] != 0) {
                 c++;
@@ -3941,6 +3996,7 @@ static void aa_remove(__global uint* scr, const int r, const int slot) {
 #define SK_JRN_EXT 6u    // a=pidx b=owner c=take, e1=new timer
 static void sk_jrn(__global uint* scr, const uint op, const uint a, const uint b,
     const uint c, const uint d, const double e1, const double e2) {
+#if SK_JRN_N > 0
     const uint w = scr[SK_JRN];
     if (w + 11u > (uint)SK_JRN_N) {
         return;
@@ -3959,6 +4015,7 @@ static void sk_jrn(__global uint* scr, const uint op, const uint a, const uint b
     at[8] = (uint)v2;
     at[9] = (uint)(v2 >> 32);
     scr[SK_JRN] = w + 10u;
+#endif
 }
 
 // retire_finished_running_skills over one runner, scanning the same way the
@@ -4042,7 +4099,8 @@ static int sk_targets(__global const uint* si, __global const uint* rs,
 // (race_solver.rs:2504-2539, 2642-2648). A cross-target slot re-draws the fan
 // at its turn and takes the owner's value, which is exact for the kinds whose
 // delivery is one timer and one value in the receiver's order.
-static void aa_apply(__global const uint* sk, __global uint* scr, __global uint* si,
+static void aa_apply(__global const uint* sk, __global uint* scr, __global uint* rcb,
+    __global uint* si,
     __global const uint* rs, __global double* sd, __global double* skd, __global uint* st,
     __global uint* bank,
     const int paired, const int n, const int r, const int rec, const int slot,
@@ -4059,7 +4117,7 @@ static void aa_apply(__global const uint* sk, __global uint* scr, __global uint*
     // The engine's apply_activation still records the follow-up event with
     // its selection, even when the self debuff skips delivery (the immune
     // runner's own entry was filtered out of the selection).
-    __global uint* fan = rc_take(scr, st, SCR_RC_FAN, RC_FAN_CAP, 6 + RACE_MAXR);
+    __global uint* fan = rc_take(rcb, st, SCR_RC_FAN, RC_FAN_CAP, 6 + RACE_MAXR);
     if (fan != 0) {
         const ulong fbits = as_ulong(sd[SD_CLOCK + r]);
         fan[0] = (uint)r;
@@ -4071,7 +4129,7 @@ static void aa_apply(__global const uint* sk, __global uint* scr, __global uint*
     if (target == 1 && debuff && sd[SD_IMMUNE + r] <= 0.0) {
         if (fan != 0) {
             fan[5] = 1u;
-            rc_give(scr, SCR_RC_FAN, RACE_MAXR);
+            rc_give(rcb, SCR_RC_FAN, RACE_MAXR);
         }
         return;
     }
@@ -4111,13 +4169,13 @@ static void aa_apply(__global const uint* sk, __global uint* scr, __global uint*
     if (fan != 0) {
         if (null_sel) {
             fan[5] = 0u;
-            rc_give(scr, SCR_RC_FAN, RACE_MAXR);
+            rc_give(rcb, SCR_RC_FAN, RACE_MAXR);
         } else {
             fan[5] = (uint)(nrecv + 1);
             for (int q = 0; q < nrecv; q++) {
                 fan[6 + q] = (uint)outs[q];
             }
-            rc_give(scr, SCR_RC_FAN, RACE_MAXR - nrecv);
+            rc_give(rcb, SCR_RC_FAN, RACE_MAXR - nrecv);
         }
     }
     const ulong vbits = as_ulong(modifier);
@@ -4165,7 +4223,7 @@ static void aa_apply(__global const uint* sk, __global uint* scr, __global uint*
 // live instance delivers its kind-1 slots, three at most per slot, with the
 // durations read before any of them is applied (race_solver.rs:1857-1875).
 static void aa_event1(__global const uint* sk, __global uint* sks,
-    __global double* skd, __global uint* scr, __global uint* si, __global const uint* rs,
+    __global double* skd, __global uint* scr, __global uint* rcb, __global uint* si, __global const uint* rs,
     __global double* sd, __global uint* st, __global uint* bank, const int paired,
     const int n, const int r, const float dt) {
     __global uint* list = scr + SK_RUN + r * (1 + SK_RUNN);
@@ -4204,7 +4262,7 @@ static void aa_event1(__global const uint* sk, __global uint* sks,
         }
     }
     for (int a = 0; a < na; a++) {
-        aa_apply(sk, scr, si, rs, sd, skd, st, bank, paired, n, r, a_rec[a], a_slot[a], a_dur[a],
+        aa_apply(sk, scr, rcb, si, rs, sd, skd, st, bank, paired, n, r, a_rec[a], a_slot[a], a_dur[a],
             dt);
     }
 }
@@ -4214,7 +4272,7 @@ static void aa_event1(__global const uint* sk, __global uint* sks,
 // delivers up to its cap, three for kind 2 and two for kind 3
 // (race_solver.rs:1901-1941).
 static void aa_turns(__global const uint* sk, __global uint* sks,
-    __global double* skd, __global uint* scr, __global uint* si, __global const uint* rs,
+    __global double* skd, __global uint* scr, __global uint* rcb, __global uint* si, __global const uint* rs,
     __global double* sd, __global uint* st, __global uint* bank, const int paired,
     const int n, const float dist_f, const int r, const double upto) {
     const double old_floor = sd[SD_AFLOOR + r];
@@ -4273,7 +4331,7 @@ static void aa_turns(__global const uint* sk, __global uint* sks,
     for (int a = 0; a < na; a++) {
         // Turn deliveries run after every runner's prepare pass for the tick,
         // so no receiver's timer map is still un-stepped in front of them.
-        aa_apply(sk, scr, si, rs, sd, skd, st, bank, paired, n, r, a_rec[a], a_slot[a], a_dur[a],
+        aa_apply(sk, scr, rcb, si, rs, sd, skd, st, bank, paired, n, r, a_rec[a], a_slot[a], a_dur[a],
             0.0f);
     }
     if (aa_retire(sk, sks, skd, si, scr, sd, r)) {
@@ -4437,7 +4495,7 @@ static void aa_extend(__global const uint* sk, __global uint* sks,
 // prepare loop. Dead records keep stepping because the engine's timer map is
 // keyed by the firing, not by the pending record's life.
 static void skills_advance(__global const uint* sk, __global uint* sks,
-    __global double* skd, __global uint* scr, __global uint* si, __global const uint* rs,
+    __global double* skd, __global uint* scr, __global uint* rcb, __global uint* si, __global const uint* rs,
     __global double* sd, __global uint* st, const float dt, const int n,
     const float dist_f, const double distance, __global uint* bank, const int paired) {
     const int nrec = (int)sk[SK_NREC];
@@ -4515,13 +4573,13 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
         aa_retire(sk, sks, skd, si, scr, sd, r);
         si[SI_PENDN + r] = 0u;
         for (int q = 0; q < np; q++) {
-            aa_event1(sk, sks, skd, scr, si, rs, sd, st, bank, paired, n, r, dt);
+            aa_event1(sk, sks, skd, scr, rcb, si, rs, sd, st, bank, paired, n, r, dt);
         }
     }
     for (int r = 0; r < n; r++) {
         aa_flip(sk, sks, skd, scr, r, dist_f);
     }
-    if (scr[SCR_RC_ON] != 0u) {
+    if (rcb[SCR_RC_ON] != 0u) {
         // The deactivate hook of lib.rs:688-723 pushes the pending tuple when
         // the last tracked entry of a (runner, id) leaves. The scan mirrors
         // that with the record timers, the kernel's live-entry ledger.
@@ -4550,7 +4608,7 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
             if (live != 0) {
                 continue;
             }
-            __global uint* act = rc_take(scr, st, SCR_RC_ACT, RC_ACT_CAP, 10);
+            __global uint* act = rc_take(rcb, st, SCR_RC_ACT, RC_ACT_CAP, 10);
             if (act == 0) {
                 return;
             }
@@ -4570,21 +4628,22 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
     }
 }
 
-// skill_targets for the rank-window codes and the kakari group code: the
-// first `limit` candidates in the engine's order. The ahead code (9) slices
-// the published order outward ahead of self, the behind code (10) includes
-// self then walks behind, the visible code (4) filters the order by this
-// tick's visible column, and the group code (21) takes every runner whose
-// strategy equals limit and who is currently rushing, uncapped
-// (race_field.rs:439-445). The debuff same-team drop is applied by the
-// caller on this capped list, matching race_field.rs:458-461.
+// skill_targets for the rank-window codes, the kakari group code and the
+// style group code: the first `limit` candidates in the engine's order. The
+// ahead code (9) slices the published order outward ahead of self, the behind
+// code (10) includes self then walks behind, the visible code (4) filters the
+// order by this tick's visible column, the group code (21) takes every runner
+// whose strategy equals limit and who is currently rushing, and the style code
+// (18) takes every runner whose strategy equals limit, uncapped and no rush
+// requirement (race_field.rs:439-445). The debuff same-team drop is applied by
+// the caller on this capped list, matching race_field.rs:458-461.
 static int sk_targets(__global const uint* si, __global const uint* rs,
     __global const uint* scr, const int r, const int target, const int limit,
     const int n, int* outs) {
     const int rank = (int)si[SI_RANKCOL + r];
     const int vis_base = (int)(SCR_LISTS + (uint)r * LIST_STRIDE + RACE_MAXR);
     const int vis_len = (int)si[SI_L_VISN + r];
-    const int cap = target == 21 ? RACE_MAXR : limit;
+    const int cap = (target == 21 || target == 18) ? RACE_MAXR : limit;
     int cnt = 0;
     for (int k = 0; k < n && cnt < cap; k++) {
         int j;
@@ -4598,10 +4657,10 @@ static int sk_targets(__global const uint* si, __global const uint* rs,
                 break;
             }
             j = (int)rs[RS_ORDER + rank + k];
-        } else if (target == 21) {
+        } else if (target == 21 || target == 18) {
             j = (int)rs[RS_ORDER + k];
-            if (j == r || !(int)si[SI_KAKARI + j]
-                || field_style((int)si[SI_STRATEGY + j]) != (limit == 5 ? 1 : limit)) {
+            if (j == r || field_style((int)si[SI_STRATEGY + j]) != (limit == 5 ? 1 : limit)
+                || (target == 21 && !(int)si[SI_KAKARI + j])) {
                 continue;
             }
         } else {
@@ -4706,7 +4765,7 @@ static float sk_hp_guts_factor(__global const double* pd, const float guts) {
 // marks the record dead forever (engine: cooldown map entry +INF and the
 // pending record removed).
 static void skills_fire(__global const uint* sk, __global uint* sks,
-    __global double* skd, __global uint* scr, __global uint* si,
+    __global double* skd, __global uint* scr, __global uint* rcb, __global uint* si,
     __global double* shl, __global double* sd, __global const double* pd,
     __global float* sf, __global const uint* rs, const int rec, const int r,
     const double hp, const double gap, const float dist_f, const int init_pass,
@@ -4755,9 +4814,9 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
     __global uint* tgtp = 0;
     int tgt_res = 0;
     __global uint* tgt0 = 0;
-    if (scr[SCR_RC_ON] != 0u && !sid0) {
+    if (rcb[SCR_RC_ON] != 0u && !sid0) {
         tgt_res = 6 + n_eff * (1 + RACE_MAXR);
-        __global uint* tgt = rc_take(scr, st, SCR_RC_TGT, RC_TGT_CAP, tgt_res);
+        __global uint* tgt = rc_take(rcb, st, SCR_RC_TGT, RC_TGT_CAP, tgt_res);
         if (tgt != 0) {
             const ulong cbits = as_ulong(sd[SD_CLOCK + r]);
             tgt[0] = (uint)r;
@@ -4873,6 +4932,11 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                     if (debuff && owner_team != 0u && j != r && si[SI_TEAM + j] == owner_team) {
                         continue;
                     }
+                    if (kind == SK_EFF_SETDELAY) {
+                        // SetStartDelay overwrites the receiver's live start
+                        // delay (race_solver.rs:2591), the word is_badstart reads.
+                        sd[SD_START + j] = modifier;
+                    }
                     if (kind == SK_EFF_RECOVERY) {
                         // Delivered perspective is never Self: HP lands from
                         // the receiver's max, the heal count stays with the
@@ -4897,6 +4961,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                         sf[SF_RS_FORCED + j] = fmax(convert_float_rte(modifier), 0.f);
                     }
                     if (kind == SK_EFF_SPEEDUP || kind == SK_EFF_STAMINUP
+                        || kind == SK_EFF_POWERUP
                         || kind == SK_EFF_WISDOMUP || kind == SK_EFF_GUTSUP) {
                         // apply_external_effect with the effect rewritten to
                         // the self target (race_field.rs:467-477): the stat
@@ -4929,6 +4994,15 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                             sd[SD_STAM + j] = fmin(fmax((double)value, 1.0), 2000.0);
                             // Engine :2558 bumps raw_stamina beside the field.
                             sd[SD_RAWST + j] = fmax(sd[SD_RAWST + j] + modifier, 1.0);
+                        } else if (kind == SK_EFF_POWERUP) {
+                            // Engine :2562 bumps raw_power beside the field, and
+                            // the follow-up refresh recomputes the accel cache.
+                            const float value =
+                                (float)sd[SD_HPP_A + j] + convert_float_rte(modifier);
+                            sd[SD_HPP_A + j] = (double)value;
+                            sd[SD_HPP + j] = fmin(fmax((double)value, 1.0), 2000.0);
+                            sd[SD_RAWPW + j] = fmax(sd[SD_RAWPW + j] + modifier, 1.0);
+                            sf[SF_ACCEL_BASE + j] = convert_float_rte(sd[SD_HPP + j]);
                         } else {
                             const float value =
                                 (float)sd[SD_HPG_A + j] + convert_float_rte(modifier);
@@ -4984,6 +5058,12 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
             }
             continue;
         }
+        if (kind == SK_EFF_SETDELAY) {
+            // SetStartDelay overwrites the solver field (race_solver.rs:2591),
+            // unguarded, and is_badstart reads it from the first gate scan.
+            sd[SD_START + r] = modifier;
+            continue;
+        }
         if (kind == SK_EFF_RECOVERY) {
             if (modifier > 0.0) {
                 // The engine counts a heal only from the self perspective.
@@ -5026,6 +5106,20 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                 if (init_pass != 0) {
                     sk_hp_stamina_reset(si, sd, shl, pd, dist_f, r);
                 }
+            }
+            continue;
+        }
+        if (kind == SK_EFF_POWERUP) {
+            // add_stat_modifier(2) moves the accumulator and the clamped
+            // field, and engine :2562 moves raw_power beside it. The three
+            // live physics consumers (target speed, lane movement, accel)
+            // read horse.power afresh each tick, so the sf cache follows.
+            if ((rd[2] & SK_FLAG_INIT_BUMP) == 0) {
+                const float value = (float)sd[SD_HPP_A + r] + convert_float_rte(modifier);
+                sd[SD_HPP_A + r] = (double)value;
+                sd[SD_HPP + r] = fmin(fmax((double)value, 1.0), 2000.0);
+                sd[SD_RAWPW + r] = fmax(sd[SD_RAWPW + r] + modifier, 1.0);
+                sf[SF_ACCEL_BASE + r] = convert_float_rte(sd[SD_HPP + r]);
             }
             continue;
         }
@@ -5114,14 +5208,14 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
         }
     }
     if (tgtp != 0) {
-        rc_give(scr, SCR_RC_TGT, tgt_res - (int)(tgtp - tgt0));
+        rc_give(rcb, SCR_RC_TGT, tgt_res - (int)(tgtp - tgt0));
     }
     // The activation-hook record for skillEvents: a pending fire reuses the
     // live (runner, id) slot's ordinal, else takes the next sequence number
     // (lib.rs:660-682).
     __global uint* act = 0;
-    if (scr[SCR_RC_ON] != 0u && !sid0) {
-        act = rc_take(scr, st, SCR_RC_ACT, RC_ACT_CAP, 10);
+    if (rcb[SCR_RC_ON] != 0u && !sid0) {
+        act = rc_take(rcb, st, SCR_RC_ACT, RC_ACT_CAP, 10);
     }
     if (act != 0) {
         // The activate hook at lib.rs:660-682 reads the id's live self-entry
@@ -5162,9 +5256,9 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                 qs[SKR_ORD] = 0u;
             }
         }
-        int ord = reused != 0 ? reused - 1 : (int)scr[SCR_RC_SEQ];
+        int ord = reused != 0 ? reused - 1 : (int)rcb[SCR_RC_SEQ];
         if (reused == 0) {
-            scr[SCR_RC_SEQ] = (uint)ord + 1u;
+            rcb[SCR_RC_SEQ] = (uint)ord + 1u;
         }
         __global uint* rs2 = sks + SKR_STRIDE * rec;
         if (remaining > 0.0) {
@@ -5181,7 +5275,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
         act[5] = (uint)dbits;
         act[6] = (uint)(dbits >> 32);
         act[7] = (uint)(ord + 1);
-        act[8] = (uint)((remaining > 0.0 ? 1 : 0) | (scr[SCR_RC_RPT] != 0u ? 2 : 0));
+        act[8] = (uint)((remaining > 0.0 ? 1 : 0) | (rcb[SCR_RC_RPT] != 0u ? 2 : 0));
         act[9] = scr[SK_JRN_T];
     }
     wd[SKD_INSTANCE] = runtime > 0.0 ? -runtime : 0.0;
@@ -5410,7 +5504,7 @@ static void aa_select(__global const uint* sk, __global uint* sks,
 // bump only; the reservation set bypasses the window, the conditions and the
 // arms (race_solver.rs:2188-2320).
 static void skills_scan(__global const uint* sk, __global uint* sks,
-    __global double* skd, __global uint* scr, __global uint* si,
+    __global double* skd, __global uint* scr, __global uint* rcb, __global uint* si,
     __global double* sd, __global double* shl, __global const uint* rs,
     __global const double* pd, __global float* sf, const double distance,
     const int p, const int n, const float dist_f, const int init_pass,
@@ -5461,7 +5555,7 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
                     }
                     continue;
                 }
-                aa_turns(sk, sks, skd, scr, si, rs, sd, st, bank, paired, n, dist_f, r,
+                aa_turns(sk, sks, skd, scr, rcb, si, rs, sd, st, bank, paired, n, dist_f, r,
                     (double)rd[0]);
             }
             if (rd[2] & SK_FLAG_ANYACT) {
@@ -5506,7 +5600,7 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
                     || (state == (uint)SK_S_DISABLED && wd[SKD_COOLDOWN] >= 0.0);
                 if (key_ready) {
                     const double gap = sd[SD_POS + (int)rs[RS_ORDER + 0]] - pos;
-                    skills_fire(sk, sks, skd, scr, si, shl, sd, pd, sf, rs, rec, r,
+                    skills_fire(sk, sks, skd, scr, rcb, si, shl, sd, pd, sf, rs, rec, r,
                         shl[r * SH_STRIDE + SH_HP], fmax(gap, 0.0), dist_f, init_pass,
                         n, distance, ev, st, bank, paired);
                 }
@@ -5537,7 +5631,7 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
                 continue;
             }
             const double gap = sd[SD_POS + (int)rs[RS_ORDER + 0]] - pos;
-            skills_fire(sk, sks, skd, scr, si, shl, sd, pd, sf, rs, rec, r,
+            skills_fire(sk, sks, skd, scr, rcb, si, shl, sd, pd, sf, rs, rec, r,
                 shl[r * SH_STRIDE + SH_HP], fmax(gap, 0.0), dist_f, init_pass, n,
                 distance, ev, st, bank, paired);
             if ((rd[2] & SK_FLAG_SYOUBU) != 0u) {
@@ -5548,7 +5642,7 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
             // The pass end gives every running skill still short of a turn
             // its turn, then the random-skill reservations are recomputed
             // (race_solver.rs:2105-2119, 2318-2320).
-            aa_turns(sk, sks, skd, scr, si, rs, sd, st, bank, paired, n, dist_f, r, 1e300);
+            aa_turns(sk, sks, skd, scr, rcb, si, rs, sd, st, bank, paired, n, dist_f, r, 1e300);
             aa_select(sk, sks, skd, scr, si, sd, bank, paired, r);
         }
     }

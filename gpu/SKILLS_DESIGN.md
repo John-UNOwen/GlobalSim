@@ -153,8 +153,9 @@ Term (8 words): `kind, arg, tag_off, tag_len, corner_idx, 0, 0, 0`. `kind` is
 the sampler id (0 all_corner_random, 1 straight_random, 2 down_slope_random,
 3 up_slope_random, 4 phase_random, 5 phase_firsthalf_random,
 6 phase_laterhalf_random, 7 is_finalcorner_random, 8 distance_rate_after_random,
-9 corner_random), and `corner_idx` selects the qualifying final corner for id 7
-and the resolved index-tagged corner row for id 9. The sampler runs at init on
+9 corner_random, 10 last_straight_random, 11 random_lot), and `corner_idx` selects the qualifying final corner for id 7,
+the resolved index-tagged corner row for id 9 and the resolved straight row for
+id 10; id 11 takes its threshold in `arg` and opens (0, distance) on a hit. The sampler runs at init on
 the shared stream (solo) or a keyed substream (paired, tag
 `T{sid}:{alt}:condition:{name}`) and produces the sampled windows. The init
 kernel intersects them with the record's static region list in engine `rmap_*`
@@ -450,8 +451,11 @@ comparators (`activation_conditions.rs:229-243`).
 | all_corner_random, straight_random, down_slope_random, up_slope_random | sampled term (`==1`), init-time windows through the scan gate |
 | phase_random, phase_firsthalf_random, phase_laterhalf_random | sampled term (`==0..4` phase index), window from the six-way phase split |
 | is_finalcorner_random | sampled term, window over the qualifying final corner (an id >= 4 starting within the last 1000 m), else no draw and the record stays inert |
+| last_straight_random | sampled term 10, window over the first straight (reverse order) starting at or after the last corner's start, only when that corner is within the last 1000 m, else no draw and the record stays inert |
+| random_lot | sampled term 11, shared-stream roll `integer(0,100)` under the argument opens the whole race (0, distance), the miss spends the draw and leaves the record inert; the retail parser drops the live solver filter, so the draw alone gates it |
 | distance_rate_after_random | sampled term (`==`, argument >= 0), init windows like the other samplers |
 | corner_random | sampled term (`==`, the argument resolves the course corner row: the index-tagged row when the course tags them, else the legacy `rows.len() + arg - 5` slot), the row's start..end as the one window, an untagged non-integer course index refuses (the engine's init error) and no resolved row folds the arm dead (`activation_conditions.rs:549-572`, `retail_initialization.rs:135-160`) |
+| is_exist_chara_id | roster fold (`==` and `!=`): true when the argument lands in the field's charaId set, missing ids counted as 0, and the whole alternative folds dead on false, effects never built (`activation_conditions.rs:1584-1588`, `race_solver_builder.rs:556-571`) |
 | lane_type | dynamic FEAT_LANETYPE, `HorseRaceInfo.get_Lane` bands: 0..3 from the live lane crossing 0.2, 0.4, 0.6, six |
 | is_move_lane | dynamic FEAT_MOVELANE, 0 idle, 1 while a lane move runs and 2 when it is directional, six |
 | blocked_front_continuetime | dynamic FEAT_BFRONT, `trunc` of the continuous blocked-front clock, six |
@@ -479,9 +483,9 @@ comparators (`activation_conditions.rs:229-243`).
 | blocked_front | dynamic FEAT_BFRONTB: the live front-blocker scan at evaluation time (`lane_blocking_sample`), not the field-update stored sample: the engine's getter rebuilds from live solver rows |
 | is_surrounded | dynamic FEAT_SURR: out, front and behind membership in one scan (f32-rounded gaps, 0.16666/0.08333 lane tolerances), six |
 | temptation_count_behind, temptation_count_infront | dynamic FEAT_TEMPT_B/F, published-order slices behind and ahead, counting kakari rows, six |
-| temptation_opponent_count_behind, temptation_opponent_count_infront | same leaves, gated to all-zero-team rosters: `is_opponent` is identity there, a team in the roster refuses by name |
+| temptation_opponent_count_behind, temptation_opponent_count_infront | dynamic FEAT_TEMPT_B_O/F_O 69 to 70, the same slices dropping same-team rows like the engine's `is_opponent`; all-zero-team rosters keep the unfiltered FEAT_TEMPT_B/F readers, the classic lane always does |
 | running_style_temptation_count_nige/senko/sashi/oikomi | dynamic FEAT_RTEMP 58 to 61, the group in the low two id bits: kakari rows of that group including self, six |
-| running_style_temptation_opponent_count_nige/senko/sashi/oikomi | dynamic FEAT_RTEMP_OPP 62 to 65, the same rows with self dropped like the engine's `opponents_only` arm, all-zero-team gate as the pair above |
+| running_style_temptation_opponent_count_nige/senko/sashi/oikomi | dynamic FEAT_RTEMP_OPP 62 to 65, the same rows with self dropped and same-team rows dropped on the retail lane like the engine's `opponents_only` arm; the classic lane keeps the all-zero-team gate |
 | distance_diff_rate | dynamic FEAT_DDRATE, the ranked endpoints with self substitution, the f32 `((first-own)/spread)*100` floored, an approximately-zero spread returning exactly 0 |
 | distance_diff_top_float | dynamic FEAT_DDTOPF, `floor(gap*10)/10` in f32 from the leader, six |
 | running_style_count_same | roster fold: the runner's own base-style count including self, six (`roster_condition`, refuses without a parsable strategy) |
@@ -557,8 +561,11 @@ Not yet ported (fallback-flagged, plan order in the README):
   and `33` and `34` (no `SkillType` variant: the retail builder errors, the
   no-ffi path degrades to Noop). `36` and `37` (random skill activation,
   `race_solver.rs:2677-2737`) are accepted at self target only.
-- effect targets outside 1, 4, 9, 10 and 21, and target `21` only with kind
-  `13` (the rushing strategy-group receiver set). `10`
+- effect targets outside 1, 4, 9, 10, 18 and 21, target `21` only with kind
+  `13` (the rushing strategy-group receiver set) and target `18` (the
+  style-group debuff fan of `race_field.rs:439-445`, all runners of the
+  `targetValue` style except the owner, uncapped) only on retail, the classic
+  fan has no style branch. `10`
   `MultiplyStartDelay` at another runner fires inert in retail (the receiver
   keeps its init-applied gate) and is accepted. The same-team debuff drop is a
   real delivery gate now, not a roster flag: each runner's fixed team id reaches
@@ -588,13 +595,15 @@ Not yet ported (fallback-flagged, plan order in the README):
 
 Enumerated (wave 13b). `gpu/tests/parity_audit.rs` runs all 751 ids of the
 merged app table through both compilers with a fitted roster. The retail
-compiler compiles 688 and refuses 63 ids across 17 refusal families (per-id
-"has no alternatives", the `PowerUp` effect, unported leaves like
-`'lastspurt'==2`, `'random_lot'==15/30/50`, `'is_basis_distance'`,
-`'straight_front_type'==2`, `'is_badstart'==0`, condition arm-count, effect
-targets 18 to 20, and the advantage-pair field above). The classic compiler
-compiles 445 and refuses 306 ids across 54 families: retail's share plus the
-live-runtime condition leaves the classic kernel has no reader for (`order`,
+compiler compiles 741 and refuses 10 ids across 5 refusal families (per-id
+"has no alternatives",
+condition arm-count, effect
+targets 19 and 20, and the advantage-pair field above; the `PowerUp` effect,
+`'is_basis_distance'`, `'is_badstart'`, `'straight_front_type'`, `'lastspurt'`,
+`'last_straight_random'`, `'random_lot'` and `'is_exist_chara_id'` left the list in E1
+and E1a). The classic
+compiler compiles 451 and refuses 300 ids across 52 families: retail's share
+plus the live-runtime condition leaves the classic kernel has no reader for (`order`,
 `distance_diff_rate`, `blocked_front`, the `activate_count_*` and
 `temptation_*` counters and the rest), `value_usage` 8 and 14 live draws,
 effect target 18 and type 37. The exact family lists are the pinned constants
@@ -741,7 +750,7 @@ in `tests/wave9_fan_trace.rs` pin both.
 
 ## Bounds (enforced host-side before launch)
 
-`nrec<=960` (8 record slots per runner at the 120-horse grid cap), `neff<=192`, 8 effects per record, `nprog<=3072`, `narm<=256` and two arms per record,
+`nrec<=960` (8 record slots per runner at the engine's 120-horse field, independent of the lane's 18-horse roster cap), `neff<=192`, 8 effects per record, `nprog<=3072`, `narm<=256` and two arms per record,
 `ntag<=4096`, `nstr<=12`, `ncor<=12`, `nslope<=16`, at most 2048 regions per
 race and 16 per arm chain, terms at most 160 per race, one sampled term per
 record, 4 sampled windows per term, 12 receiver entries per runner across the

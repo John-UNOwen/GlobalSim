@@ -48,6 +48,8 @@ pub mod initialization;
 // The whole-race host reads the geometry and initialization hosts, so it
 // shares their not(test) gating (see the notes above).
 #[cfg(all(feature = "race", not(test)))]
+mod coalesce;
+#[cfg(all(feature = "race", not(test)))]
 pub mod race_exec;
 #[cfg(all(feature = "race", not(test)))]
 pub mod classic_exec;
@@ -67,6 +69,10 @@ pub mod classic_reply;
 // initialization hosts and the vendored binary_replay above.
 #[cfg(all(feature = "race", not(test)))]
 pub mod replay_packet;
+// The fold of globalsim-wasm's compact_record over a compact launch's kept
+// rows, the record the app consumes straight from the lane.
+#[cfg(all(feature = "race", not(test)))]
+pub mod compact;
 #[cfg(all(feature = "race", not(test)))]
 pub mod facade;
 

@@ -14,9 +14,9 @@ use crate::random_gen::Rule30CARng;
 use crate::retail_geometry;
 use ocl::{Buffer, Queue, flags};
 
-// The layout bound every runner-indexed region sizes to: 18 by default (the
-// game's field limit), 120 under wide-roster for the engine's grid band
-// (src/lib.rs:262-272). Rosters above it refuse by size, before the kernel.
+// The layout bound every runner-indexed region sizes to: the game's 18-horse
+// field limit (`gpu::ROSTER_CAP`, the single source). Rosters above it refuse
+// by size, before the kernel.
 pub const RACE_MAXR: usize = crate::gpu::ROSTER_CAP;
 
 /// Non-grid fields above this runner count are outside the validated lane
@@ -29,36 +29,67 @@ pub const NON_GRID_BAND_REFUSAL: &str =
     "non-grid fields above 24 runners are outside the validated lane band";
 
 pub const RACE_MAX_TICKS: usize = 6144;
+// The frame window sizes to a per-course tick bound, not the 400 s engine
+// ceiling. A race still running at the bound flags FB_TICKS and reruns on the
+// CPU, so a tight bound costs reruns, never wrong frames.
+pub const TICK_BOUND_SPEED: f64 = 9.0;
+pub const TICK_BOUND_MARGIN: usize = 640;
+pub const TICK_BOUND_MIN: usize = 640;
+pub fn course_tick_bound(distance: f64) -> usize {
+    let dt = DT as f64;
+    let raw = (distance / TICK_BOUND_SPEED / dt).ceil() + TICK_BOUND_MARGIN as f64;
+    (raw.clamp(TICK_BOUND_MIN as f64, RACE_MAX_TICKS as f64)) as usize
+}
 pub const RACE_MAX_SLOPES: usize = 16;
-pub const RI_STRIDE: usize = RI_DEBUG_TICK + 16;
+pub const RI_STRIDE: usize = RI_DEBUG_TICK + 24;
 pub const RIL_STRIDE: usize = PD_RUN0 + PD_RUN_STRIDE * RACE_MAXR;
 pub const ST_STRIDE: usize = ST_LATER_SYB + 1;
 // Skill scratch mirrors of retail_core.cl and skills.cl.
 pub const SK_STRIDE: usize = crate::skills_compile::SK_STRIDE;
-const SK_RMAX: usize = crate::skills_compile::SK_RMAX;
+// The compiled table always keeps the SK_RMAX layout. Only the scratch
+// block is sized down, to the smallest bucket that holds the batch.
+pub const SK_RMAX: usize = crate::skills_compile::SK_RMAX;
+pub const SK_BUCKETS: [usize; 4] = [64, 128, 256, SK_RMAX];
+pub const fn sk_rcap(nrec: usize) -> usize {
+    let mut i = 0;
+    while i < SK_BUCKETS.len() {
+        if nrec <= SK_BUCKETS[i] {
+            return SK_BUCKETS[i];
+        }
+        i += 1;
+    }
+    SK_RMAX
+}
 const SKR_STRIDE: usize = 26;
 const SK_SEQN: usize = 40;
 const SKD_STRIDE: usize = 276;
 const SCR_SK: usize = SCR_BANKS + RACE_MAXR * BANK_WORDS;
-const SK_TSEQ: usize = SCR_SK + SK_RMAX * SKR_STRIDE;
-const SK_ASEQ: usize = SK_TSEQ + SK_RMAX * SK_SEQN;
-const SK_CSEQ: usize = SK_ASEQ + SK_RMAX * SK_SEQN;
-const SK_LSEQ: usize = SK_CSEQ + SK_RMAX * SK_SEQN;
-const SK_VSEQ: usize = SK_LSEQ + SK_RMAX * SK_SEQN;
-const SK_SUB: usize = SK_VSEQ + SK_RMAX * SK_SEQN;
-const SK_STAGED: usize = SK_SUB + BANK_WORDS;
+const fn sk_tseq(rcap: usize) -> usize { SCR_SK + rcap * SKR_STRIDE }
+const fn sk_aseq(rcap: usize) -> usize { sk_tseq(rcap) + rcap * SK_SEQN }
+const fn sk_cseq(rcap: usize) -> usize { sk_aseq(rcap) + rcap * SK_SEQN }
+const fn sk_lseq(rcap: usize) -> usize { sk_cseq(rcap) + rcap * SK_SEQN }
+const fn sk_vseq(rcap: usize) -> usize { sk_lseq(rcap) + rcap * SK_SEQN }
+const fn sk_sub(rcap: usize) -> usize { sk_vseq(rcap) + rcap * SK_SEQN }
+const fn sk_staged(rcap: usize) -> usize { sk_sub(rcap) + BANK_WORDS }
 const SK_AAPN: usize = 128;
 const SK_AAPW: usize = 6;
 const SK_RUNN: usize = 8;
-const SK_AAP: usize = SK_STAGED + 2 * SK_RMAX;
-const SK_RUN: usize = SK_AAP + SK_AAPN * SK_AAPW;
-const SK_VVAL: usize = SK_RUN + RACE_MAXR * (1 + SK_RUNN);
-// Diagnostics mirror of the kernel's free-form additionalActivate journal.
-pub const SK_JRN0: usize = SK_VVAL + SK_RMAX * 16;
+const fn sk_aap(rcap: usize) -> usize { sk_staged(rcap) + 2 * rcap }
+const fn sk_run(rcap: usize) -> usize { sk_aap(rcap) + SK_AAPN * SK_AAPW }
+const fn sk_vval(rcap: usize) -> usize { sk_run(rcap) + RACE_MAXR * (1 + SK_RUNN) }
+// The u32 scratch ends at the journal tick mirror. The window before it
+// exists only in the -D SK_DIAG program variant.
+pub const fn sk_jrn0(rcap: usize) -> usize { sk_vval(rcap) + rcap * 16 }
 pub const SK_JRN_N: usize = 16384;
-// Full-reply channel block, mirrors of the retail_core.cl region after the
-// journal, each region counting its own records.
-pub const SCR_RC_ON: usize = SK_JRN0 + SK_JRN_N + 1;
+pub const fn scr_u_words(rcap: usize, diag: bool) -> usize {
+    sk_jrn0(rcap) + 1 + if diag { SK_JRN_N } else { 0 }
+}
+pub const SCR_U_WORDS: usize = scr_u_words(SK_RMAX, false);
+pub const SCR_U_WORDS_DIAG: usize = scr_u_words(SK_RMAX, true);
+// Full-reply channels, rc-relative, each region counting its own records.
+// Only full-request slots pay the block, other races share the host's
+// zero-filled sink block 0.
+pub const SCR_RC_ON: usize = 0;
 pub const SCR_RC_SEQ: usize = SCR_RC_ON + 1;
 pub const SCR_RC_LEAD: usize = SCR_RC_SEQ + 1;
 pub const SCR_RC_RPT: usize = SCR_RC_LEAD + RACE_MAXR;
@@ -76,9 +107,10 @@ pub const SCR_RC_PHR: usize = SCR_RC_COMP + 1 + RC_COMP_CAP;
 pub const RC_PHR_CAP: usize = 8192;
 pub const SCR_RC_KAK: usize = SCR_RC_PHR + 1 + RC_PHR_CAP;
 pub const RC_KAK_CAP: usize = 1024;
-pub const SCR_U_WORDS: usize = SCR_RC_KAK + 1 + RC_KAK_CAP;
+pub const RC_WORDS: usize = SCR_RC_KAK + 1 + RC_KAK_CAP;
 pub const SRL_SKD: usize = SRL_HP_OUT_L + RACE_MAXR * OOL;
-pub const SRL_WORDS: usize = SRL_SKD + SK_RMAX * SKD_STRIDE;
+pub const fn srl_words(rcap: usize) -> usize { SRL_SKD + rcap * SKD_STRIDE }
+pub const SRL_WORDS: usize = srl_words(SK_RMAX);
 pub const DT: f32 = 0.0666;
 
 // Slot bases, mirrors of retail_core.cl.
@@ -101,6 +133,16 @@ pub const RI_LOT_MAX: usize = 14;
 pub const RI_EMPTY_MOVE: usize = 15;
 pub const RI_DEBUG_TICK: usize = RI_RUN0 + RI_RUN_STRIDE * RACE_MAXR;
 pub const RI_FULL: usize = RI_DEBUG_TICK + 14;
+// Compact launch row mask, mirrors of retail_core.cl: kept frame row count
+// (0 writes every runner's row) and the runner index behind frame slot 0/1.
+pub const RI_FRAMES: usize = RI_DEBUG_TICK + 15;
+pub const RI_ROW0: usize = RI_DEBUG_TICK + 16;
+pub const RI_ROW1: usize = RI_DEBUG_TICK + 17;
+// Reply-channel slot in the rc buffer, mirror of retail_core.cl.
+pub const RI_RC: usize = RI_DEBUG_TICK + 18;
+// Request-table row this slot reads, the pd row plus the skill table shared by
+// every seed of one request. Mirror of retail_core.cl.
+pub const RI_REQ: usize = RI_DEBUG_TICK + 19;
 pub const RI_RUN0: usize = 16;
 pub const RI_RUN_STRIDE: usize = 13;
 pub const RR_STYLE: usize = 0;
@@ -168,6 +210,9 @@ pub const PL_FORCE_IN_THRESHOLD: usize = PL_FRONT_LANE + 3;
 pub const ST_FALLBACK: usize = 0;
 pub const ST_ARG: usize = 1;
 pub const ST_TICKS: usize = 2;
+/// F7 slice accounting, the kernel's `ST_DONE`. A launched lane that is
+/// neither done nor flagged has work for the host's next slice launch.
+pub const ST_DONE: usize = 3;
 pub const ST_FINISH0: usize = 8;
 // Compact-reply exports per runner, mirrors of retail_core.cl. The f32 ones
 // carry raw bits, which the facade widens exactly like the engine's casts.
@@ -225,7 +270,7 @@ const RS_COUNTS: usize = (RS_PM + 8 + 7) & !7;
 const RS_ADV: usize = RS_COUNTS + 8 + 4 * RACE_MAXR;
 const SCR_BANKS: usize = SCR_RACE + RS_ADV + RACE_MAXR; // paired mode: one RUN bank per runner
 const BANK_WORDS: usize = 60;
-const SRL_HP: usize = (2 * RACE_MAXR + 92) * RACE_MAXR;
+const SRL_HP: usize = (2 * RACE_MAXR + 94) * RACE_MAXR;
 const RD_WORDS: usize = 8 * RACE_MAXR + SRL_HP + 32;
 const SRL_STATS_IN_L: usize = RD_WORDS;
 const SRL_INIT_IN_L: usize = SRL_STATS_IN_L + RACE_MAXR * IIL;
@@ -241,6 +286,7 @@ pub const FB_GEOMETRY: u32 = 6;
 pub const FB_EVENT: u32 = 7;
 pub const FB_SKILL_SEQ: u32 = 8;
 pub const FB_RC: u32 = 9;
+pub const FB_TICKS: u32 = 10;
 
 /// Mirror of race_solver_builder.rs race_seed_hi, pinned to the engine source.
 fn ref_race_seed_hi(horse_seed: u32) -> u32 {
@@ -623,6 +669,14 @@ fn pack_course_scalars(course: &Value, pd: &mut [f64]) -> Result<usize, String> 
     Ok(count)
 }
 
+/// Request ids. One prepare takes one, and its `with_seed` clones share it, so
+/// a launch can tell the races that read the same request data (F1).
+static NEXT_REQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+fn next_req() -> u32 {
+    NEXT_REQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Everything the launch needs about one race before the powf slot (it
 /// waits for the adjusted-guts pre-pass) and before the geometry tables.
 /// The seed enters this data only through the `ri[RI_SEED]` word: the stats
@@ -633,6 +687,9 @@ fn pack_course_scalars(course: &Value, pd: &mut [f64]) -> Result<usize, String> 
 pub struct Prepared {
     ri: Vec<u32>,
     pd: Vec<f64>,
+    /// The request this race's pd row and skill table come from. Races with
+    /// one id share one table row in the launch.
+    req: u32,
     n: usize,
     stats: Vec<StatsCase>,
     host_fallback: Option<String>,
@@ -644,6 +701,13 @@ pub struct Prepared {
     debug_scratch: bool,
     grid: bool,
     full: bool,
+    /// The effect-cap bucket `sk` was packed at (0 for a flagged race that
+    /// never reaches a launch). The launch picks the program built with the
+    /// matching `-D SK_EMAX`.
+    sk_emax: usize,
+    // Compact launch row mask: the kept runner indices, empty for the full
+    // launch that writes every runner's frame row.
+    frame_rows: Vec<usize>,
 }
 
 impl Prepared {
@@ -652,9 +716,19 @@ impl Prepared {
         self.host_fallback.as_deref()
     }
 
+    /// The effect-cap bucket of the compiled skill table.
+    pub fn sk_emax(&self) -> usize {
+        self.sk_emax
+    }
+
     /// The race's runner count (one launch needs one uniform count).
     pub fn runners(&self) -> usize {
         self.n
+    }
+
+    /// Compiled skill records, the number that picks the scratch bucket.
+    pub fn records(&self) -> usize {
+        self.sk[crate::skills_compile::SK_NREC] as usize
     }
 
     /// Ask for the full-reply channels: the kernel writes the activation,
@@ -668,12 +742,55 @@ impl Prepared {
         }
     }
 
+    /// Write only these runners' frame rows, one and two kept rows for the
+    /// app's compact lane. The frame block strides by the kept count, and the
+    /// kept order is the frame row order. A debug race keeps every runner's
+    /// row (its tail block needs them), so debug and compact refuse.
+    /// Returns false when the mask is not accepted. The race then stays a
+    /// full-frame launch.
+    pub(crate) fn set_frame_rows(&mut self, rows: &[usize]) -> bool {
+        if rows.is_empty() || rows.len() > 2 || self.ri[RI_DEBUG_TICK] != 0 {
+            return false;
+        }
+        if rows.iter().any(|&r| r >= self.n) {
+            return false;
+        }
+        self.ri[RI_FRAMES] = rows.len() as u32;
+        self.ri[RI_ROW0] = rows[0] as u32;
+        self.ri[RI_ROW1] = if rows.len() > 1 { rows[1] as u32 } else { u32::MAX };
+        self.frame_rows = rows.to_vec();
+        true
+    }
+
+    /// The frame row count of this race's launch: the kept rows, or every
+    /// runner in a full launch.
+    pub(crate) fn frame_row_count(&self) -> usize {
+        if self.frame_rows.is_empty() {
+            self.n
+        } else {
+            self.frame_rows.len()
+        }
+    }
+
+    /// The runner index behind each kept frame row, in row order. Empty for
+    /// a full launch.
+    pub fn kept_frame_rows(&self) -> &[usize] {
+        &self.frame_rows
+    }
+
+    /// The course length the kernel ran against, the compact fold's plan
+    /// boundary base.
+    pub fn course_distance(&self) -> f64 {
+        self.pd[PI_DISTANCE]
+    }
+
     /// A flagged placeholder keeping the batch aligned when one request fails
     /// to parse at all. It never reaches the launch.
     pub(crate) fn stub(reason: String) -> Prepared {
         Prepared {
             ri: Vec::new(),
             pd: Vec::new(),
+            req: next_req(),
             n: 0,
             stats: Vec::new(),
             host_fallback: Some(reason),
@@ -685,6 +802,8 @@ impl Prepared {
             debug_scratch: false,
             grid: false,
             full: false,
+            sk_emax: 0,
+            frame_rows: Vec::new(),
         }
     }
 
@@ -721,6 +840,7 @@ fn prepare(
     let flagged = |reason: &str| Ok(Prepared {
         ri: vec![0u32; RI_STRIDE],
         pd: vec![0f64; RIL_STRIDE],
+        req: next_req(),
         n: horses.len(),
         bumps: Vec::new(),
         stats: Vec::new(),
@@ -732,6 +852,8 @@ fn prepare(
         debug_scratch: false,
         grid: false,
         full: false,
+        sk_emax: 0,
+        frame_rows: Vec::new(),
     });
     // One validity test mirrors experimental_grid_enabled (src/lib.rs:262-272),
     // including its message, so invalid shapes flag with the engine's reason.
@@ -982,7 +1104,7 @@ fn prepare(
             single_mode,
         });
     }
-    Ok(Prepared { ri, pd, n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, live_guts: sk_plan.live_guts, debug_scratch: false, grid, full: false })
+    Ok(Prepared { ri, pd, req: next_req(), n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, live_guts: sk_plan.live_guts, debug_scratch: false, grid, full: false, sk_emax: sk_plan.emax, frame_rows: Vec::new() })
 }
 
 /// Engine rule: an installed skill whose definition carries a type 6 effect
@@ -1014,8 +1136,101 @@ fn learned_runaway(horse: &Value, skill_data: Option<&Value>) -> bool {
 
 /// Runs every request end to end on the gated device. Races whose domain the
 /// kernel cannot answer stay flagged without a launch.
+/// Calls made at the same time from several threads share one launch (see
+/// `crate::coalesce`).
 pub fn run(requests: &[(String, i64)]) -> Result<RaceRun, String> {
+    if crate::coalesce::enabled() {
+        return shared_run(requests, false);
+    }
     Ok(run_inner(requests, None)?.0)
+}
+
+/// One caller's share of a shared launch: its requests and whether they
+/// carry the full-reply channels.
+struct SharedJob {
+    requests: Vec<(String, i64)>,
+    full: bool,
+}
+
+static SHARED: crate::coalesce::Coalescer<RaceContext, SharedJob, RaceRun> = crate::coalesce::Coalescer::new();
+
+fn shared_run(requests: &[(String, i64)], full: bool) -> Result<RaceRun, String> {
+    SHARED.submit(SharedJob { requests: requests.to_vec(), full }, RaceContext::open, shared_batch)
+}
+
+/// Prepare every job, launch the jobs that agree on a runner count together
+/// (one launch needs one uniform count), and hand each job its own races.
+/// A job that cannot share (a prepare error, or mixed counts of its own) gets
+/// exactly the answer a call of its own would have.
+fn shared_batch(ctx: &mut RaceContext, jobs: Vec<SharedJob>) -> Vec<Result<RaceRun, String>> {
+    let mut answers: Vec<Option<Result<RaceRun, String>>> = (0..jobs.len()).map(|_| None).collect();
+    let mut groups: Vec<(usize, Vec<(usize, Vec<Prepared>)>)> = Vec::new();
+    for (j, job) in jobs.iter().enumerate() {
+        let mut prepared = Vec::with_capacity(job.requests.len());
+        let mut failed = None;
+        for (request, seed) in &job.requests {
+            match ctx.prepare(request, *seed) {
+                Ok(mut p) => {
+                    if job.full {
+                        p.set_full();
+                    }
+                    prepared.push(p);
+                }
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
+        if let Some(e) = failed {
+            answers[j] = Some(Err(e));
+            continue;
+        }
+        let mut counts: Vec<usize> = prepared.iter().filter(|p| p.host_fallback.is_none()).map(|p| p.n).collect();
+        counts.sort_unstable();
+        counts.dedup();
+        if counts.len() != 1 {
+            answers[j] = Some(ctx.run_prepared(&mut prepared, None).map(|r| r.0));
+            continue;
+        }
+        match groups.iter_mut().find(|(n, _)| *n == counts[0]) {
+            Some((_, members)) => members.push((j, prepared)),
+            None => groups.push((counts[0], vec![(j, prepared)])),
+        }
+    }
+    for (_, members) in groups {
+        let lens: Vec<usize> = members.iter().map(|(_, p)| p.len()).collect();
+        let mut all: Vec<Prepared> = Vec::with_capacity(lens.iter().sum());
+        let mut owners = Vec::with_capacity(members.len());
+        for (j, prepared) in members {
+            owners.push(j);
+            all.extend(prepared);
+        }
+        match ctx.run_prepared(&mut all, None) {
+            Ok((run, _)) => {
+                let mut races = run.races.into_iter();
+                for (&j, &len) in owners.iter().zip(&lens) {
+                    answers[j] = Some(Ok(RaceRun {
+                        device: run.device.clone(),
+                        build_ms: run.build_ms,
+                        stage_ms: run.stage_ms,
+                        races: races.by_ref().take(len).collect(),
+                    }));
+                }
+            }
+            Err(_) => {
+                // Each job alone, so a launch error lands only on the job
+                // that causes it.
+                let mut rest = all;
+                for (&j, &len) in owners.iter().zip(&lens) {
+                    let tail = rest.split_off(len);
+                    answers[j] = Some(ctx.run_prepared(&mut rest, None).map(|r| r.0));
+                    rest = tail;
+                }
+            }
+        }
+    }
+    answers.into_iter().map(|a| a.expect("every job answered")).collect()
 }
 
 /// Kernel-only cost probe: prepare and upload once, then warm the launch and
@@ -1119,6 +1334,10 @@ pub struct StageTimings {
     pub launch_ms: f64,
     pub readback_ms: f64,
     pub decode_ms: f64,
+    /// F7 slice accounting over the batch's chunks: launch count and the
+    /// slowest single launch. Zero launches stay counted for `Off` runs.
+    pub slices: usize,
+    pub slice_max_ms: f64,
 }
 
 /// What `run_prepared` does at the launch: run once, or time launches.
@@ -1132,6 +1351,59 @@ pub enum LaunchMode {
     Burst { warm: usize, count: usize },
 }
 
+/// How `LaunchMode::Once` splits a launch into tick ranges (F7, handoff
+/// "Keep launches under the Windows timeout"). Windows kills device work
+/// past `TdrDelay` (2 s on a stock PC), and the widest CM launches ran 7.5
+/// to 8.8 s in one kernel. A slice covers ticks `[start, start + len)` for
+/// every lane. Per-race state lives in scratch, which the grow-only lane
+/// keeps between launches, so the host relaunches the same buffers at the
+/// next range until every lane is done (`ST_DONE`) or flagged. The bench
+/// modes never slice, so their launch numbers stay raw.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SlicePolicy {
+    /// One launch per chunk, the pre-F7 behavior.
+    Off,
+    /// Every slice runs exactly this many ticks (the gate tests' knob).
+    Fixed(u32),
+    /// Adaptive sizing: the first slice runs `SLICE_FIRST_TICKS`, each next
+    /// length scales the previous by `target_ms / elapsed` and clamps to
+    /// `SLICE_MIN_TICKS..=RACE_MAX_TICKS - 1`, so launches converge near
+    /// `target_ms` and stay a margin under the stock timeout.
+    Adaptive { target_ms: f64 },
+}
+
+/// The adaptive first slice, in ticks. At the widest CM launch a tick costs
+/// about 10 ms of wall time, so 32 ticks is about 0.3 s, a quarter of the
+/// stock 2 s `TdrDelay`: the first slice cannot time out on any PC.
+pub(crate) const SLICE_FIRST_TICKS: u32 = 32;
+/// The adaptive floor: below this many ticks a slice is launch overhead.
+pub(crate) const SLICE_MIN_TICKS: u32 = 16;
+/// The adaptive per-launch target, in milliseconds.
+const SLICE_TARGET_MS: f64 = 500.0;
+
+/// The slice policy from the environment. `GSIM_GPU_SLICE=off` runs one
+/// launch, `GSIM_GPU_SLICE_TICKS=N` fixes every slice at N ticks,
+/// `GSIM_GPU_SLICE_TARGET_MS` moves the adaptive target, and
+/// `GSIM_GPU_SLICE_LOG=1` prints each slice's tick range and time.
+pub(crate) fn slice_policy_from_env() -> SlicePolicy {
+    if std::env::var("GSIM_GPU_SLICE").is_ok_and(|v| v.eq_ignore_ascii_case("off")) {
+        return SlicePolicy::Off;
+    }
+    if let Some(t) = std::env::var("GSIM_GPU_SLICE_TICKS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&t| t > 0)
+    {
+        return SlicePolicy::Fixed(t);
+    }
+    let target_ms = std::env::var("GSIM_GPU_SLICE_TARGET_MS")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|&t| t > 0.)
+        .unwrap_or(SLICE_TARGET_MS);
+    SlicePolicy::Adaptive { target_ms }
+}
+
 impl LaunchMode {
     /// True when the launch is a measurement and frames stay undecoded.
     fn timed(&self) -> bool {
@@ -1140,16 +1412,31 @@ impl LaunchMode {
 }
 
 /// Launch buffers for one race lane, bound to one queue. Grow-only: a set
-/// is rebuilt only when a launch needs more races or a wider runner count
-/// than its capacity holds.
+/// is rebuilt only when a launch needs more races, more distinct requests, a
+/// wider runner count, wider frame rows, a wider skill table, a wider scratch
+/// stride or more reply-channel blocks than its capacity holds.
 struct LaneSet {
     cap: usize,
+    // Request-table rows: the pd rows and skill tables one launch uploads,
+    // one per distinct request rather than one per race (F1).
+    reqs: usize,
     n: usize,
+    // Skill table stride, the launch's effect-cap bucket.
+    skw: usize,
+    rows: usize,
+    // Scratch strides of the lane's program variant, journal and bucket.
+    words: usize,
+    srl: usize,
+    // Frame window rows, the launch's per-course tick bound.
+    ticks: usize,
     queue: Queue,
     b_ri: Buffer<u32>,
     b_pd: Buffer<f64>,
     b_sk: Buffer<u32>,
     b_scr_u: Buffer<u32>,
+    // Reply-channel blocks, one per full request plus the zero-filled sink.
+    rc_blocks: usize,
+    b_rc: Buffer<u32>,
     b_scr_d: Buffer<f64>,
     b_frames: Buffer<f64>,
     b_status: Buffer<u32>,
@@ -1157,17 +1444,28 @@ struct LaneSet {
 }
 
 impl LaneSet {
-    fn new(queue: &Queue, cap: usize, n: usize) -> Result<LaneSet, String> {
+    fn new(
+        queue: &Queue, cap: usize, reqs: usize, n: usize, skw: usize, rows: usize,
+        words: usize, srl: usize, ticks: usize, rc_blocks: usize,
+    ) -> Result<LaneSet, String> {
         Ok(LaneSet {
             cap,
+            reqs,
             n,
+            skw,
+            rows,
+            words,
+            srl,
+            ticks,
             queue: queue.clone(),
             b_ri: empty_buf(queue, cap * RI_STRIDE, flags::MEM_READ_WRITE)?,
-            b_pd: empty_buf(queue, cap * RIL_STRIDE, flags::MEM_READ_WRITE)?,
-            b_sk: empty_buf(queue, cap * SK_STRIDE, flags::MEM_READ_ONLY)?,
-            b_scr_u: empty_buf(queue, cap * SCR_U_WORDS, flags::MEM_READ_WRITE)?,
-            b_scr_d: empty_buf(queue, cap * SRL_WORDS, flags::MEM_READ_WRITE)?,
-            b_frames: empty_buf(queue, cap * RACE_MAX_TICKS * n.max(1) * 6, flags::MEM_READ_WRITE)?,
+            b_pd: empty_buf(queue, reqs * RIL_STRIDE, flags::MEM_READ_WRITE)?,
+            b_sk: empty_buf(queue, reqs * skw, flags::MEM_READ_ONLY)?,
+            b_scr_u: empty_buf(queue, cap * words, flags::MEM_READ_WRITE)?,
+            rc_blocks,
+            b_rc: empty_buf(queue, rc_blocks.max(1) * RC_WORDS, flags::MEM_READ_WRITE)?,
+            b_scr_d: empty_buf(queue, cap * srl, flags::MEM_READ_WRITE)?,
+            b_frames: empty_buf(queue, cap * ticks * rows.max(1) * 6, flags::MEM_READ_WRITE)?,
             b_status: empty_buf(queue, cap * ST_STRIDE, flags::MEM_READ_WRITE)?,
             b_events: empty_buf(queue, cap * EV_STRIDE, flags::MEM_READ_WRITE)?,
         })
@@ -1195,20 +1493,28 @@ struct TableSet {
 }
 
 /// Launch state kept between batches: one gated device, one built race
-/// program, one built initialization program, engine data loaded once and
-/// the geometry registry (injected app copies ahead of the file fallback).
-/// Not Sync, the OpenCL queue and program belong to the thread that opened
-/// them.
+/// program per effect-cap bucket, one built initialization program, engine
+/// data loaded once and the geometry registry (injected app copies ahead of
+/// the file fallback). Not Sync, the OpenCL queue and program belong to the
+/// thread that opened them.
 pub struct RaceContext {
     globals: Value,
     grids: Value,
     courses: Value,
     spike: crate::gpu::Spike,
-    program: ocl::Program,
     init_program: ocl::Program,
+    // Race programs by (effect bucket, record bucket, journal), built on
+    // first use of a variant. The top record bucket without the journal is
+    // built in open().
+    programs: Vec<(usize, usize, bool, ocl::Program)>,
     registry: GeometryRegistry,
     lanes: Vec<LaneSet>,
     table_cache: Vec<TableSet>,
+    slice_override: Option<SlicePolicy>,
+    // A calibration ceiling on the frame window, from GSIM_GPU_TICK_CAP_LIMIT.
+    // Unset keeps the per-course bound. It only tightens the bound, so the
+    // overflow fallback still covers any race the ceiling cuts short.
+    tick_cap_limit: Option<usize>,
     pub open_ms: OpenTimings,
 }
 
@@ -1220,7 +1526,8 @@ impl RaceContext {
         let spike = crate::gpu::Spike::open()?;
         let spike_ms = started.elapsed().as_secs_f64() * 1e3;
         let started = std::time::Instant::now();
-        let program = spike.build_program(crate::gpu::RACE_KERNEL_SOURCE)?;
+        let default_emax = crate::skills_compile::SK_EMAX_BUCKETS[0];
+        let program = spike.build_race_program(default_emax, SK_RMAX, false)?;
         let race_program_ms = started.elapsed().as_secs_f64() * 1e3;
         let started = std::time::Instant::now();
         let init_program = spike.build_program(crate::gpu::INITIALIZATION_KERNEL_SOURCE)?;
@@ -1231,16 +1538,21 @@ impl RaceContext {
         let courses = initialization::engine_json("data/course_data.json")?;
         let data_ms = started.elapsed().as_secs_f64() * 1e3;
         let total_ms = started.elapsed().as_secs_f64() * 1e3 + spike_ms + race_program_ms + init_program_ms;
+        let tick_cap_limit = std::env::var("GSIM_GPU_TICK_CAP_LIMIT").ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .map(|c| c.clamp(TICK_BOUND_MIN, RACE_MAX_TICKS));
         Ok(RaceContext {
             globals,
             grids,
             courses,
             spike,
-            program,
             init_program,
+            programs: vec![(default_emax, SK_RMAX, false, program)],
             registry: GeometryRegistry::default(),
             lanes: Vec::new(),
             table_cache: Vec::new(),
+            slice_override: None,
+            tick_cap_limit,
             open_ms: OpenTimings {
                 spike_ms,
                 race_program_ms,
@@ -1251,9 +1563,42 @@ impl RaceContext {
         })
     }
 
+    /// Index of the race program for one define set, built once per variant
+    /// on first use.
+    fn race_program(&mut self, emax: usize, rcap: usize, diag: bool) -> Result<usize, String> {
+        if let Some(k) = self.programs.iter().position(|(e, r, d, _)| *e == emax && *r == rcap && *d == diag) {
+            return Ok(k);
+        }
+        let built = self.spike.build_race_program(emax, rcap, diag)?;
+        self.programs.push((emax, rcap, diag, built));
+        Ok(self.programs.len() - 1)
+    }
+
     /// The gated device the batches run on.
     pub fn device(&self) -> &crate::gpu::DeviceReport {
         &self.spike.device
+    }
+
+    /// Override the F7 slice policy for this context's `Once` launches (the
+    /// gate tests' hook). None keeps the environment-resolved default.
+    pub fn set_slice_policy(&mut self, policy: Option<SlicePolicy>) {
+        self.slice_override = policy;
+    }
+
+    /// Prepare every request and launch once under `policy` (None keeps the
+    /// environment default). The gate tests' hook for repeated batches on
+    /// one opened context.
+    pub fn run_requests(
+        &mut self,
+        requests: &[(String, i64)],
+        policy: Option<SlicePolicy>,
+    ) -> Result<RaceRun, String> {
+        self.slice_override = policy;
+        let mut prepared: Vec<Prepared> = Vec::with_capacity(requests.len());
+        for (request, seed) in requests {
+            prepared.push(self.prepare(request, *seed)?);
+        }
+        Ok(self.run_prepared(&mut prepared, None)?.0)
     }
 
     /// The device's global memory and its largest single allocation, in
@@ -1284,19 +1629,30 @@ impl RaceContext {
         prepare(request, seed, &self.globals, &self.grids, &self.courses, &mut self.registry)
     }
 
-    /// Grows lane `k`'s buffer set to serve a launch of `mc` races and `n`
-    /// runners. Lanes stay grow-only, and a set rebuilt for a wider launch
-    /// keeps its queue, so a lane's buffers and commands never cross.
-    fn lane(&mut self, k: usize, mc: usize, n: usize) -> Result<(), String> {
+    /// Grows lane `k`'s buffer set to serve a launch of `mc` races, `n`
+    /// runners, a skill table stride of `skw` words, `rows` frame rows, a u32
+    /// scratch stride of `words`, a d64 scratch stride of `srl`, a `ticks`
+    /// frame window and `rc_blocks` reply-channel blocks. Lanes stay
+    /// grow-only, and a set rebuilt for a wider launch keeps its queue, so a
+    /// lane's buffers and commands never cross.
+    fn lane(
+        &mut self, k: usize, mc: usize, reqs: usize, n: usize, skw: usize, rows: usize,
+        words: usize, srl: usize, ticks: usize, rc_blocks: usize,
+    ) -> Result<(), String> {
         if let Some(set) = self.lanes.get(k) {
-            if set.cap >= mc && set.n >= n {
+            if set.cap >= mc && set.reqs >= reqs && set.n >= n && set.skw >= skw && set.rows >= rows
+                && set.words >= words && set.srl >= srl && set.ticks >= ticks
+                && set.rc_blocks >= rc_blocks
+            {
                 return Ok(());
             }
             let queue = set.queue.clone();
-            self.lanes[k] = LaneSet::new(&queue, mc, n)?;
+            self.lanes[k] = LaneSet::new(
+                &queue, mc, reqs.max(set.reqs), n, skw.max(set.skw), rows, words, srl, ticks, rc_blocks,
+            )?;
         } else {
             let queue = self.spike.queue();
-            self.lanes.push(LaneSet::new(&queue, mc, n)?);
+            self.lanes.push(LaneSet::new(&queue, mc, reqs, n, skw, rows, words, srl, ticks, rc_blocks)?);
         }
         Ok(())
     }
@@ -1329,6 +1685,12 @@ impl RaceContext {
         return Err("one launch needs one uniform runner count".into());
     }
     let n = launched.first().map_or(1, |&i| prepared[i].n);
+    // A compact launch keeps the same frame row count in every race, so one
+    // stride sizes the frame block. The kept runner indices may differ.
+    let frows = launched.first().map_or(1, |&i| prepared[i].frame_row_count());
+    if launched.iter().any(|&i| prepared[i].frame_row_count() != frows) {
+        return Err("one launch needs one uniform frame row count".into());
+    }
 
     // The stats chain runs once per race as an initialization-kernel
     // pre-pass so the host can supply the exact f32 powf (the kernel
@@ -1500,9 +1862,11 @@ impl RaceContext {
     let tables_ms = t_stage.elapsed().as_secs_f64() * 1e3;
 
     let m = launched.len();
-    // Frame-byte budget per launch. A full 144-horse race writes
-    // RACE_MAX_TICKS * n * 6 f64 (about 42.5 MB), so a big batch splits into
-    // several launches; every current suite fits a single one.
+    // Frame-byte budget per launch. A full race writes tick_cap * n * 6 f64
+    // and a compact launch tick_cap * frows * 6, where tick_cap is the course
+    // tick bound (RACE_MAX_TICKS for a debug launch). A big batch splits into
+    // several launches; every current suite fits a single one. Debug keeps the
+    // full window, so a debug batch budgets on RACE_MAX_TICKS.
     // GSIM_GPU_FRAME_BUDGET_MB overrides the 512 MiB default, so a benchmark
     // can launch as many races at once as device memory holds (bin saturate).
     const FRAME_BYTES_BUDGET: usize = 512 << 20;
@@ -1511,13 +1875,24 @@ impl RaceContext {
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&mb| mb > 0)
         .map_or(FRAME_BYTES_BUDGET, |mb| mb << 20);
-    let race_frames_bytes = RACE_MAX_TICKS * n * 6 * std::mem::size_of::<f64>();
+    let batch_ticks = if launched.iter().any(|&i| prepared[i].debug_scratch) {
+        RACE_MAX_TICKS
+    } else {
+        let bound = launched
+            .iter()
+            .map(|&i| course_tick_bound(prepared[i].course_distance()))
+            .max()
+            .unwrap_or(RACE_MAX_TICKS);
+        self.tick_cap_limit.map_or(bound, |limit| bound.min(limit))
+    };
+    let race_frames_bytes = batch_ticks * frows * 6 * std::mem::size_of::<f64>();
     let chunk_len = (frame_bytes_budget / race_frames_bytes.max(1)).max(1);
 
     // Per-chunk host staging is filled by the readback and drained by the
     // chunk's decode, so no batch pins more frames than its used ticks.
-    let want_sk = m > 0
-        && prepared.iter().any(|p| p.debug_scratch || p.full);
+    // Only debug races stage the u32/d64 scratch; full requests read their
+    // channels from the rc buffer.
+    let want_sk = m > 0 && prepared.iter().any(|p| p.debug_scratch);
     // Grouped reads with one event each and one decoder thread per group
     // pipeline decode against the queue: group k decodes while the device
     // reads group k+1. Two race kernels at once share the B580 poorly.
@@ -1529,241 +1904,395 @@ impl RaceContext {
     let mut decode_ms = 0.;
     let mut bench_ticks = 0usize;
     let mut bench_launch_ms = 0.;
+    let policy = self.slice_override.unwrap_or_else(slice_policy_from_env);
+    let mut slice_launches = 0usize;
+    let mut slice_max_ms = 0f64;
     let prepared: &[Prepared] = prepared;
-    for chunk_start in (0..m).step_by(chunk_len) {
-        let mc = chunk_len.min(m - chunk_start);
-        let chunk = &launched[chunk_start..chunk_start + mc];
-        let slot0 = chunk_start;
-        let t_stage = std::time::Instant::now();
-        let mut ri_all = vec![0u32; mc * RI_STRIDE];
-        let mut pd_all = vec![0f64; mc * RIL_STRIDE];
-        for (slot, &i) in chunk.iter().enumerate() {
-            ri_all[slot * RI_STRIDE..][..RI_STRIDE].copy_from_slice(&prepared[i].ri);
-            pd_all[slot * RIL_STRIDE..][..RIL_STRIDE].copy_from_slice(&prepared[i].pd);
-        }
-        self.lane(0, mc, n)?;
-        let lane = &self.lanes[0];
-        let tabs = &self.table_cache[ti];
-        let queue = &lane.queue;
-        let b_ri = &lane.b_ri;
-        let b_pd = &lane.b_pd;
-        let b_sk = &lane.b_sk;
-        let b_scr_u = &lane.b_scr_u;
-        let b_scr_d = &lane.b_scr_d;
-        let b_frames = &lane.b_frames;
-        let b_status = &lane.b_status;
-        let b_events = &lane.b_events;
-        let b_cs = &tabs.cs;
-        let b_sg_x = &tabs.sg_x;
-        let b_sg_xd = &tabs.sg_xd;
-        let b_sg_z = &tabs.sg_z;
-        let b_sg_zd = &tabs.sg_zd;
-        let b_sg_q = &tabs.sg_q;
-        let b_sg_qd = &tabs.sg_qd;
-        let b_lm_b = &tabs.lm_b;
-        let b_lm_l = &tabs.lm_l;
-        let b_ce_b = &tabs.ce_b;
-        let b_ce_e = &tabs.ce_e;
-        let b_ce_i = &tabs.ce_i;
-        let b_ce_f = &tabs.ce_f;
-        b_ri.cmd().write(&ri_all).enq().map_err(|e| e.to_string())?;
-        b_pd.cmd().write(&pd_all).enq().map_err(|e| e.to_string())?;
-        // No host zeros go over PCIe. The device clears each reused buffer
-        // the kernel may read before writing, so a lane serves batches of
-        // any earlier width. Frames need no clear: the kernel writes every
-        // frame word decode reads, debug tail blocks aside.
-        b_sk.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
-        for (slot, &i) in chunk.iter().enumerate() {
-            let hw = sk_high_water(&prepared[i].sk);
-            if hw > 0 {
-                b_sk.cmd()
-                    .write(&prepared[i].sk[..hw])
-                    .offset(slot * SK_STRIDE)
-                    .enq()
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-        b_scr_u.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
-        b_scr_d.cmd().fill(0.0f64, None).enq().map_err(|e| e.to_string())?;
-        b_status.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
-        b_events.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
-        if chunk.iter().any(|&i| prepared[i].ri[RI_DEBUG_TICK] != 0) {
-            b_frames.cmd().fill(0.0f64, None).enq().map_err(|e| e.to_string())?;
-        }
-        upload_ms += t_stage.elapsed().as_secs_f64() * 1e3;
-
-        let t_stage = std::time::Instant::now();
-        let kernel = ocl::Kernel::builder()
-            .program(&self.program)
-            .name("race")
-            .queue(queue.clone())
-            .global_work_size(mc)
-            .arg(b_ri)
-            .arg(b_pd)
-            .arg(b_scr_u)
-            .arg(b_scr_d)
-            .arg(b_frames)
-            .arg(b_status)
-            .arg(b_cs)
-            .arg(b_sg_x)
-            .arg(b_sg_xd)
-            .arg(b_sg_z)
-            .arg(b_sg_zd)
-            .arg(b_sg_q)
-            .arg(b_sg_qd)
-            .arg(b_lm_b)
-            .arg(b_lm_l)
-            .arg(b_ce_b)
-            .arg(b_ce_e)
-            .arg(b_ce_i)
-            .arg(b_ce_f)
-            .arg(b_sk)
-            .arg(b_events)
-            .build()
-            .map_err(|e| e.to_string())?;
-        match mode {
-            LaunchMode::Timed { warm, timed } => {
-                for _ in 0..warm {
-                    unsafe { kernel.enq().map_err(|e| e.to_string())? };
-                }
-                queue.finish().map_err(|e| e.to_string())?;
-                let mut probe = vec![0u32; mc * ST_STRIDE];
-                b_status.cmd().read(&mut probe).enq().map_err(|e| e.to_string())?;
-                queue.finish().map_err(|e| e.to_string())?;
-                bench_ticks += probe.chunks(ST_STRIDE).map(|s| s[ST_TICKS] as usize).sum::<usize>();
-                let start = std::time::Instant::now();
-                for _ in 0..timed {
-                    unsafe { kernel.enq().map_err(|e| e.to_string())? };
-                    queue.finish().map_err(|e| e.to_string())?;
-                }
-                bench_launch_ms += start.elapsed().as_secs_f64() * 1e3 / timed as f64;
-            }
-            LaunchMode::Burst { warm, count } => {
-                for _ in 0..warm {
-                    unsafe { kernel.enq().map_err(|e| e.to_string())? };
-                }
-                queue.finish().map_err(|e| e.to_string())?;
-                let mut probe = vec![0u32; mc * ST_STRIDE];
-                b_status.cmd().read(&mut probe).enq().map_err(|e| e.to_string())?;
-                queue.finish().map_err(|e| e.to_string())?;
-                bench_ticks += probe.chunks(ST_STRIDE).map(|s| s[ST_TICKS] as usize).sum::<usize>();
-                let start = std::time::Instant::now();
-                for _ in 0..count {
-                    unsafe { kernel.enq().map_err(|e| e.to_string())? };
-                }
-                queue.finish().map_err(|e| e.to_string())?;
-                bench_launch_ms += start.elapsed().as_secs_f64() * 1e3 / count as f64;
-            }
-            LaunchMode::Once => unsafe { kernel.enq().map_err(|e| e.to_string())? },
-        }
-        queue.finish().map_err(|e| e.to_string())?;
-        launch_ms += t_stage.elapsed().as_secs_f64() * 1e3;
-
-        let t_stage = std::time::Instant::now();
-        if !mode.timed() {
-            // Read back only the ticks that ran. Status first, then one frame
-            // prefix read per race at its own height, packed side by side, so
-            // readback shrinks with the used ticks, not the 6,144-row budget.
-            let mut c_status = vec![0u32; mc * ST_STRIDE];
-            let mut c_events = vec![0u32; mc * EV_STRIDE];
-            b_status.cmd().read(&mut c_status).enq().map_err(|e| e.to_string())?;
-            b_events.cmd().read(&mut c_events).enq().map_err(|e| e.to_string())?;
-            queue.finish().map_err(|e| e.to_string())?;
-            let mut frame_off = vec![0usize; mc + 1];
-            let mut tail_off = vec![0usize; mc + 1];
-            for (slot, &i) in chunk.iter().enumerate() {
-                let rows = c_status[slot * ST_STRIDE + ST_TICKS] as usize + 1;
-                frame_off[slot + 1] = frame_off[slot] + rows * n * 6;
-                let dbg = if prepared[i].ri[RI_DEBUG_TICK] != 0 { 14 * n * 6 } else { 0 };
-                tail_off[slot + 1] = tail_off[slot] + dbg;
-            }
-            let mut c_frames = vec![0f64; frame_off[mc]];
-            let mut c_tail = vec![0f64; tail_off[mc]];
-            let mut c_skd: Vec<f64> = Vec::new();
-            let mut c_sks: Vec<u32> = Vec::new();
-            if want_sk && chunk.iter().any(|&i| prepared[i].debug_scratch || prepared[i].full) {
-                c_skd = vec![0f64; mc * SRL_WORDS];
-                c_sks = vec![0u32; mc * SCR_U_WORDS];
-                b_scr_d.cmd().read(&mut c_skd).enq().map_err(|e| e.to_string())?;
-                b_scr_u.cmd().read(&mut c_sks).enq().map_err(|e| e.to_string())?;
-            }
-            let gspan = mc.div_ceil(groups.max(1)).max(1);
-            let mut sentinel = vec![0u32; 1];
-            let mut gevs: Vec<(usize, ocl::Event)> = Vec::new();
-            for lo in (0..mc).step_by(gspan) {
-                let hi = (lo + gspan).min(mc);
-                for slot in lo..hi {
-                    b_frames.cmd()
-                        .read(&mut c_frames[frame_off[slot]..frame_off[slot + 1]])
-                        .offset(slot * RACE_MAX_TICKS * n * 6)
-                        .enq()
-                        .map_err(|e| e.to_string())?;
-                    if prepared[chunk[slot]].ri[RI_DEBUG_TICK] != 0 {
-                        // The debug blocks sit in the last 14 rows of the race's
-                        // frame window, past the used-tick prefix.
-                        b_frames.cmd()
-                            .read(&mut c_tail[tail_off[slot]..tail_off[slot + 1]])
-                            .offset((slot * RACE_MAX_TICKS + RACE_MAX_TICKS - 14) * n * 6)
-                            .enq()
-                            .map_err(|e| e.to_string())?;
-                    }
-                }
-                // This in-order queue runs the group's reads first, so the
-                // sentinel read closes the group and its event says the data
-                // landed.
-                let mut gev = ocl::Event::empty();
-                b_status.cmd()
-                    .read(&mut sentinel)
-                    .enew(&mut gev)
-                    .enq()
-                    .map_err(|e| e.to_string())?;
-                gevs.push((lo, gev));
-            }
-            let (st, evs) = (&c_status, &c_events);
-            let (foff, toff) = (&frame_off, &tail_off);
-            let (fr, tl) = (&c_frames, &c_tail);
-            let (skd, sks) = (&c_skd, &c_sks);
-            let races = prepared;
-            let idx = chunk;
-            let t_start = t_stage;
-            let mut slots: Vec<Option<RaceGpu>> = (0..mc).map(|_| None).collect();
-            let mut rb_max: f64 = 0.;
-            let mut dk_max: f64 = 0.;
-            std::thread::scope(|s| -> Result<(), String> {
-                let mut hs = Vec::new();
-                for (gi, part) in slots.chunks_mut(gspan).enumerate() {
-                    let (lo, gev) = (&gevs[gi].0, &gevs[gi].1);
-                    let lo = *lo;
-                    hs.push(s.spawn(move || -> Result<(f64, f64), String> {
-                        gev.wait_for().map_err(|e| e.to_string())?;
-                        let fire = t_start.elapsed().as_secs_f64() * 1e3;
-                        for (j, dest) in part.iter_mut().enumerate() {
-                            let slot = lo + j;
-                            *dest = Some(decode_slot(
-                                &races[idx[slot]], slot, n, st, evs, foff, toff, fr, tl, skd, sks,
-                            ));
-                        }
-                        Ok((fire, t_start.elapsed().as_secs_f64() * 1e3))
-                    }));
-                }
-                for h in hs {
-                    let (fire, done) = h
-                        .join()
-                        .unwrap_or_else(|_| Err("a decode thread panicked".to_string()))?;
-                    rb_max = rb_max.max(fire);
-                    dk_max = dk_max.max(done - fire);
-                }
-                Ok(())
-            })?;
-            for (j, d) in slots.into_iter().enumerate() {
-                decoded[slot0 + j] = d;
-            }
-            readback_ms += rb_max;
-            decode_ms += dk_max;
+    // Races at one effect-cap bucket share their program's table layout, so
+    // consecutive same-bucket races launch as one group of chunks.
+    let mut runs: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (pos, &i) in launched.iter().enumerate() {
+        let bucket = prepared[i].sk_emax;
+        if runs.last().is_some_and(|(b, _)| *b == bucket) {
+            runs.last_mut().unwrap().1.push(pos);
         } else {
-            readback_ms += t_stage.elapsed().as_secs_f64() * 1e3;
+            runs.push((bucket, vec![pos]));
         }
     }
+    for (bucket, group) in &runs {
+        // The effect bucket picks the program's table layout, so the lane's
+        // skill buffer and the kernel's sk_all stride both follow it.
+        let skw = crate::skills_compile::sk_stride_at(*bucket);
+        for chunk_start in (0..group.len()).step_by(chunk_len) {
+            let mc = chunk_len.min(group.len() - chunk_start);
+            let chunk: Vec<usize> = group[chunk_start..chunk_start + mc].iter().map(|&p| launched[p]).collect();
+            let slot0 = chunk_start;
+            let t_stage = std::time::Instant::now();
+            let mut ri_all = vec![0u32; mc * RI_STRIDE];
+            // F1: the pd row and the skill table belong to the request, so a
+            // chunk uploads one row per distinct request and each slot names
+            // its row in RI_REQ. The seed clones of one prepare share a row.
+            let mut req_row: Vec<usize> = Vec::new();
+            for (slot, &i) in chunk.iter().enumerate() {
+                ri_all[slot * RI_STRIDE..][..RI_STRIDE].copy_from_slice(&prepared[i].ri);
+                let row = match req_row.iter().position(|&r| prepared[r].req == prepared[i].req) {
+                    Some(row) => row,
+                    None => {
+                        req_row.push(i);
+                        req_row.len() - 1
+                    }
+                };
+                ri_all[slot * RI_STRIDE + RI_REQ] = row as u32;
+            }
+            let reqs = req_row.len();
+            let mut pd_all = vec![0f64; reqs * RIL_STRIDE];
+            for (row, &i) in req_row.iter().enumerate() {
+                pd_all[row * RIL_STRIDE..][..RIL_STRIDE].copy_from_slice(&prepared[i].pd);
+            }
+            // Full requests own one rc block each, blocks 1..n. The rest point
+            // at block 0, the zero-filled sink they only ever read off.
+            let mut rc_blocks = 1usize;
+            let mut rc_id = vec![0u32; mc];
+            for (slot, &i) in chunk.iter().enumerate() {
+                if prepared[i].full {
+                    rc_id[slot] = rc_blocks as u32;
+                    ri_all[slot * RI_STRIDE + RI_RC] = rc_blocks as u32;
+                    rc_blocks += 1;
+                }
+            }
+            // A debug-scratch race reads the journal, so its chunk runs the
+            // diag program: journal writes plus the wider scratch stride. Debug
+            // stays at the top bucket so the scratch dump keeps the full width.
+            let diag = chunk.iter().any(|&i| prepared[i].debug_scratch);
+            let rcap = if diag {
+                SK_RMAX
+            } else {
+                let nrec = chunk.iter().map(|&i| prepared[i].sk[crate::skills_compile::SK_NREC] as usize).max().unwrap_or(0);
+                sk_rcap(nrec)
+            };
+            let words = scr_u_words(rcap, diag);
+            let srl = srl_words(rcap);
+            // Debug keeps the full frame window (its tail sits at the last rows).
+            // Other launches size it to the longest course in the chunk.
+            let bound = chunk.iter().map(|&i| course_tick_bound(prepared[i].course_distance())).max().unwrap_or(RACE_MAX_TICKS);
+            let tick_cap = if diag {
+                RACE_MAX_TICKS
+            } else {
+                match self.tick_cap_limit {
+                    Some(limit) => bound.min(limit),
+                    None => bound,
+                }
+            };
+            // F7 slice ends stay inside the launch's frame window, the point
+            // where the kernel stops a still-open race with FB_TICKS.
+            let slice_cap = (tick_cap - 1).max(1) as u32;
+            // Lane 1 holds compact launches, so switching between the modes does
+            // not rebuild the full-frame lane's buffers.
+            let lane_k = if frows == n { 0 } else { 1 };
+            self.lane(lane_k, mc, reqs, n, skw, frows, words, srl, tick_cap, rc_blocks)?;
+            let pk = self.race_program(*bucket, rcap, diag)?;
+            let program = &self.programs[pk].3;
+            let lane = &self.lanes[lane_k];
+            let tabs = &self.table_cache[ti];
+            let queue = &lane.queue;
+            let b_ri = &lane.b_ri;
+            let b_pd = &lane.b_pd;
+            let b_sk = &lane.b_sk;
+            let b_scr_u = &lane.b_scr_u;
+            let b_rc = &lane.b_rc;
+            let b_scr_d = &lane.b_scr_d;
+            let b_frames = &lane.b_frames;
+            let b_status = &lane.b_status;
+            let b_events = &lane.b_events;
+            let b_cs = &tabs.cs;
+            let b_sg_x = &tabs.sg_x;
+            let b_sg_xd = &tabs.sg_xd;
+            let b_sg_z = &tabs.sg_z;
+            let b_sg_zd = &tabs.sg_zd;
+            let b_sg_q = &tabs.sg_q;
+            let b_sg_qd = &tabs.sg_qd;
+            let b_lm_b = &tabs.lm_b;
+            let b_lm_l = &tabs.lm_l;
+            let b_ce_b = &tabs.ce_b;
+            let b_ce_e = &tabs.ce_e;
+            let b_ce_i = &tabs.ce_i;
+            let b_ce_f = &tabs.ce_f;
+            b_ri.cmd().write(&ri_all).enq().map_err(|e| e.to_string())?;
+            b_pd.cmd().write(&pd_all).enq().map_err(|e| e.to_string())?;
+            // No host zeros go over PCIe. The device clears each reused buffer
+            // the kernel may read before writing, so a lane serves batches of
+            // any earlier width. Frames need no clear: the kernel writes every
+            // frame word decode reads, debug tail blocks aside.
+            b_sk.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
+            for (row, &i) in req_row.iter().enumerate() {
+                let hw = sk_high_water(&prepared[i].sk);
+                if hw > 0 {
+                    b_sk.cmd()
+                        .write(&prepared[i].sk[..hw])
+                        .offset(row * skw)
+                        .enq()
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            b_scr_u.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
+            b_rc.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
+            b_scr_d.cmd().fill(0.0f64, None).enq().map_err(|e| e.to_string())?;
+            b_status.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
+            b_events.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
+            if chunk.iter().any(|&i| prepared[i].ri[RI_DEBUG_TICK] != 0) {
+                b_frames.cmd().fill(0.0f64, None).enq().map_err(|e| e.to_string())?;
+            }
+            upload_ms += t_stage.elapsed().as_secs_f64() * 1e3;
+
+            let t_stage = std::time::Instant::now();
+            let mk_kernel = |resume: u32, slice_end: u32| -> Result<ocl::Kernel, String> {
+                ocl::Kernel::builder()
+                    .program(program)
+                    .name("race")
+                    .queue(queue.clone())
+                    .global_work_size(mc)
+                    .arg(b_ri)
+                    .arg(b_pd)
+                    .arg(b_scr_u)
+                    .arg(b_rc)
+                    .arg(b_scr_d)
+                    .arg(b_frames)
+                    .arg(b_status)
+                    .arg(b_cs)
+                    .arg(b_sg_x)
+                    .arg(b_sg_xd)
+                    .arg(b_sg_z)
+                    .arg(b_sg_zd)
+                    .arg(b_sg_q)
+                    .arg(b_sg_qd)
+                    .arg(b_lm_b)
+                    .arg(b_lm_l)
+                    .arg(b_ce_b)
+                    .arg(b_ce_e)
+                    .arg(b_ce_i)
+                    .arg(b_ce_f)
+                    .arg(b_sk)
+                    .arg(b_events)
+                    .arg(tick_cap as u32)
+                    .arg(slice_end)
+                    .arg(resume)
+                    .build()
+                    .map_err(|e| e.to_string())
+            };
+            match mode {
+                LaunchMode::Timed { warm, timed } => {
+                    let kernel = mk_kernel(0, u32::MAX)?;
+                    for _ in 0..warm {
+                        unsafe { kernel.enq().map_err(|e| e.to_string())? };
+                    }
+                    queue.finish().map_err(|e| e.to_string())?;
+                    let mut probe = vec![0u32; mc * ST_STRIDE];
+                    b_status.cmd().read(&mut probe).enq().map_err(|e| e.to_string())?;
+                    queue.finish().map_err(|e| e.to_string())?;
+                    bench_ticks += probe.chunks(ST_STRIDE).map(|s| s[ST_TICKS] as usize).sum::<usize>();
+                    let start = std::time::Instant::now();
+                    for _ in 0..timed {
+                        unsafe { kernel.enq().map_err(|e| e.to_string())? };
+                        queue.finish().map_err(|e| e.to_string())?;
+                    }
+                    bench_launch_ms += start.elapsed().as_secs_f64() * 1e3 / timed as f64;
+                }
+                LaunchMode::Burst { warm, count } => {
+                    let kernel = mk_kernel(0, u32::MAX)?;
+                    for _ in 0..warm {
+                        unsafe { kernel.enq().map_err(|e| e.to_string())? };
+                    }
+                    queue.finish().map_err(|e| e.to_string())?;
+                    let mut probe = vec![0u32; mc * ST_STRIDE];
+                    b_status.cmd().read(&mut probe).enq().map_err(|e| e.to_string())?;
+                    queue.finish().map_err(|e| e.to_string())?;
+                    bench_ticks += probe.chunks(ST_STRIDE).map(|s| s[ST_TICKS] as usize).sum::<usize>();
+                    let start = std::time::Instant::now();
+                    for _ in 0..count {
+                        unsafe { kernel.enq().map_err(|e| e.to_string())? };
+                    }
+                    queue.finish().map_err(|e| e.to_string())?;
+                    bench_launch_ms += start.elapsed().as_secs_f64() * 1e3 / count as f64;
+                }
+                LaunchMode::Once => {
+                    // F7 slicing: one launch per tick range and a status
+                    // readback between ranges. The tick end grows each slice,
+                    // and past the tick cap the kernel reports every lane done.
+                    let log = std::env::var_os("GSIM_GPU_SLICE_LOG").is_some();
+                    let mut probe = vec![0u32; mc * ST_STRIDE];
+                    let mut resume = 0u32;
+                    let mut slice_start = 0u32;
+                    let mut slice_len = match policy {
+                        SlicePolicy::Off => u32::MAX,
+                        SlicePolicy::Fixed(t) => t,
+                        SlicePolicy::Adaptive { .. } => SLICE_FIRST_TICKS.min(slice_cap),
+                    };
+                    loop {
+                        let slice_end = slice_start.saturating_add(slice_len);
+                        let kernel = mk_kernel(resume, slice_end)?;
+                        let t_slice = std::time::Instant::now();
+                        unsafe { kernel.enq().map_err(|e| e.to_string())? };
+                        queue.finish().map_err(|e| e.to_string())?;
+                        let el_ms = t_slice.elapsed().as_secs_f64() * 1e3;
+                        slice_launches += 1;
+                        slice_max_ms = slice_max_ms.max(el_ms);
+                        if policy == SlicePolicy::Off {
+                            break;
+                        }
+                        if log {
+                            eprintln!(
+                                "gpu slice {slice_start}..{slice_end} in {el_ms:.1} ms"
+                            );
+                        }
+                        b_status.cmd().read(&mut probe).enq().map_err(|e| e.to_string())?;
+                        queue.finish().map_err(|e| e.to_string())?;
+                        let unfinished = probe
+                            .chunks(ST_STRIDE)
+                            .any(|s| s[ST_FALLBACK] == 0 && s[ST_DONE] == 0);
+                        if !unfinished {
+                            break;
+                        }
+                        let next = match policy {
+                            SlicePolicy::Fixed(t) => t,
+                            SlicePolicy::Adaptive { target_ms } => {
+                                let scaled =
+                                    (slice_len as f64) * (target_ms / el_ms.max(1.0));
+                                (scaled.round() as i64)
+                                    .clamp(SLICE_MIN_TICKS as i64, slice_cap as i64)
+                                    as u32
+                            }
+                            SlicePolicy::Off => break,
+                        };
+                        slice_start = slice_end;
+                        slice_len = next;
+                        resume = 1;
+                    }
+                }
+            }
+            queue.finish().map_err(|e| e.to_string())?;
+            launch_ms += t_stage.elapsed().as_secs_f64() * 1e3;
+
+            let t_stage = std::time::Instant::now();
+            if !mode.timed() {
+                // Read back only the ticks that ran. Status first, then one frame
+                // prefix read per race at its own height, packed side by side, so
+                // readback shrinks with the used ticks, not the frame budget.
+                let mut c_status = vec![0u32; mc * ST_STRIDE];
+                let mut c_events = vec![0u32; mc * EV_STRIDE];
+                b_status.cmd().read(&mut c_status).enq().map_err(|e| e.to_string())?;
+                b_events.cmd().read(&mut c_events).enq().map_err(|e| e.to_string())?;
+                queue.finish().map_err(|e| e.to_string())?;
+                let mut frame_off = vec![0usize; mc + 1];
+                let mut tail_off = vec![0usize; mc + 1];
+                for (slot, &i) in chunk.iter().enumerate() {
+                    let used = c_status[slot * ST_STRIDE + ST_TICKS] as usize + 1;
+                    frame_off[slot + 1] = frame_off[slot] + used * frows * 6;
+                    let dbg = if prepared[i].ri[RI_DEBUG_TICK] != 0 { 14 * n * 6 } else { 0 };
+                    tail_off[slot + 1] = tail_off[slot] + dbg;
+                }
+                let mut c_frames = vec![0f64; frame_off[mc]];
+                let mut c_tail = vec![0f64; tail_off[mc]];
+                let mut c_skd: Vec<f64> = Vec::new();
+                let mut c_sks: Vec<u32> = Vec::new();
+                if want_sk && chunk.iter().any(|&i| prepared[i].debug_scratch) {
+                    c_skd = vec![0f64; mc * srl];
+                    c_sks = vec![0u32; mc * words];
+                    b_scr_d.cmd().read(&mut c_skd).enq().map_err(|e| e.to_string())?;
+                    b_scr_u.cmd().read(&mut c_sks).enq().map_err(|e| e.to_string())?;
+                }
+                let mut c_rc: Vec<u32> = Vec::new();
+                if rc_blocks > 1 {
+                    c_rc = vec![0u32; rc_blocks * RC_WORDS];
+                    b_rc.cmd().read(&mut c_rc).enq().map_err(|e| e.to_string())?;
+                }
+                let gspan = mc.div_ceil(groups.max(1)).max(1);
+                let mut sentinel = vec![0u32; 1];
+                let mut gevs: Vec<(usize, ocl::Event)> = Vec::new();
+                for lo in (0..mc).step_by(gspan) {
+                    let hi = (lo + gspan).min(mc);
+                    for slot in lo..hi {
+                        b_frames.cmd()
+                            .read(&mut c_frames[frame_off[slot]..frame_off[slot + 1]])
+                            .offset(slot * tick_cap * frows * 6)
+                            .enq()
+                            .map_err(|e| e.to_string())?;
+                        if prepared[chunk[slot]].ri[RI_DEBUG_TICK] != 0 {
+                            // The debug blocks sit in the last 14 rows of the race's
+                            // frame window, past the used-tick prefix.
+                            b_frames.cmd()
+                                .read(&mut c_tail[tail_off[slot]..tail_off[slot + 1]])
+                                .offset((slot * tick_cap + tick_cap - 14) * n * 6)
+                                .enq()
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                    // This in-order queue runs the group's reads first, so the
+                    // sentinel read closes the group and its event says the data
+                    // landed.
+                    let mut gev = ocl::Event::empty();
+                    b_status.cmd()
+                        .read(&mut sentinel)
+                        .enew(&mut gev)
+                        .enq()
+                        .map_err(|e| e.to_string())?;
+                    gevs.push((lo, gev));
+                }
+                let (st, evs) = (&c_status, &c_events);
+                let (foff, toff) = (&frame_off, &tail_off);
+                let (fr, tl) = (&c_frames, &c_tail);
+                let (skd, sks) = (&c_skd, &c_sks);
+                let rc_all = &c_rc;
+                let rcid = &rc_id;
+                let races = prepared;
+                let idx = chunk.as_slice();
+                let t_start = t_stage;
+                let mut slots: Vec<Option<RaceGpu>> = (0..mc).map(|_| None).collect();
+                let mut rb_max: f64 = 0.;
+                let mut dk_max: f64 = 0.;
+                std::thread::scope(|s| -> Result<(), String> {
+                    let mut hs = Vec::new();
+                    for (gi, part) in slots.chunks_mut(gspan).enumerate() {
+                        let (lo, gev) = (&gevs[gi].0, &gevs[gi].1);
+                        let lo = *lo;
+                        hs.push(s.spawn(move || -> Result<(f64, f64), String> {
+                            gev.wait_for().map_err(|e| e.to_string())?;
+                            let fire = t_start.elapsed().as_secs_f64() * 1e3;
+                            for (j, dest) in part.iter_mut().enumerate() {
+                                let slot = lo + j;
+                                let rc = if rc_all.is_empty() {
+                                    &[][..]
+                                } else {
+                                    let b = rcid[slot] as usize;
+                                    &rc_all[b * RC_WORDS..][..RC_WORDS]
+                                };
+                                *dest = Some(decode_slot(
+                                    &races[idx[slot]], slot, n, frows, words, rcap, srl, rc,
+                                    st, evs, foff, toff, fr, tl, skd, sks,
+                                ));
+                            }
+                            Ok((fire, t_start.elapsed().as_secs_f64() * 1e3))
+                        }));
+                    }
+                    for h in hs {
+                        let (fire, done) = h
+                            .join()
+                            .unwrap_or_else(|_| Err("a decode thread panicked".to_string()))?;
+                        rb_max = rb_max.max(fire);
+                        dk_max = dk_max.max(done - fire);
+                    }
+                    Ok(())
+                })?;
+                for (j, d) in slots.into_iter().enumerate() {
+                    decoded[group[slot0 + j]] = d;
+                }
+                readback_ms += rb_max;
+                decode_ms += dk_max;
+            } else {
+                readback_ms += t_stage.elapsed().as_secs_f64() * 1e3;
+            }
+        }
+    }
+
     let bench = if matches!(mode, LaunchMode::Timed { .. } | LaunchMode::Burst { .. }) && m > 0 {
         Some(KernelBench {
             device: self.spike.device.name.clone(),
@@ -1829,18 +2358,26 @@ impl RaceContext {
         launch_ms,
         readback_ms,
         decode_ms,
+        slices: slice_launches,
+        slice_max_ms,
     };
     Ok((RaceRun { device: self.spike.device.clone(), build_ms: self.spike.build_ms, stage_ms, races }, bench))
     }
 }
 
 /// Decodes one launched race from its chunk's staging. Frames arrive packed
-/// to the used-tick prefix, the offsets in frame_off and tail_off, scratch
-/// staging only for chunks holding debug or full-reply races.
+/// to the used-tick prefix, the offsets in frame_off and tail_off, u32/d64
+/// scratch staging only for chunks holding debug races, and `rc` is the
+/// race's reply-channel block.
 fn decode_slot(
     race: &Prepared,
     slot: usize,
     n: usize,
+    rows: usize,
+    words: usize,
+    rcap: usize,
+    srl: usize,
+    rc: &[u32],
     status: &[u32],
     events_all: &[u32],
     frame_off: &[usize],
@@ -1883,9 +2420,9 @@ fn decode_slot(
     out.loop_end = loop_end(out.ticks);
     if out.fallback.is_none() {
         let base = frame_off[slot];
-        let span = (out.ticks + 1) * n * 6;
+        let span = (out.ticks + 1) * rows * 6;
         out.frames = frames_all[base..base + span]
-            .chunks_exact(n * 6)
+            .chunks_exact(rows * 6)
             .map(|tick| {
                 tick.chunks_exact(6)
                     .map(|w| {
@@ -1907,13 +2444,13 @@ fn decode_slot(
                 .collect();
         }
         if race.debug_scratch {
-            let d = slot * SRL_WORDS + SRL_SKD;
-            let u = slot * SCR_U_WORDS + SCR_SK;
-            let j = slot * SCR_U_WORDS + SK_JRN0;
+            let d = slot * srl + SRL_SKD;
+            let u = slot * words + SCR_SK;
+            let j = slot * words + sk_jrn0(rcap);
             let jc = (sks_all[j] as usize).min(SK_JRN_N - 9);
             out.debug_sk = Some(SkillScratch {
-                skd: skd_all[d..d + SK_RMAX * SKD_STRIDE].to_vec(),
-                sks: sks_all[u..u + SK_RMAX * SKR_STRIDE].to_vec(),
+                skd: skd_all[d..d + rcap * SKD_STRIDE].to_vec(),
+                sks: sks_all[u..u + rcap * SKR_STRIDE].to_vec(),
                 journal: sks_all[j + 1..j + 1 + jc].to_vec(),
             });
         }
@@ -1946,10 +2483,9 @@ fn decode_slot(
             .map(|k| (ev[1 + 2 * k] as usize, ev[2 + 2 * k]))
             .collect();
         if race.full {
-            let u = slot * SCR_U_WORDS;
             let channel = |base: usize, cap: usize| -> Vec<u32> {
-                let count = (sks_all[u + base] as usize).min(cap);
-                sks_all[u + base + 1..u + base + 1 + count].to_vec()
+                let count = (rc[base] as usize).min(cap);
+                rc[base + 1..base + 1 + count].to_vec()
             };
             let bits = |word: usize| -> f64 {
                 f64::from_bits(
@@ -2007,6 +2543,9 @@ pub fn run_with_snapshot(
 /// Prepare every request with the full-reply channels on and launch once.
 /// Each race's streams arrive in `RaceGpu::reply` for `full_reply::build`.
 pub fn run_full(requests: &[(String, i64)]) -> Result<RaceRun, String> {
+    if crate::coalesce::enabled() {
+        return shared_run(requests, true);
+    }
     let mut ctx = RaceContext::open()?;
     let mut prepared: Vec<Prepared> = Vec::with_capacity(requests.len());
     for (request, seed) in requests {
@@ -2061,6 +2600,7 @@ fn kernel_fallback(flag: u32, arg: u32) -> Option<String> {
         (FB_EVENT, _) => "event log overflow".into(),
         (FB_SKILL_SEQ, _) => "skill duration order overflow".into(),
         (FB_RC, _) => "full-reply channel overflow".into(),
+        (FB_TICKS, _) => "the race outgrew the course tick bound".into(),
         (other, a) => format!("kernel fallback {other} arg {a}"),
     })
 }

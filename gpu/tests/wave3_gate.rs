@@ -256,9 +256,11 @@ fn wave3_real_skills_replay_bit_exact() {
     }
     register_geometry(10504);
 
-    let mut problems: Vec<String> = Vec::new();
-    let mut fired_report: Vec<String> = Vec::new();
-    for row in REAL_SKILLS {
+    // Every row is independent. They run side by side (crate::par) and the
+    // problems and the firing report keep row order.
+    let answers = crate::par::map(REAL_SKILLS.iter(), |row| {
+        let mut problems: Vec<String> = Vec::new();
+        let mut fired_report: Vec<String> = Vec::new();
         let mut horses: Vec<HorsePatch> = if row.spread {
             (0..9).map(|i| (i, Some(row.skills), None, None)).collect()
         } else {
@@ -283,6 +285,13 @@ fn wave3_real_skills_replay_bit_exact() {
             let tag = format!("{} ({}) seed {seed}", row.sid, row.what);
             compare_race(&tag, request, *seed, &out.races[index], &mut problems);
         }
+        (problems, fired_report)
+    });
+    let mut problems: Vec<String> = Vec::new();
+    let mut fired_report: Vec<String> = Vec::new();
+    for (mut row_problems, mut row_report) in answers {
+        problems.append(&mut row_problems);
+        fired_report.append(&mut row_report);
     }
     if !problems.is_empty() {
         panic!(

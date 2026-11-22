@@ -39,13 +39,25 @@ too (see "Geometry port").
 cargo test --features gpu --release
 ```
 
+Every file in `tests/` is a module of one test binary, `suite`
+(`tests/suite/main.rs`, `autotests = false` in `Cargo.toml`), so its tests run
+on every core instead of one binary after another. `cargo test --test suite
+wave3_gate::` runs one file, and a new file under `tests/` needs its `mod` line
+in `tests/suite/main.rs` or it never runs. Calls to `race_exec::run`,
+`race_exec::run_full` and `classic_exec::run` made at the same time share one
+context and one launch (`src/coalesce.rs`): a launch costs about the same for
+one race as for hundreds, and kernels from separate contexts run one after
+another anyway. Gates that loop over independent cases run them on their own
+threads through `tests/suite/par.rs` so their launches can share too.
+`GSIM_GPU_NO_COALESCE=1` turns the sharing off.
+
 Suites:
 
 | Suite | Proves |
 | --- | --- |
 | `lib` (28 tests) | Vendored engine tests pass inside this crate |
 | `reference_trace` | The in-crate runner reproduces `restricted_trace.json` from the Jax oracle byte-for-byte (CRLF normalized) |
-| `layout` | The three `repr(C)` kernel structs are 104/36/244 bytes with the exact field offsets, `kernel_params()` equals the engine's `Parameters` public methods for every scalar the kernel reads, and the scratch stride mirrors are pinned (`SK_STRIDE` 54,912, `SCR_U_WORDS` 479,796, `SRL_WORDS` 233,720, the `RI`/`RIL`/`ST` strides and the init strides) |
+| `layout` | The three `repr(C)` kernel structs are 104/36/244 bytes with the exact field offsets, `kernel_params()` equals the engine's `Parameters` public methods for every scalar the kernel reads, and the 18-horse layout is pinned (`SK_STRIDE` 55,872 against the cap, `SCR_U_WORDS` 265,537 with the diag and reply-channel sizes, the record-bucket scratch, and the classic strides derived from the cap) |
 | `comparator` | No device needed: one injected wrong value in a fake GPU outcome reports exactly the injected tick, runner, field and both raw bit patterns, equal frames with a flag are not parity |
 | `gpu_gate` | See below |
 | `rng_gate` (gpu only) | See "RNG port" below |
@@ -74,19 +86,20 @@ Suites:
 | `wave7_folds` | Compile-time gates for the mid-race stat fires: cross SpeedUp, GutsUp and WisdomUp compile live on targets 4, 9 and 10 (kind 4 sets the plan's `live_guts` flag), ungated self GutsUp and WisdomUp refuse by name, every phase-gated self shape lowers, and `SK_FLAG_BUMPED` marks exactly the static 4/5/29 bumps (see "Wave-7 mid-race stat fires") |
 | `wave7_gate` (gpu + initialization + geometry + race) | The real kind-1 loop fire 201641 beside a constructor-pass SpeedUp probe, plus a 668xxx battery for self WisdomUp refire, the static-bump-to-loop-fire accumulator chain, cross SpeedUp and WisdomUp on all three fans, the 10 s refire cycle and the immune and same-team debuff drops, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-7 mid-race stat fires") |
 | `wave8_powf_gate` (gpu) | Bit-exactness gate for the transcribed ucrtbase `pow` and `powf` (`powf_core.cl`): the engine's guts domains plus fuzz bands, `to_bits` equality against Rust `f64::powf` and `f32::powf` at 100%, default 38.7M pairs, env-widened to 419.4M with zero differences |
-| `wave8_folds` | Compile-time gates for live guts: the shipped GutsUp ids compile as baked constructor bumps (two keep their `random_lot` condition refusals, and 210141 folds dead on its `motivation` gate since wave 9c), and the mid-race and cross synthetic shapes set the plan's `live_guts` flag while static-only shapes never do |
+| `wave8_folds` | Compile-time gates for live guts: the shipped GutsUp ids compile as baked constructor bumps (202441 and 202442 compile as draw-gated live guts since the E1a `random_lot` sampler, and 210141 folds dead on its `motivation` gate since wave 9c), and the mid-race and cross synthetic shapes set the plan's `live_guts` flag while static-only shapes never do |
 | `wave8_gate` (gpu + initialization + geometry + race) | The 669xxx GutsUp battery: self phase-gated refire and drop, static bump chained into a loop fire, all three cross fans, the immune and same-team debuff drops, the constructor-only static control, and the real static ids 200211, 202181 and 1200051, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events (see "Wave-8 live guts") |
  | `wave9_folds` | Compile-time gates for the tail: a `duration_usage` 4 record lowers with its running instance and the aux kinds 11, 12, 35 and 38 refuse under it, the `additionalActivate` fan compiles live on kinds 21, 22, 27, 28 and 31 at targets 1, 4, 9 and 10 and refuses outside that, `value_usage` at any wire value compiles as the engine's pass-through, and the real `duration_usage` 4 ids 100531 and 900531 plan live (see "Wave-9 running instance, fan and pass-through values") |
  | `wave9_gate` (gpu + initialization + geometry + race) | The real 100531 and 900531 beside a 6691xxx `duration_usage` 4 battery (no delayed effect, an extended `additionalActivate` sibling, a kind-2 turn on a short cooldown, a cross-target fan), a 6692xxx battery for the `additionalActivate` fan outside self on kinds 21, 22, 27, 28 and 31, and 6693xxx for the `value_usage` pass-through, v77 roster seeds 1..3: zero fallback and frame identity with the expected skill ids in the CPU activation events, plus one ignored scene that reproduces the fan-churn drift (see "Wave-9 running instance, fan and pass-through values") |
  | `wave9c_folds` | Compile-time gates for the condition-name tail: `grade`, `time`, `motivation`, `base_power` and `post_number` fold both directions with the refused shapes, the corner sampler resolves its row live, refuses an untagged non-integer course index and folds a missing-row arm, the viewer leaf lowers live with its header row and refuses an out-of-range `playerHorseIndex`, the roll-gated constructor bump marks `INIT_BUMP` and `BUMPED` with no host bump only for the kinds the kernel can bake, and the advantage-skill machine refuses (see "Wave-9c condition-name tail") |
  | `wave9c_gate` (gpu + initialization + geometry + race) | The real merged ids 100471, 900471, 200251, 202231, 202331, 210141 and 200351 on fitted seats beside a 6694xx battery for the directions the roster cannot reach (the false-side post_number fold, the activating time, grade, motivation, base_power and viewer-row fires, the corner sampler with a missing row and with four arms, the StaminaUp kind static, mixed and roll-gated), v77 roster seeds 1..3: zero fallback and frame identity with the battery's mid-race rows activating (see "Wave-9c condition-name tail") |
-| `grid_gate` (gpu + initialization + geometry + race) | Grid starts at 21, 24, 40 and 120 horses, two courses, seeds 1..2: zero fallback and frame-for-frame `to_bits` identity against the CPU engine, the 21-horse grid-vs-retail control pair differing at frame 0, and invalid grid shapes falling back with the engine's own message (see "Grid mode") |
+| `grid_gate` (gpu + initialization + geometry + race) | Invalid grid shapes fall back with the engine's own message, and the engine rejects the same request with it. A valid grid needs 21 horses, past the 18-horse cap, so grid rosters refuse by size (see "Grid mode") |
 | `wave10_gate` (gpu + initialization + geometry + race) | The full (non-compact) reply lane, seeds 1..3: the retail lane, the zero-skill control, the fan and `duration_usage` 4 battery, the startup pass, paired streams with a data signature, world geometry, retain-all frames and the competition-reorder roster each come out of `run_batch_full` and `full_reply::build` whole and byte-for-byte equal to the engine's own reply text, frames included (see "Wave-10 full replies") |
 | `wave10_folds` (gpu + initialization + geometry + race) | Full-reply provenance folds: mutating one kernel channel moves exactly the arrays decoded from it, every channel carries live records in a gated scenario (pending and immediate activations, rush edges, fan and cross-target selections, the asitame release, kinds 4 and 5, the style-leader and non-leader phase records, snapshot ranks and the spurt columns), and the requests outside the full lane stay refused (see "Wave-10 full replies") |
 | `facade_gate` (gpu + initialization + geometry + race) | See "Batch API" below |
 | `parity_audit` (gpu + initialization + geometry + race) | Engine parity audit: the app comparison traffic on both lanes compact bit-exact and full byte-equal, all 751 merged skill ids through both compilers against pinned refusal-family lists, and the `gate_reasons` fallback set pinned exactly (see "Engine parity audit" under "Wave 13b") |
 | `wave17_classic_drift` (gpu + initialization + geometry + race) | The scenes the classic-lane base physics drifted 1 to 2 ulp in speed on: plain v77 10105 seed 2, 10404 seed 1, 10810 seeds 1 and 2, 10908 seed 1, plus 10312, 10506, 10511 and 10607 high-stamina seeds 1..3, every frame column `to_bits`-equal against the CPU engine and full replies byte-equal (see "Wave 17: the classic-lane section bake") |
 | `wave19_overcap` (gpu + initialization + geometry + race) | The retail overcap raw-power family: the reported 10504 stamina and power 30000 scene seeds 1..3, the mild 2000/2000 band, the same rewrite on 10108 with the recovery record armed, and the flagged 10108 variant with both injected records live, every frame column `to_bits`-equal and full replies byte-equal (see "Wave 19: the retail overcap raw power") |
+| `slice_gate` (gpu + initialization + geometry + race) | F7 launch slicing: on the CM and v77 fields, fixed and adaptive slice lengths answer `to_bits`-equal to one-shot launches and to the CPU engine, the finish tick landing exactly on a slice boundary is pinned at two lengths, plus one ignored probe that measures wide classic launches (see "Keeping launches under the Windows timeout") |
 
 ### What the gate proves
 
@@ -102,29 +115,25 @@ subnormals, or correctly-rounded f32 divide/sqrt, and names the refusals. The
 program is built with `-cl-fp32-correctly-rounded-divide-sqrt` and the kernel
 source carries `#pragma FP_CONTRACT OFF` (`src/kernels/restricted_tick.cl`).
 
-## Runner cap: 18 by default, 120 under `wide-roster`
+## Runner cap: 18
 
 The game never fields more than 18 runners, so every runner-indexed region of
-both kernels sizes to 18 by default. `gpu::ROSTER_CAP` is the one constant:
-the host strides (`race_exec::RACE_MAXR`, `classic_exec::CLS_MAXR`) read it,
-and `gpu::build_options()` passes it to every program as `-D RACE_MAXR` and
+both kernels sizes to 18. `gpu::ROSTER_CAP` is the one constant: the host
+strides (`race_exec::RACE_MAXR`, `classic_exec::CLS_MAXR`) read it, and
+`gpu::build_options()` passes it to every program as `-D RACE_MAXR` and
 `-D CLS_MAXR`, so kernel and host cannot disagree. A roster above the cap
 refuses by size ("roster size outside the kernel's range") and the CPU engine
-answers it, which covers the engine's experimentalGrid band (21 to 120). At 18
-the 24-runner band refusal is unreachable, because the size refusal comes
-first.
+answers it, which covers the engine's experimentalGrid band (21 to 120). The
+24-runner band refusal never fires, because the size refusal comes first.
 
-`--features wide-roster` restores the 120 cap and with it the grid lane on the
-GPU, at about 1.5 MiB more scratch per race slot. The grid gates
-(`grid_gate`, `wave12c_modes::classic_grid_starts_answer_bit_exact`, the grid
-and 19 to 24 runner cases in `equivalence_gate`) and the 120-layout pins in
-`tests/layout.rs` run only there; at the default cap they are ignored with
-the reason, and `layout::default_layout_sizes_to_the_eighteen_horse_field`
-pins the 18 layout instead. Run both:
+The `wide-roster` feature held a 120-horse tier that ran the engine's grid band
+on the device, at about 1.5 MiB more scratch per race slot. It was retired on
+2026-11-21: 18 runners is the hard limit. `grid_gate` pins the invalid-shape
+refusal, and `layout::default_layout_sizes_to_the_eighteen_horse_field` pins the
+layout.
 
 ```powershell
 cargo test --release --features race
-cargo test --release --features "race wide-roster"
 ```
 
 What the cap does not shrink: the skill-record scratch (`SK_RMAX` 960 records)
@@ -150,18 +159,143 @@ for frame first.
 
 B580, v77 line 1, course 10504, 9 runners (2026-11-21):
 
-| | 120 cap | 18 cap |
-| --- | --- | --- |
-| race slot | 7.81 MiB | 6.32 MiB |
-| widest launch | 1,291 races | 1,597 races |
-| kernel-only at the widest launch | 625 races/s | 822 races/s |
-| end to end at the widest launch | 182 races/s | 214 races/s |
-| CPU engine, 20 threads | 1,650 races/s | 1,532 races/s |
+| | 18 cap |
+| --- | --- |
+| race slot | 6.32 MiB |
+| widest launch | 1,597 races |
+| kernel-only at the widest launch | 822 races/s |
+| end to end at the widest launch | 214 races/s |
+| CPU engine, 20 threads | 1,532 races/s |
+
+The retired 120-horse tier measured 7.81 MiB per race slot, 1,291 races at its
+widest launch, 625 races/s kernel-only, 182 races/s end to end, and 1,650
+races/s for the CPU engine on 20 threads.
 
 One race takes about 0.9 s on a GPU lane (a 32-race launch still takes
 924 ms) against 4.9 ms on one CPU core, and widening the launch from 32 to
 1,597 races only doubles its time, so throughput is bound by how many races
 fit in memory, not by the device's arithmetic.
+
+### CM field rows (`saturate --strip-refused`)
+
+```powershell
+cargo run --release --features race --bin saturate -- --strip-refused
+```
+
+The workload is `examples/cm-10701-race.jsonl` line 1, course 10701, 9
+runners, 159 skills. `--strip-refused` drops skills the retail lane refuses,
+and the CPU oracle runs the same stripped request (2026-07-04). Port 1 is the
+effect-cap bucket work in this branch: the field's 199 compiled effects fit
+bucket 256, the same bucket one app-default mob field (132 effects) fits.
+Port 2 ports the PowerUp effect (type 3), port 3 folds the
+`is_basis_distance` condition on the course distance. The last column runs
+without the strip flag: after all three ports nothing is refused.
+
+| | before port 1 | after port 1 (bucket 256) | after port 2 (PowerUp) | after port 3, unstripped |
+| --- | --- | --- | --- | --- |
+| skills kept after stripping | 152 of 159 (skill 900511 overflowed the fixed 192-slot pool) | 153 of 159 | 158 of 159 | 159 of 159 |
+| race slot | 6.32 MiB | 6.32 MiB (table 640 words wider, 2,560 B) | 6.32 MiB (power accumulator column, 144 B) | 6.32 MiB |
+| kernel-only at 1,597 | 211.5 races/s | 206.3 races/s | 212.3 races/s | 210.1 races/s |
+| end to end at 1,597 | 186.5 races/s (upload 170, launch 7,576, readback 348, decode 310 ms) | 169.5 races/s (upload 176, launch 7,778, readback 403, decode 838 ms) | 186.5 races/s (upload 163, launch 7,380, readback 284, decode 583 ms) | 177.8 races/s (upload 175, launch 7,492, readback 420, decode 707 ms) |
+| guard | seed 1 equals the CPU engine frame for frame, 840 ticks | equals, 837 ticks | equals, 837 ticks | equals, 837 ticks |
+
+Each column runs more skills than the one before it (900511 after port 1,
+the five PowerUp riders after port 2, the `is_basis_distance` rider after
+port 3), and the decode stage drifts between 310 ms and about 1,040 ms
+across runs on this machine, so the end-to-end columns are not comparable
+port to port on their own. The strip list shrinks from 7 removals through
+port 1 to none. The slot column predates B4 and B5, which is why it reads
+6.32 MiB; `saturate` now runs this request unstripped by default, and the F1
+section carries the current slot and launch numbers.
+
+### Keeping launches under the Windows timeout (F7)
+
+Windows ends OpenCL work that runs past `TdrDelay` (2 s on a stock PC) and
+resets the device context. A CM race runs 837 ticks, and one launch of the
+widest CM batch took 7.8 s of kernel time, far past any stock timeout. Both
+lanes now run one launch per tick range. The kernel takes `slice_end` and
+`resume`, keeps per-race state in scratch between launches (frame writes are
+indexed by absolute tick), and the host relaunches the same buffers at the
+next range until every lane reports `ST_DONE` (retail) or `S_DONE`
+(classic) or falls back. Between slices the host reads back one chunk of
+status words.
+
+Adaptive sizing is the default: the first slice runs 32 ticks, each next
+length scales the previous by `GSIM_GPU_SLICE_TARGET_MS / elapsed`
+(default 500 ms) and clamps to 16 ticks through the tick cap.
+`GSIM_GPU_SLICE=off` restores one-shot launches, `GSIM_GPU_SLICE_TICKS=N`
+fixes the slice length, and `GSIM_GPU_SLICE_LOG=1` prints every slice.
+
+The slice cap follows the launch's frame window, so since B5 it is one below
+`course_tick_bound` for that course rather than one below `RACE_MAX_TICKS`. The
+numbers below predate B5 and F1; the F1 section carries the current CM launch
+profile.
+
+Slice profile of the widest CM launch (1,597 races, 837-tick field): 16
+launches, the first 32 ticks in 267 ms, 14 slices of 43 to 69 ticks in 438
+to 540 ms, and a final 42-tick slice in 261 ms. The slowest launch, 540 ms,
+sits 3.7x under the stock timeout. End to end at that width:
+
+| | one launch | sliced (default) |
+| --- | --- | --- |
+| end to end | 8,627 ms, 185.1 races/s | 8,474 ms, 188.5 races/s |
+| launch stage | 7,795 ms | 7,725 ms |
+| flagged | 0 | 0 |
+
+The launch boundaries cost nothing measurable at this width. `slice_gate`
+pins that sliced frames are `to_bits`-equal to one-shot launches and to the
+CPU engine on the CM and v77 fields, including the case where the finish
+tick lands exactly on a slice boundary, and the whole suite runs sliced.
+
+The classic lane needed the same treatment: its frame budget caps one launch
+at 86 races (512 MiB), and measured launches at that width ran 819 ms
+(course 10504, max 1,461 ticks) and 1,663 ms on the longest course (10507,
+max 2,909 ticks), within 17% of the stock timeout, while a race that never
+finishes (the kernel's own 6,144-tick flag path) extrapolates to about
+3.5 s. Sliced, the 10507 launch runs 5 slices with the slowest at 636 ms,
+and the 10504 launch 3 slices with the slowest at 441 ms.
+
+### Coverage audit (`skill_coverage`)
+
+```powershell
+cargo run --release --features race --bin skill_coverage [REQUEST.jsonl ...]
+```
+
+Host-side only (no GPU): for each request line the bin compiles the full
+field (with the strip loop of the saturate bench), prints the table usage
+against the `SK_*` caps, then compiles every `skillData` id alone on runner
+0 and prints a refusal-family histogram. No arguments audits
+`examples/cm-10701-race.jsonl` and `examples/v77-race.jsonl` (2026-07-04).
+The app's default mob field, rebuilt from the app's `profile-v77.json`,
+`mob-presets.json` and the 1,530-entry `umalator-global/skill_data.json`
+(122 skill slots, course 10504), compiles whole as well.
+
+Full-field table usage, the two fields that arrive intact:
+
+| field | records | effects | programs / SK_PMAX | regions / SK_GMAX | terms / SK_MMAX | tags / SK_TMAX | arms / SK_AMAX |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| CM (159 skills) | 162 | 199 | 708 / 3,072 | 262 / 2,048 | 83 / 160 | 3,938 / 4,096 | 174 / 256 |
+| app mob (122) | 122 | 134 | 500 / 3,072 | 150 / 2,048 | 66 / 160 | 3,100 / 4,096 | 132 / 256 |
+
+The tag pool is the tight one: the CM field fills 96% of `SK_TMAX`.
+
+Solo audits: 720 of the 730 template ids compile (10 refused); the JP count
+(1,370 of the 1,530 ids, 160 refused) predates the E1a port. After the three
+E1 ports and the E1a target-18, `is_badstart`, `straight_front_type`,
+`lastspurt`, temptation-opponent, `last_straight_random`, `random_lot` and
+`is_exist_chara_id`
+ports, both CM-family
+fields refuse the same 10 ids:
+effect targets 19 and 20 (3, the temptation behind/infront ids' effects),
+>4-arm conditions (3),
+`has no alternatives` and `is_other_character_activate_advantage_skill`
+(2 each). The JP table adds request-constant
+families that are fold candidates (the E1a note about the superset):
+`phase_*` sampled and equality terms (36), `course_distance` comparisons
+(35), `base_wiz` / `base_stamina` / `base_guts` / `base_speed` static gates
+(18), targets 7 and 11 (7), an all-stat bump effect with no kernel consumer
+(4), `corner_count`, `is_exist_skill_id`,
+`activate_count_middle` (1 to 3 each).
 
 ### Phase A: host overhead at the 1,597-race launch (18 cap)
 
@@ -193,6 +327,73 @@ B580 badly, so one queue still launches every race kernel. What is left of
 the end to end time: about 2.0 s of kernel, about 0.5 s of frame reads, and
 about 1.1 s of decode, which is 2.3 million row-Vec allocations per launch
 and no longer shrinks with more threads.
+
+### Phase B: memory footprint per race (18 cap)
+
+Phase A cut the host stages that ran every launch. Phase B shrinks what one
+race slot pins in device memory, since throughput is bound by how many races
+fit. Two of the five routes move the `saturate` slot (a full launch, default
+build): B4 sizes the skill scratch by the request's record bucket, and B5 sizes
+the frame window by the course.
+
+| | before B | after B5 |
+| --- | --- | --- |
+| race slot | 6.32 MiB | 2.26 MiB |
+| frames | 2.53 MiB | 1.64 MiB |
+| scratch u32 + f64 | 1.46 + 2.10 MiB | 0.18 + 0.22 MiB |
+| widest launch (memory holds) | 1,597 races | 4,472 races |
+| end to end at the widest launch | 403 races/s at 1,597 | 507 races/s at 3,072 |
+
+B4 drops the per-race scratch from the 960-record top bucket to the bucket the
+request needs (64 words for the v77 line), which is the whole scratch cut. B5
+replaces the fixed 6,144-tick frame window with a per-course bound, the course
+distance over a conservative pace plus a margin, clamped to 6,144: a race still
+running at the bound sets a fallback and reruns on the CPU, so the bound costs
+reruns, never wrong frames. The v77 course bound is 3,979 ticks against the
+1,462 its race uses. B1 (compact frame rows for the app launch), B2 (the event
+journal out of the default build) and B3 (reply channels in their own buffer)
+move the compact app path, build hygiene and reply isolation rather than this
+full-launch slot. The guard prints `GPU seed 1 matches the CPU engine frame for
+frame` with 0 flagged at every width.
+
+### F1: one request table per launch
+
+`run_repeated` sends one request many times, and only the seed differs, yet each
+slot carried its own race parameters and its own skill table. The launch now
+uploads a request table, one row per distinct request, and a slot names its row
+in `RI_REQ` (retail_core.cl:88, mirrored in race_exec.rs:145). The kernel reads
+the parameters and the skill table through that row (race.cl:995-996 and
+race.cl:1047), so the 0.22 MiB of request data goes over PCIe once per request
+in the launch rather than once per race.
+
+The row follows the prepared race, not the seed: `Prepared::with_seed` keeps the
+request id, so the seeds of one prepare share a row (race_exec.rs:676). Races
+prepared separately keep their own rows even when their texts match, since
+matching texts would mean comparing a 0.22 MiB skill table per race. `LaneSet`
+sizes the parameter and skill buffers to the distinct rows a launch holds, and
+they grow only when a launch needs more (race_exec.rs:1329). The geometry table
+cache from A2 still covers the uploads that repeat across calls.
+
+CM request at the widest launch device memory holds, default build, `saturate`:
+
+| | before F1 | after F1 |
+| --- | --- | --- |
+| race slot | 2.29 MiB | 2.07 MiB |
+| request table | inside every slot | 0.22 MiB per distinct request |
+| launch the memory holds | 4,402 races | 4,870 races |
+| upload | 445 ms | 3 ms |
+| launch | 12,871 ms | 7,150 ms |
+| end to end, one launch | 15,121 ms, 291 races/s | 9,159 to 10,857 ms, 449 to 532 races/s |
+| end to end, sliced | 15,434 ms, 285 races/s | 8,996 to 9,569 ms, 509 to 541 races/s |
+| launches in a sliced run | 27 | 16 |
+
+The end-to-end columns come from two runs; decode is the stage that swings (391
+to 1,972 ms at this width), and the launch and upload stages repeat to within a
+few ms. The device reads one copy of the table rows instead of one per race, and
+the launch stage fell 44% even though the launch grew by 468 races. The guard
+prints `GPU seed 1 matches the CPU engine frame for frame` with 0 flagged,
+sliced and unsliced, and `slice_gate` covers the sliced resume against the
+shared table.
 
 ## Bench
 
@@ -354,7 +555,7 @@ with tests like that: declare the include behind `#[cfg(all(feature = "...",
 not(test)))]` in `src/lib.rs`, and put its gate in an integration test (the
 `tests/` dir compiles against the lib without `cfg(test)`). `cargo test --lib`
 then never sees the module, and the gate runs through
-`cargo test --features gpu,geometry --test geometry_gate`.
+`cargo test --features gpu,geometry --test suite geometry_gate::`.
 
 The accessors that read the engine's private runtime state (`flatten_course`,
 `drop_overrun` in `src/retail_geometry.rs`) must sit in the same module as the
@@ -592,12 +793,12 @@ so the shared race dice are consumed in the same order the engine's field
 moves them. Paired mode gives every runner its own stream instead (see
 "Paired mode" below). Domain gates run before any launch: an invalid
 `experimentalGrid` shape flags with the engine's message, a roster beyond the
-kernel layout's 120 cap flags as outside the kernel's range, non-retail
+kernel layout's 18 cap flags as outside the kernel's range, non-retail
 runtime flags, and the grid-plus-geometry combination flags with the engine's
 refusal (api.rs:68-71). Each flagged race returns its reason instead of
 launching wrong
 numbers, and skill-bearing fields are gated by the skill compiler (see
-"Skills port"). A field of up to `RACE_MAXR` (120) runners launches
+"Skills port"). A field of up to `RACE_MAXR` (18) runners launches
 unflagged when it has no skills or only skills the compiler accepts. The
 experimental startup pass is
 ported: `RI_STARTUP` runs one dt=0 tick ahead of the frame-0 capture (see
@@ -813,8 +1014,8 @@ equal tick counts, zero fallback.
   and the reason names `duration_usage 4`. The same alternative without that
   effect compiles, which is the shape the real 100531 and 900531 have.
 - `unsupported_random_term_refuses_by_name`: one skill's condition rewritten to
-  `random_lot==1` (a sampled term with no ported sampler) refuses the race, and
-  the reason names `random_lot`, so an unported random term never runs on an
+  `hypothetical_random==1` (a sampled term with no ported sampler) refuses the race, and
+  the reason names `hypothetical_random`, so an unported random term never runs on an
   empty or wrong window.
 
 ### App mob-preset payloads
@@ -1450,8 +1651,8 @@ from the field at the points the engine reads it.
   `SD_DUEL_A`); `SCR_U_WORDS` is unchanged at 479,796 and `SRL_WORDS` moves
   233,120 to 233,720, repinned in `tests/layout.rs`.
 - Gates: `wave8_powf_gate` above. `wave8_folds` audits the shipped catalog
-  (13 of the 16 GutsUp ids compile as baked bumps; 202441 and 202442 keep
-  their pre-existing `random_lot` condition refusals, and 210141, whose
+  (13 of the 16 GutsUp ids compile as baked bumps; 202441 and 202442 compile
+  as draw-gated live guts since the E1a `random_lot` sampler, and 210141, whose
   `motivation>=4` gate the wave-9c fold closes, folds dead on the default
   mood instead of refusing) and the flag matrix. `wave8_gate` replays
   the v77 roster seeds 1..3 with zero fallback: 669001/669002 self refire
@@ -1997,15 +2198,15 @@ and proves every one of them is reachable, nothing else is (`gate_reasons_enumer
 | `no GPU passes the exactness gate` | n/a | `facade::gate_reasons` with no device that passed `gpu::fp_gate_rejections` | limit, `gpu::fp_gate_rejections` plus the parity probes. Not closable: bit-exact physics needs fp64 with correctly-rounded divide and sqrt, and no device absent from the host satisfies that |
 | `missing cl_khr_fp64, missing CL_FP_DENORM in single_fp_config, missing CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT, missing CL_FP_DENORM in double_fp_config` | n/a | `gpu::fp_gate_rejections`, joined | limit, `gpu::fp_gate_rejections` plus the parity probes. Not closable: same capability floor as the row above |
 | `experimentalGrid requires 21 through 120 horses, columns=20 and rowSpacing=3.0.` | engine parse error, `lib.rs:262-272` | quoted verbatim by `prepare` and the gate, retail and classic | engine error, `equivalence_gate::engine_rejected_request_shapes_quote_their_error_texts` proves engine text, kernel refusal and gate reason byte-equal, and `parity_audit` probes it |
-| `World geometry requires the experimental runtime and standard starting grid` | engine error, `api.rs:68-71` | quoted verbatim | engine error, `grid_gate::grid_with_geometry_quotes_the_engine_reason` proves kernel equals engine, `parity_audit` probes it. Not closable at the kernel: the grid physics port is the engine's pure-f64 grid, not World geometry |
+| `World geometry requires the experimental runtime and standard starting grid` | engine error, `api.rs:68-71` | quoted verbatim | engine error, `parity_audit` probes it through `gate_reasons`. Not closable at the kernel: the grid physics port is the engine's pure-f64 grid, not World geometry |
 | `traceConservePower requires experimentalRetailRuntime` | engine error, `lib.rs:1504-1506` | quoted verbatim on the classic lane | engine error, `wave12c_modes::classic_engine_errors_quote_the_engine_text` proves all three texts equal, `facade_gate` and `parity_audit` probe it |
 | `experimentalLaterStaminaMechanics must be a boolean.`, `traceConservePower must be a boolean`, `experimentalRetailStartup must be a boolean` | engine parse errors, `lib.rs:343-349` | quoted verbatim | engine errors, `equivalence_gate::engine_rejected_request_shapes_quote_their_error_texts` proves each byte-equal on kernel and gate, `parity_audit` probes each |
 | `non-retail runtime` | the engine answers on its classic solver | the retail kernel is a retail-runtime port, it refuses rather than approximate, `race_exec::prepare` | limit, `parity_audit` probe. Not closable on this lane: the classic physics is a separate kernel, the classic lane answers these requests |
 | `retail runtime belongs to the retail lane` | the retail config switches the solver (`lib.rs:1514-1523`) | the classic kernel is a classic-runtime port, `classic_exec::prepare` | limit, `facade_gate` quotes it, `parity_audit` probes it. Not closable on this lane: the mirror of the row above |
 | `traceConservePower is outside the full GPU lane` | the mode only adds reply keys (`lib.rs:1115-1123`) | `full_reply::build`, the compact lane answers | limit, `equivalence_gate::trace_conserve_power_is_reply_diagnostics_only` asserts the reason. Not closable yet: the conserve reply channels ride the compact classic lane only |
 | a horse skill with no entry in the request's skillData | the retail config errors at the init lookup, `Err("Missing retail initialization field {id}")` (`retail_initialization.rs:222`), the classic lane hits `Err("bad skill ID {id}")` (`race_solver_builder.rs:496`) and retries after dropping the skill (`lib.rs:726-739`) | retail lane, `skills_compile` refuses with the engine's init text, the classic lane drops the skill and answers | engine error, `equivalence_gate::a_missing_skill_data_entry_quotes_the_engine_error` proves retail kernel equals engine, `classic_folds::a_classic_build_error_drops_only_that_skill` and `wave12c_classic_gate::a_missing_skill_data_entry_drops_and_answers_like_the_engine` prove the classic drop |
-| `roster size outside the kernel's range` | the engine answers any roster it is given | capacity refusal past `RACE_MAXR` (120 retail) or `CLS_MAXR` (120 classic) | limit, `equivalence_gate::rosters_beyond_the_kernel_cap_refuse_by_size` plus the parity probes. Not closable at the strides: every kernel buffer is sized at 120 |
-| `non-grid fields above 24 runners are outside the validated lane band` | the engine answers dense crowds at any size | band refusal past `NON_GRID_MAX_RUNNERS` (24) without a valid `experimentalGrid`, both lanes, `prepare` and `gate_reasons` (see "Wave 15: the non-grid band refusal and the cap back at 120") | limit, `equivalence_gate::non_grid_crowds_above_24_refuse_the_kernel_band` plus the parity probes. Not closable yet: dense non-grid starts past 24 hit the crowd physics gap below |
+| `roster size outside the kernel's range` | the engine answers any roster it is given | capacity refusal past `RACE_MAXR` (18 retail) or `CLS_MAXR` (18 classic) | limit, `equivalence_gate::rosters_beyond_the_kernel_cap_refuse_by_size` plus the parity probes. Not closable at the strides: every kernel buffer is sized at the cap |
+| `non-grid fields above 24 runners are outside the validated lane band` | the engine answers dense crowds at any size | band refusal past `NON_GRID_MAX_RUNNERS` (24) without a valid `experimentalGrid`, both lanes, `prepare` and `gate_reasons` (see "Wave 15: the non-grid band refusal and the cap back at 120"). At the 18-horse cap it never fires: the size refusal comes first | limit, `facade_gate` pins that a 19- and a 25-runner classic field refuse by size. Not closable yet: dense non-grid starts past 24 hit the crowd physics gap below |
 | `more slopes than the classic kernel carries` | the engine's course table carries any count | classic lane, past `CLS_MAX_SLOPES` (16). `gate_reasons` alone cannot name it: the check needs the course table, it runs at prepare | limit, `parity_audit::classic_prepare_only_fallbacks_stay_reachable` proves reachability through injected course text. Not closable at the stride: slope tables are fixed at 16 |
 | `raw stats beyond the host stats authority` | the engine answers | `classic_exec::prepare` refuses a non-finite base stat instead of guessing adjusted stats | limit, `classic_exec.rs:486`. No probe: valid JSON stats numbers are always finite, only an injected non-finite word reaches it |
 | `the initialization reference flagged` | the engine answers | the host's `initialization::stats_reference` reports a fallback word for the roster, and the classic lane refuses instead of guessing adjusted stats | limit, `classic_exec.rs:512`. No probe: the reference flags only stat shapes the host mirror cannot reproduce, the vendored-engine comparison in `initialization_gate` keeps the mirror honest |
@@ -2505,27 +2706,23 @@ Slope packing gained a real bound too: `pack_course_scalars` now stops at
 `RACE_MAX_SLOPES` (16, the kernel's `RACE_MAX_SLOPES`) instead of whatever
 fitted the buffer, keeping the pc block clear of the moved PL block.
 
-The values above are the grid-port history; the shipped values now are:
-`RACE_MAXR` 120 (grid validation stays 21 to 120, the engine's own shape
-check), `RI_STRIDE` 1,592, `RIL_STRIDE` 2,792, `ST_STRIDE` 2,173,
-`IIU` / `IIL` 384 / 144, `OOU` / `OOL` 3,840 / 144, `SCR_U_WORDS` 602,999
-and `SRL_WORDS` 357,920, together 5.28 MB of scratch per race slot, plus
-2.86 MB of f64 in the double block (the wave-18 later-stamina columns). That
-is the 120-era capacity back after wave 13b's raise to 144, given back by
-wave 15's band refusal (see "Wave 15: the non-grid band refusal and the cap
-back at 120"). `SK_RMAX`
-stays 960, the record cap the grid was sized for. All pinned in
-`tests/layout.rs`.
+The values above are the grid-port history. The shipped capacity is the
+18-horse field (`gpu::ROSTER_CAP`), and
+`layout::default_layout_sizes_to_the_eighteen_horse_field` pins the shipped
+strides and scratch sizes, including the record-bucket scratch (`sk_rcap`,
+`scr_u_words`, `srl_words`). Wave 15's band refusal sits behind the size
+refusal (see "Wave 15: the non-grid band refusal and the cap back at 120").
+`SK_RMAX` stays 960, the record cap the grid was sized for.
 
 ### Launch budget
 
 `run_prepared_mode` splits a batch by frame bytes: a `FRAME_BYTES_BUDGET` of
 `512 << 20` divided by one race's frames (`RACE_MAX_TICKS * n * 6 * 8`),
-minimum 1 race per launch. A 120-horse race writes 33.75 MB of frames, so
-15 races launch per chunk at the cap. Every existing suite (up to 96 races
+minimum 1 race per launch. At the retired 120-horse tier a race wrote 33.75 MB
+of frames, so 15 launched per chunk. Every existing suite (up to 96 races
 at 9 runners, 2.65 MB frames) stays a single launch. Buffers exist per chunk
 and are released before the next one, which keeps the driver's resident set
-bounded when scratch is 5.28 MB per race slot.
+bounded at the race-slot sizes in the Phase B table.
 
 ### Triage of the literal 24s
 
@@ -2542,33 +2739,28 @@ checked site by site:
 
 ### Gates
 
-`grid_gate.rs` (gpu + initialization + geometry + race):
+`grid_gate.rs` (gpu + initialization + geometry + race) keeps the shape refusal:
 
-- `grid_races_replay_bit_exact`: 21, 24, 40 and 120 horses, courses 10504
-  and 10604, seeds 1 and 2, synthetic rosters (the v77 base horse copied with
-  `gateIndex` 0..n-1), zero fallback, frame-for-frame `to_bits` identity
-  against `dep_cpu`, equal tick counts and `finishTimeRaw`, and the grid flag
-  set on every race. 120 horses needs no ceiling: it passes as shipped.
-- `grid_and_retail_starts_differ_at_21_horses`: the same 21-horse roster with
-  and without the key, both bit-exact against the CPU engine, frame 0
-  different, flags true and false.
 - `invalid_grid_shapes_quote_the_engine_reason`: a one-key object, `columns`
   19, and roster 121 all flag on the GPU with the engine's message and the
   engine rejects the same request with it.
-- `grid_with_geometry_quotes_the_engine_reason`: grid plus the geometry flag
-  falls back naming the engine's refusal, GPU and CPU alike.
 
-`facade_gate` expects the engine message for an invalid grid and accepts a
-valid 21-horse grid in a mixed-lane batch (classic grid included), and
-`layout` pins the strides. Wave 13b adds:
-`equivalence_gate::grid_full_replies_are_byte_equal_to_the_engine` (full
-replies byte-equal at 21 and 120 horses, seeds 1 to 3, kind-4 event count
-as non-vacuity) and `wave12c_modes::classic_grid_starts_answer_bit_exact`
-(classic 21-horse grids bit-exact frames and byte-equal replies, seeds 1 to
-3, non-vacuity on the second row's lane and position).
+`facade_gate` expects the engine message for an invalid grid key and pins a
+valid 21-horse grid, retail and classic, to the size refusal.
+`equivalence_gate::rosters_beyond_the_kernel_cap_refuse_by_size` pins that
+refusal on both lanes, and `layout` pins the strides. `parity_audit` probes the
+grid-plus-geometry refusal through `gate_reasons`.
 
-### Cost at 120 runners
+The grid replay gates retired with the 120-horse tier on 2026-11-21:
+`grid_races_replay_bit_exact`, `grid_and_retail_starts_differ_at_21_horses`,
+`grid_with_geometry_quotes_the_engine_reason`,
+`equivalence_gate::grid_full_replies_are_byte_equal_to_the_engine` and
+`wave12c_modes::classic_grid_starts_answer_bit_exact`.
 
+### Cost at 120 runners (retired 2026-11-21)
+
+Measured on the 120-horse tier, kept as history. `grid_perf` asks for a
+120-horse roster, so at the 18-horse cap every row refuses by size.
 `cargo run --features race --release --bin grid_perf` (B580, course 10504,
 grid roster 120, `run_repeated` path, one timed run per size on a warm
 context, ms; the m 128 row was measured on wave 13b's 144-cap build, the

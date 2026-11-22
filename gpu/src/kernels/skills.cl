@@ -8,8 +8,6 @@
 // -cl-fp32-correctly-rounded-divide-sqrt; every Rust `as f32` mirrors
 // convert_float_rte and no constant expression may contract to an FMA.
 
-#define SK_STRIDE 55872
-
 #define SK_NREC 0
 #define SK_NPROG 1
 #define SK_NREG 2
@@ -25,11 +23,19 @@
 #define SK_SLOPES 64
 #define SK_RECORDS 112
 #define SK_EFFECTS 26032
-#define SK_PROGRAMS 27952
-#define SK_ARMS 40240
-#define SK_REGIONS 42288
-#define SK_TERMS 50480
-#define SK_TAGS 51760
+// The retail lane builds this program with `-D SK_EMAX=<bucket>` to match a
+// table the host compiler packed at that bucket. The regions after the
+// effect pool move with it, so they derive from here.
+#ifndef SK_EMAX
+#define SK_EMAX 192
+#endif
+#define SK_PROGRAMS (SK_EFFECTS + SK_ESTRIDE * SK_EMAX)
+#define SK_ARMS (SK_PROGRAMS + SK_PSTRIDE * 3072)
+#define SK_REGIONS (SK_ARMS + SK_ASTRIDE * 256)
+#define SK_TERMS (SK_REGIONS + SK_GSTRIDE * 2048)
+#define SK_TAGS (SK_TERMS + SK_MSTRIDE * 160)
+#define SK_TMAX 4096
+#define SK_STRIDE (SK_TAGS + SK_TMAX + 16)
 // The runner row remain_distance_viewer_id reads (playerHorseIndex).
 #define SK_VIDX 9
 
@@ -44,6 +50,11 @@
 // plus unique skill (8 per runner). sk_targets caps targets at the roster,
 // so raising this past 120 changes no result, only the table budget.
 #define SK_RMAX 960
+// Runtime record capacity, one of the host's buckets. The compiled table
+// always keeps the SK_RMAX layout, only the scratch block is sized down.
+#ifndef SK_RCAP
+#define SK_RCAP SK_RMAX
+#endif
 #define SK_STRMAX 12
 #define SK_CORMAX 12
 #define SK_SLOPEMAX 16
@@ -78,6 +89,8 @@
 #define SK_TERM_FC_RANDOM 7
 #define SK_TERM_DIST_RATE_AFTER 8
 #define SK_TERM_CORNER_RANDOM 9
+#define SK_TERM_LAST_STRAIGHT 10
+#define SK_TERM_LOTTERY 11
 
 // Arm entry flags. Bit 1 marks an arm whose static chain collapsed: its
 // random term still draws, and the arm never passes the membership gate.
@@ -161,10 +174,21 @@
 // remain_distance_viewer_id: the engine's course-distance minus floor over the
 // viewer row from SK_VIDX, the same form as FEAT_REMAIN for that runner.
 #define FEAT_VREMAIN 66
+// is_badstart: the live start delay, the side picked by the comparison code
+// against the 0.08 threshold (activation_conditions.rs:722-732).
+#define FEAT_BADSTART 67
+// lastspurt: the spurt calc result remapped 1->2, 2->1, else 0; no calc yet
+// reads NaN so all comparators fail (activation_conditions.rs:876-887).
+#define FEAT_LSCALC 68
+// temptation_opponent_count_behind / _infront: the TEMPT_B/TEMPT_F slices
+// with the engine's is_opponent team filter (race_field.rs:913-915).
+#define FEAT_TEMPT_B_O 69
+#define FEAT_TEMPT_F_O 70
 
 // The (skill, effect) dispatch kinds the port covers.
 #define SK_EFF_SPEEDUP 1
 #define SK_EFF_STAMINUP 2
+#define SK_EFF_POWERUP 3
 #define SK_EFF_GUTSUP 4
 #define SK_EFF_WISDOMUP 5
 #define SK_EFF_RUNAWAY 6
@@ -338,6 +362,28 @@ static int sk_sample_trigger(const uint kind, const int arg, __global uint* bank
         if (corner_idx >= 0 && corner_idx < (int)sk[SK_NCOR]) {
             sk_distance_window(bank, as_float(sk[SK_CORNERS + 2 * corner_idx]),
                 as_float(sk[SK_CORNERS + 2 * corner_idx + 1]), wlo, whi);
+            return 1;
+        }
+        return 0;
+    }
+    if (kind == SK_TERM_LAST_STRAIGHT) {
+        // last_straight_random: the compiler resolved the straight row behind
+        // the last corner, or killed the arm when the sampler takes no window.
+        if (corner_idx >= 0 && corner_idx < (int)sk[SK_NSTR]) {
+            sk_distance_window(bank, as_float(sk[SK_STRAIGHTS + 2 * corner_idx]),
+                as_float(sk[SK_STRAIGHTS + 2 * corner_idx + 1]), wlo, whi);
+            return 1;
+        }
+        return 0;
+    }
+    if (kind == SK_TERM_LOTTERY) {
+        // random_lot: integer(0,100) under the argument opens the whole race,
+        // the miss spends the draw and leaves the arm inert
+        // (retail_initialization.rs:192). The parser keeps no live filter for
+        // a retail random term, so the window alone gates the record.
+        if ((int)r128_integer(bank, 0, 100) < arg) {
+            *wlo = 0.0f;
+            *whi = distance;
             return 1;
         }
         return 0;

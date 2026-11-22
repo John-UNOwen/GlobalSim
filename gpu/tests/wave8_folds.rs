@@ -35,9 +35,9 @@ fn plan_with(skill_data: &json::Value, ids: &[i64]) -> skills_compile::SkillsPla
 }
 
 /// The shipped type-4 skills, eighteen effect entries over sixteen ids.
-/// 202441 and 202442 sit apart below: their `random_lot` conditions are
-/// refusals of their own, independent of the guts effect. 210141 folds
-/// dead on its `motivation` condition instead of refusing.
+/// 202441 and 202442 sit apart below: their `random_lot` conditions compile
+/// since the E1a lottery sampler, and the kernel bakes the bump at init.
+/// 210141 folds dead on its `motivation` condition instead of refusing.
 const REAL_GUTS_IDS: [i64; 13] = [
     200211, 200212, 200221, 200222, 200231, 200232, 200233, 200241, 200242, 200291, 200292,
     202181, 1200051,
@@ -73,16 +73,20 @@ fn real_guts_skills_compile_as_bumps() {
     }
     assert!(!plan.live_guts, "catalog-wide GutsUp stays baked");
     assert!(plan.bumps.iter().any(|(_, kind, _)| *kind == 4), "some bumps landed");
-    // The three condition-gated skills stay refused by their condition, the
-    // same refusal as before the guts path existed, never by the guts effect.
-    for (id, gate) in [(202441i64, "random_lot"), (202442, "random_lot")] {
+    // The two lottery-gated skills compile since the sampler landed: the
+    // draw decides the init fire inside the kernel, so the bump is a live
+    // guts record with no host-baked constant.
+    for id in [202441i64, 202442] {
         let mut one = json::obj(vec![]);
         if let json::Value::Object(map) = &mut one {
             map.insert(id.to_string(), all.get(&id.to_string()).expect("id").clone());
         }
         let plan = plan_with(&one, &[id]);
-        let reason = plan.reason.unwrap_or_else(|| panic!("{id} unexpectedly compiled"));
-        assert!(reason.contains(gate), "{id}: refusal must name the condition, got {reason}");
+        if let Some(reason) = &plan.reason {
+            panic!("{id} should compile with the lottery sampler: {reason}");
+        }
+        assert!(plan.live_guts, "{id}: the draw-gated guts fire is live, not baked");
+        assert!(plan.bumps.is_empty(), "{id}: a draw-gated bump is never host-baked");
     }
     // 210141 folds on its motivation condition instead: the default mood
     // gives motivation 3, so the `motivation>=4` alternative folds dead and

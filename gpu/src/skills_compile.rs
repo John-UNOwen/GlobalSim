@@ -22,8 +22,6 @@ pub enum Lane {
     Classic,
 }
 
-pub const SK_STRIDE: usize = 55872;
-
 pub const SK_NREC: usize = 0;
 pub const SK_NPROG: usize = 1;
 pub const SK_NREG: usize = 2;
@@ -40,12 +38,7 @@ pub const SK_VIDX: usize = 9;
 pub const SK_CORNERS: usize = 40;
 pub const SK_SLOPES: usize = 64;
 pub const SK_RECORDS: usize = 112;
-pub const SK_EFFECTS: usize = 26032;
-pub const SK_PROGRAMS: usize = 27952;
-pub const SK_ARMS: usize = 40240;
-pub const SK_REGIONS: usize = 42288;
-pub const SK_TERMS: usize = 50480;
-pub const SK_TAGS: usize = 51760;
+pub const SK_EFFECTS: usize = SK_RECORDS + SK_RSTRIDE * SK_RMAX;
 
 pub const SK_RSTRIDE: usize = 27;
 pub const SK_ESTRIDE: usize = 10;
@@ -64,7 +57,7 @@ pub const SK_ARM_SAMPLED: u32 = 1;
 pub const SK_ARM_DEAD: u32 = 2;
 
 // Record slots per race (skills.cl SK_RMAX), sized for the eight-slot window
-// of a 120-horse grid-mode roster. A larger non-grid roster whose compiled
+// of the engine's 120-horse field. A larger non-grid roster whose compiled
 // records exceed 960 is refused by name at compile time. sk_targets caps
 // live targets at the roster, so the cap adds no behavior at small rosters.
 pub const SK_RMAX: usize = 960;
@@ -79,6 +72,48 @@ pub const SK_CORMAX: usize = 12;
 pub const SK_SLOPEMAX: usize = 16;
 pub const SK_REGMAX: usize = 16;
 pub const SK_ARMMAX: usize = 4;
+
+// The retail compiler packs the table at the first effect-cap bucket that
+// fits the field, and the race program builds with `-D SK_EMAX=<bucket>`
+// matching it. The regions after the effect pool move with the bucket.
+pub const SK_EMAX_BUCKETS: [usize; 4] = [256, 512, 1024, 2048];
+pub const fn sk_programs_at(emax: usize) -> usize { SK_EFFECTS + SK_ESTRIDE * emax }
+pub const fn sk_arms_at(emax: usize) -> usize { sk_programs_at(emax) + SK_PSTRIDE * SK_PMAX }
+pub const fn sk_regions_at(emax: usize) -> usize { sk_arms_at(emax) + SK_ASTRIDE * SK_AMAX }
+pub const fn sk_terms_at(emax: usize) -> usize { sk_regions_at(emax) + SK_GSTRIDE * SK_GMAX }
+pub const fn sk_tags_at(emax: usize) -> usize { sk_terms_at(emax) + SK_MSTRIDE * SK_MMAX }
+pub const fn sk_stride_at(emax: usize) -> usize { sk_tags_at(emax) + SK_TMAX + 16 }
+
+/// Region offsets for one bucket, the compiler side of the skills.cl defines.
+#[derive(Clone, Copy)]
+pub struct SkLayout {
+    pub emax: usize,
+    pub programs: usize,
+    pub arms: usize,
+    pub regions: usize,
+    pub terms: usize,
+    pub tags: usize,
+    pub stride: usize,
+}
+
+pub const fn sk_layout(emax: usize) -> SkLayout {
+    SkLayout {
+        emax,
+        programs: sk_programs_at(emax),
+        arms: sk_arms_at(emax),
+        regions: sk_regions_at(emax),
+        terms: sk_terms_at(emax),
+        tags: sk_tags_at(emax),
+        stride: sk_stride_at(emax),
+    }
+}
+
+pub const SK_PROGRAMS: usize = sk_programs_at(SK_EMAX);
+pub const SK_ARMS: usize = sk_arms_at(SK_EMAX);
+pub const SK_REGIONS: usize = sk_regions_at(SK_EMAX);
+pub const SK_TERMS: usize = sk_terms_at(SK_EMAX);
+pub const SK_TAGS: usize = sk_tags_at(SK_EMAX);
+pub const SK_STRIDE: usize = sk_stride_at(SK_EMAX);
 
 pub const SK_FLAG_RETAIN: u32 = 1;
 pub const SK_FLAG_WISDOM: u32 = 2;
@@ -123,6 +158,12 @@ pub const SK_TERM_PHASE_LATERHALF: u32 = 6;
 pub const SK_TERM_FC_RANDOM: u32 = 7;
 pub const SK_TERM_DIST_RATE_AFTER: u32 = 8;
 pub const SK_TERM_CORNER_RANDOM: u32 = 9;
+// last_straight_random: one straight resolved at compile time from the last
+// corner, drawn by the kernel like the corner kinds (retail_initialization.rs:167-182).
+pub const SK_TERM_LAST_STRAIGHT: u32 = 10;
+// random_lot: one integer(0,100) roll, the arm opens for the whole race when
+// it lands under the argument (retail_initialization.rs:192).
+pub const SK_TERM_LOTTERY: u32 = 11;
 
 pub const OP_TRUE: u32 = 0;
 pub const OP_AND: u32 = 1;
@@ -200,6 +241,19 @@ pub const FEAT_RTEMP_END: u32 = 65;
 // remain_distance_viewer_id: the course distance minus the floor of the
 // viewer row's position, the viewer from the SK_VIDX header word.
 pub const FEAT_VREMAIN: u32 = 66;
+// is_badstart reads the live start delay against the engine's 0.08 s
+// threshold (activation_conditions.rs:722-732). The flag picks the side:
+// 1 wants the delay above the threshold, 0 at or under it.
+pub const FEAT_BADSTART: u32 = 67;
+// lastspurt compares the spurt calc result remapped like the engine
+// (activation_conditions.rs:876-887): result 1 to 2, 2 to 1, anything else to
+// 0, and no calc yet reads NaN so every comparator fails, the engine's
+// count>0 gate.
+pub const FEAT_LSCALC: u32 = 68;
+// The temptation_opponent_count_behind / _infront slices with the engine's
+// is_opponent team filter (race_field.rs:913-915).
+pub const FEAT_TEMPT_B_O: u32 = 69;
+pub const FEAT_TEMPT_F_O: u32 = 70;
 
 /// One race's compiled table. `reason` is Some when the race must run on the
 /// CPU, naming the first construct the kernel cannot evaluate. `bumps` are
@@ -217,6 +271,14 @@ pub struct SkillsPlan {
     /// skilldata order. The host replays the builder sampler over these
     /// (race_solver_builder.rs:944-960) and patches the chains.
     pub classic_jobs: Vec<ClassicSampledJob>,
+    /// The effect-cap bucket `words` was packed at, so the launch picks the
+    /// program built with the matching `-D SK_EMAX`.
+    pub emax: usize,
+    /// True when the effect pool cap refused the plan, so a wider bucket may
+    /// still fit the field.
+    pub effects_overflow: bool,
+    /// Compiled condition-arm count, for coverage reports on SK_AMAX.
+    pub arms: usize,
 }
 
 /// A classic record whose trigger windows the builder rng resolves before
@@ -263,14 +325,14 @@ pub fn apply_classic_sampled(
 }
 
 pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
-    plan_lane(root, course, Lane::Retail, None)
+    plan_lane(root, course, Lane::Retail, None, SK_EMAX)
 }
 
 /// Compile against the classic (non-retail) runtime profile: the classic
 /// effect-value chain and durations, the classic condition leaves, and
 /// sampled leaves carried as host sampler jobs.
 pub fn plan_classic(root: &Value, course: &Value) -> SkillsPlan {
-    plan_lane(root, course, Lane::Classic, None)
+    plan_lane(root, course, Lane::Classic, None, SK_EMAX)
 }
 
 /// The classic host inputs the classic profile cannot re-derive from the
@@ -287,19 +349,31 @@ pub struct ClassicExtras {
 }
 
 pub fn plan_classic_with(root: &Value, course: &Value, extras: &ClassicExtras) -> SkillsPlan {
-    plan_lane(root, course, Lane::Classic, Some(extras))
+    plan_lane(root, course, Lane::Classic, Some(extras), SK_EMAX)
 }
 
 /// Compile against the retail profile with the host inputs the retail lane
 /// reads: only the later-stamina request flag drives the injected
 /// staminasyoubu records (lib.rs:547, race_solver_builder.rs:817-848).
+/// A field whose effects pass the first bucket keeps escalating through
+/// SK_EMAX_BUCKETS, so one program usually serves every retail field.
 pub fn plan_retail_with(root: &Value, course: &Value, extras: &ClassicExtras) -> SkillsPlan {
-    plan_lane(root, course, Lane::Retail, Some(extras))
+    let mut plan = plan_lane(root, course, Lane::Retail, Some(extras), SK_EMAX_BUCKETS[0]);
+    for &bucket in &SK_EMAX_BUCKETS[1..] {
+        if !plan.effects_overflow {
+            return plan;
+        }
+        plan = plan_lane(root, course, Lane::Retail, Some(extras), bucket);
+    }
+    plan
 }
 
-fn plan_lane(root: &Value, course: &Value, lane: Lane, extras: Option<&ClassicExtras>) -> SkillsPlan {
+fn plan_lane(root: &Value, course: &Value, lane: Lane, extras: Option<&ClassicExtras>, emax: usize) -> SkillsPlan {
+    let layout = sk_layout(emax);
     let mut c = Compiler {
-        words: vec![0; SK_STRIDE],
+        words: vec![0; layout.stride],
+        layout,
+        effects_overflow: false,
         tags: Vec::new(),
         reason: None,
         bumps: Vec::new(),
@@ -482,6 +556,8 @@ pub fn normalize_skill_entry(entry: &Value) -> Option<(String, i64)> {
 
 struct Compiler {
     words: Vec<u32>,
+    layout: SkLayout,
+    effects_overflow: bool,
     tags: Vec<u8>,
     reason: Option<String>,
     bumps: Vec<(usize, i32, f64)>,
@@ -565,6 +641,7 @@ fn phase_start(distance: f64, phase: i64) -> f64 {
 struct Geometry {
     distance: f64,
     straights: Vec<(f64, f64)>,
+    fronts: Vec<(f64, f64, i32)>,
     corners: Vec<(f64, f64)>,
     slopes: Vec<(f64, f64, f64)>,
 }
@@ -1112,6 +1189,21 @@ impl Geometry {
                 .collect()
         };
         let straights = read_pairs("straights", "");
+        // The engine requires frontType on every straight (lib.rs:131); a
+        // missing key here only leaves the straight unmatched by type.
+        let fronts = course
+            .get("straights")
+            .and_then(Value::as_array)
+            .unwrap_or(&empty)
+            .iter()
+            .map(|s| {
+                (
+                    s.get("start").and_then(Value::as_f64).unwrap_or(0.),
+                    s.get("end").and_then(Value::as_f64).unwrap_or(0.),
+                    s.get("frontType").and_then(Value::as_i64).unwrap_or(0) as i32,
+                )
+            })
+            .collect();
         let corners = read_pairs("corners", "length");
         let slopes = course
             .get("slopes")
@@ -1127,7 +1219,7 @@ impl Geometry {
                 )
             })
             .collect();
-        Geometry { distance, straights, corners, slopes }
+        Geometry { distance, straights, fronts, corners, slopes }
     }
 }
 
@@ -1171,12 +1263,12 @@ impl Compiler {
             for (j, byte) in chunk.iter().enumerate() {
                 word |= (*byte as u32) << (8 * j);
             }
-            self.words[SK_TAGS + i] = word;
+            self.words[self.layout.tags + i] = word;
         }
         let bumps = if self.reason.is_some() { Vec::new() } else { std::mem::take(&mut self.bumps) };
         let live_guts = self.reason.is_none() && self.live_guts;
         let classic_jobs = if self.reason.is_some() { Vec::new() } else { std::mem::take(&mut self.classic_jobs) };
-        SkillsPlan { words: self.words, reason: self.reason, bumps, live_guts, classic_jobs }
+        SkillsPlan { words: self.words, reason: self.reason, bumps, live_guts, classic_jobs, emax: self.layout.emax, effects_overflow: self.effects_overflow, arms: self.narm }
     }
 
     fn tag(&mut self, text: &str) -> (usize, usize) {
@@ -1462,7 +1554,8 @@ impl Compiler {
                         | FEAT_BFRONT | FEAT_NEARIF | FEAT_VISN | FEAT_INBAND
                         | FEAT_BALL | FEAT_BFRONTB | FEAT_CHGUP_MID | FEAT_CHGUP_FC
                         | FEAT_NOTOP | FEAT_NOTOD | FEAT_SURR | FEAT_TEMPT_B
-                        | FEAT_TEMPT_F | FEAT_RTEMP..=FEAT_RTEMP_END | FEAT_DDRATE
+                        | FEAT_TEMPT_F | FEAT_TEMPT_B_O | FEAT_TEMPT_F_O
+                        | FEAT_RTEMP..=FEAT_RTEMP_END | FEAT_DDRATE
                         | FEAT_DDTOPF | FEAT_VREMAIN)
                 });
                 let mut pre_regions: Vec<(f64, f64)> = vec![(0.0, g.distance)];
@@ -1673,6 +1766,8 @@ impl Compiler {
                     "is_finalcorner_random" => SK_TERM_FC_RANDOM,
                     "distance_rate_after_random" => SK_TERM_DIST_RATE_AFTER,
                     "corner_random" => SK_TERM_CORNER_RANDOM,
+                    "last_straight_random" => SK_TERM_LAST_STRAIGHT,
+                    "random_lot" => SK_TERM_LOTTERY,
                     other => {
                         self.unsupported(format!("skill {sid} random term '{other}' is not ported"));
                         return;
@@ -1687,6 +1782,9 @@ impl Compiler {
                 } else if kind == SK_TERM_CORNER_RANDOM {
                     // The row resolution below only reads the argument in its
                     // i64 range, and the kernel word never uses it.
+                    true
+                } else if kind == SK_TERM_LOTTERY {
+                    // The lottery compares its roll with any integer argument.
                     true
                 } else if matches!(
                     kind,
@@ -1724,6 +1822,13 @@ impl Compiler {
                             continue;
                         }
                     },
+                    SK_TERM_LAST_STRAIGHT => match last_straight_row(course, g.distance) {
+                        Some(i) => i as i32,
+                        None => {
+                            arms[ai].1[0] = SK_ARM_DEAD;
+                            continue;
+                        }
+                    },
                     _ => -1,
                 };
                 if self.nterm >= SK_MMAX {
@@ -1735,7 +1840,7 @@ impl Compiler {
                 // the shared solo bank's draw order matters.
                 let (tag_off, tag_len) =
                     self.tag(&format!("T{sid}:{alt_index}:condition:{}", t.name));
-                let at = SK_TERMS + SK_MSTRIDE * self.nterm;
+                let at = self.layout.terms + SK_MSTRIDE * self.nterm;
                 self.words[at] = kind;
                 self.words[at + 1] = t.arg as u32;
                 self.words[at + 2] = tag_off as u32;
@@ -1772,7 +1877,7 @@ impl Compiler {
                 // engine samples before any region is evaluated, keeping the
                 // shared stream aligned. The inert chains stay empty.
                 for (_, flags, _) in arms.iter() {
-                    let at = SK_ARMS + SK_ASTRIDE * self.narm;
+                    let at = self.layout.arms + SK_ASTRIDE * self.narm;
                     if flags[0] & SK_ARM_SAMPLED != 0 {
                         self.words[at + 6] = SK_ARM_SAMPLED;
                         self.words[at + 7] = flags[1];
@@ -1807,7 +1912,7 @@ impl Compiler {
                             return;
                         }
                     };
-                    let at = SK_ARMS + SK_ASTRIDE * self.narm;
+                    let at = self.layout.arms + SK_ASTRIDE * self.narm;
                     self.words[at] = prog_len as u32;
                     self.words[at + 1] = prog_base as u32;
                     self.words[at + 2] = n_pre as u32;
@@ -1902,7 +2007,8 @@ impl Compiler {
                     return;
                 }
             };
-            if self.neff + effect_list.len() > SK_EMAX {
+            if self.neff + effect_list.len() > self.layout.emax {
+                self.effects_overflow = true;
                 self.unsupported("skill table overflow: too many effects");
                 return;
             }
@@ -1960,7 +2066,7 @@ impl Compiler {
                     let k = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
                     let t = ef.get("target").and_then(Value::as_i64).unwrap_or(1) as i32;
                     let vu = ef.get("valueUsage").and_then(Value::as_f64).unwrap_or(1.0) as i32;
-                    matches!(k, 2 | 4 | 5) && t == 1 && vu == 1
+                    matches!(k, 2 | 3 | 4 | 5) && t == 1 && vu == 1
                 });
             // The random-activation candidate filter keeps a record only when
             // every effect has a non-negative duration and a type past
@@ -2024,14 +2130,17 @@ impl Compiler {
                     self.unsupported(format!("skill {sid} effect {reason}"));
                     return;
                 }
-                if self.lane != Lane::Classic && kind == 3 {
-                    self.unsupported(format!(
-                        "skill {sid} PowerUp is not ported to the retail kernel"
-                    ));
-                    return;
-                }
                 let target = ef.get("target").and_then(Value::as_i64).unwrap_or(1) as i32;
-                if !(matches!(target, 1 | 4 | 9 | 10) || (target == 21 && kind == 13)) {
+                // Target 18 fans to every runner of the targetValue style
+                // except the owner, uncapped, with the debuff filters
+                // (race_field.rs:439-461). The classic fan has no style branch.
+                let style_fan = target == 18 && self.lane != Lane::Classic;
+                // The engine skips a dead alternative's effects before it even
+                // builds them (race_solver_builder.rs:556-571), so a folded-dead
+                // arm installs nothing and target 22 never runs. A live arm
+                // still refuses, keeping the fan off the kernel.
+                if !(dead || matches!(target, 1 | 4 | 9 | 10) || style_fan
+                    || (target == 21 && kind == 13)) {
                     self.unsupported(format!(
                         "skill {sid} effect target {target} is not ported"
                     ));
@@ -2196,7 +2305,8 @@ impl Compiler {
                     | FEAT_BFRONT | FEAT_NEARIF | FEAT_VISN | FEAT_INBAND
                     | FEAT_BALL | FEAT_BFRONTB | FEAT_CHGUP_MID | FEAT_CHGUP_FC
                     | FEAT_NOTOP | FEAT_NOTOD | FEAT_SURR | FEAT_TEMPT_B
-                    | FEAT_TEMPT_F | FEAT_RTEMP..=FEAT_RTEMP_END | FEAT_DDRATE | FEAT_DDTOPF
+                    | FEAT_TEMPT_F | FEAT_TEMPT_B_O | FEAT_TEMPT_F_O
+                    | FEAT_RTEMP..=FEAT_RTEMP_END | FEAT_DDRATE | FEAT_DDTOPF
                     | FEAT_VREMAIN)
             });
 
@@ -2275,11 +2385,11 @@ impl Compiler {
         let base = self.nreg;
         for (s, e) in list {
             let w = f64_words(*s);
-            self.words[SK_REGIONS + 4 * self.nreg] = w[0];
-            self.words[SK_REGIONS + 4 * self.nreg + 1] = w[1];
+            self.words[self.layout.regions + 4 * self.nreg] = w[0];
+            self.words[self.layout.regions + 4 * self.nreg + 1] = w[1];
             let w = f64_words(*e);
-            self.words[SK_REGIONS + 4 * self.nreg + 2] = w[0];
-            self.words[SK_REGIONS + 4 * self.nreg + 3] = w[1];
+            self.words[self.layout.regions + 4 * self.nreg + 2] = w[0];
+            self.words[self.layout.regions + 4 * self.nreg + 3] = w[1];
             self.nreg += 1;
         }
         (list.len(), base)
@@ -2365,13 +2475,14 @@ impl Compiler {
             return;
         }
         if self.nreg + 1 > SK_GMAX || self.nprog + 1 > SK_PMAX || self.narm + 1 > SK_AMAX
-            || self.neff + 1 > SK_EMAX
+            || self.neff + 1 > self.layout.emax
         {
+            self.effects_overflow |= self.neff + 1 > self.layout.emax;
             self.unsupported("skill table overflow: asitame injection".to_string());
             return;
         }
         let region = self.nreg;
-        let at = SK_REGIONS + SK_GSTRIDE * self.nreg;
+        let at = self.layout.regions + SK_GSTRIDE * self.nreg;
         let w = f64_words(distance * 2.0 / 3.0);
         self.words[at] = w[0];
         self.words[at + 1] = w[1];
@@ -2380,10 +2491,10 @@ impl Compiler {
         self.words[at + 3] = w[1];
         self.nreg += 1;
         let prog = self.nprog;
-        self.words[SK_PROGRAMS + SK_PSTRIDE * self.nprog] = OP_TRUE;
+        self.words[self.layout.programs + SK_PSTRIDE * self.nprog] = OP_TRUE;
         self.nprog += 1;
         let arm = self.narm;
-        let at = SK_ARMS + SK_ASTRIDE * self.narm;
+        let at = self.layout.arms + SK_ASTRIDE * self.narm;
         self.words[at] = 1;
         self.words[at + 1] = prog as u32;
         self.words[at + 2] = 0;
@@ -2529,13 +2640,14 @@ impl Compiler {
             return;
         }
         if self.nreg + 1 > SK_GMAX || self.nprog + 1 > SK_PMAX || self.narm + 1 > SK_AMAX
-            || self.neff + 1 > SK_EMAX
+            || self.neff + 1 > self.layout.emax
         {
+            self.effects_overflow |= self.neff + 1 > self.layout.emax;
             self.unsupported("skill table overflow: staminasyoubu injection".to_string());
             return;
         }
         let region = self.nreg;
-        let at = SK_REGIONS + SK_GSTRIDE * self.nreg;
+        let at = self.layout.regions + SK_GSTRIDE * self.nreg;
         let w = f64_words(distance * 2.0 / 3.0);
         self.words[at] = w[0];
         self.words[at + 1] = w[1];
@@ -2546,11 +2658,11 @@ impl Compiler {
         let prog = self.nprog;
         // The retail evaluator reads the truthy constant from the operand
         // word; the classic evaluator ignores it.
-        self.words[SK_PROGRAMS + SK_PSTRIDE * self.nprog] = OP_TRUE;
-        self.words[SK_PROGRAMS + SK_PSTRIDE * self.nprog + 1] = 1;
+        self.words[self.layout.programs + SK_PSTRIDE * self.nprog] = OP_TRUE;
+        self.words[self.layout.programs + SK_PSTRIDE * self.nprog + 1] = 1;
         self.nprog += 1;
         let arm = self.narm;
-        let at = SK_ARMS + SK_ASTRIDE * self.narm;
+        let at = self.layout.arms + SK_ASTRIDE * self.narm;
         self.words[at] = 1;
         self.words[at + 1] = prog as u32;
         self.words[at + 2] = 0;
@@ -2991,6 +3103,9 @@ struct Statics {
     favorite_matches: Option<bool>,
     skill_count: f64,
     skill_ids: Vec<String>,
+    // The roster's charaId set, missing ids counted as 0 like the engine's
+    // HorseParameters default.
+    chara_ids: Vec<i64>,
     // The record's own skill id, the target of is_activate_other_skill_detail.
     sid: f64,
     // The record's skill id as written, the key of the engine's skill-id
@@ -3034,11 +3149,16 @@ impl Statics {
         let mut favorite_style: Option<i64> = None;
         let mut favorite_ambiguous = false;
         let mut skill_ids: Vec<String> = Vec::new();
+        let mut chara_ids: Vec<i64> = Vec::new();
         let mut skill_count = 0i64;
         let mut any_team = false;
         if let Some(list) = root.get("horses").and_then(Value::as_array) {
             for other in list {
                 n_runners += 1;
+                let cid = other.get("charaId").and_then(Value::as_f64).unwrap_or(0.0) as i64;
+                if !chara_ids.contains(&cid) {
+                    chara_ids.push(cid);
+                }
                 let code = strategy_code(other.get("strategy").and_then(Value::as_str).unwrap_or(""));
                 if let Some(i) = style_base_index(code) {
                     counts[i] += 1;
@@ -3108,6 +3228,7 @@ impl Statics {
             favorite_matches,
             skill_count: skill_count as f64,
             skill_ids,
+            chara_ids,
             sid: sid.parse::<u32>().unwrap_or(0) as f64,
             sid_text: sid.to_string(),
             any_team,
@@ -3379,6 +3500,21 @@ fn fc_random_index(course: &Value, distance: f64) -> Option<usize> {
     None
 }
 
+/// The straight row last_straight_random draws: the first straight, scanned in
+/// reverse course order, whose start reaches the last corner's start, and only
+/// when that corner sits within the final 1000 m (retail_initialization.rs:167-182).
+fn last_straight_row(course: &Value, distance: f64) -> Option<usize> {
+    let corner = course.get("corners").and_then(Value::as_array)?.last()?;
+    let start = corner.get("start").and_then(Value::as_f64)?;
+    if distance - start > 1000.0 {
+        return None;
+    }
+    let rows = course.get("straights").and_then(Value::as_array)?;
+    rows.iter().enumerate().rev().find_map(|(i, row)| {
+        (row.get("start").and_then(Value::as_f64)? >= start).then_some(i)
+    })
+}
+
 /// One comparison's engine role. Region-algebra terms the retail runtime
 /// swaps to live values lower to pass-through leaves with the runtime
 /// feature, and course or runner constants fold at compile time.
@@ -3487,6 +3623,36 @@ fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, Str
         // to set the bit, and the same gate blocks that fire, so the check
         // is false forever and the record folds dead.
         "is_activate_other_skill_detail" if t.op == 0 && t.arg == 1 => Ok(Leaf::False),
+        // is_badstart keeps a live check on the runner's own start delay
+        // against the engine's 0.08 s threshold (activation_conditions.rs:722-732).
+        // The classic lane refuses it for want of a start-delay reader.
+        "is_badstart" if t.op == 0 && matches!(t.arg, 0 | 1) && lane != Lane::Classic => {
+            Ok(Leaf::Dynamic {
+                feat: FEAT_BADSTART,
+                cmp: if t.arg == 1 { 4 } else { 3 },
+                arg: Some(0.08),
+            })
+        }
+        "is_badstart" if t.op == 0 && lane != Lane::Classic => {
+            Err("is_badstart expects 0 or 1".into())
+        }
+        // The flag is "course distance is a multiple of 400 m": the engine
+        // keeps the region when min(dist%400,1) != flag (:714-720). The
+        // distance is request-constant, so the leaf folds at build time.
+        // Only == is registered, and the filter rejects any flag outside 0/1.
+        "is_basis_distance" if t.op == 0 && matches!(t.arg, 0 | 1) => {
+            let basis = if (g.distance as i64) % 400 == 0 { 1.0 } else { 0.0 };
+            Ok(fold(basis, t))
+        }
+        "is_basis_distance" if t.op == 0 => Err("is_basis_distance expects 0 or 1".into()),
+        // The engine keeps or drops the whole region set by whether the arg
+        // lands in the roster's charaId set, missing ids counted as 0
+        // (activation_conditions.rs:1584-1588, lib.rs:336). Only == and != are
+        // registered, and the answer is request-constant.
+        "is_exist_chara_id" if matches!(t.op, 0 | 1) && lane != Lane::Classic => {
+            let hit = s.chara_ids.contains(&(t.arg as i64));
+            Ok(if hit == (t.op == 0) { Leaf::True } else { Leaf::False })
+        }
         "is_surrounded" => Ok(dyn_leaf(FEAT_SURR, t)),
         // used_skills receives exactly the ids the runner self-fired from the
         // table. An id the roster never carries can never be in the set.
@@ -3515,6 +3681,7 @@ fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, Str
         "is_lastspurt" if t.op == 0 && t.arg == 1 => {
             Ok(Leaf::RegionDyn(vec![(phase_start(d, 2), d)], FEAT_LASTSPURT))
         }
+        "lastspurt" if lane != Lane::Classic => Ok(dyn_leaf(FEAT_LSCALC, t)),
         "is_move_lane" => Ok(dyn_leaf(FEAT_MOVELANE, t)),
         // The engine swaps a field-wide set of previous-tick (runner, kind)
         // advantage pairs with same-team exclusion at every field update
@@ -3609,7 +3776,7 @@ fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, Str
                 _ => None,
             };
             match group {
-                Some(g) if !opponents || !s.any_team => Ok(Leaf::Dynamic {
+                Some(g) if !opponents || !s.any_team || lane != Lane::Classic => Ok(Leaf::Dynamic {
                     feat: if opponents { FEAT_RTEMP_OPP } else { FEAT_RTEMP } + g,
                     cmp: t.op,
                     arg: None,
@@ -3623,22 +3790,47 @@ fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, Str
             None => Err("'season' needs a parsable season in the request".into()),
         },
         "slope" => Ok(dyn_leaf(FEAT_SLOPE, t)),
+        // The engine truncates the arg to i32 and keeps the straights whose
+        // frontType equals it, as plain regions (activation_conditions.rs:1100-1106).
+        "straight_front_type" if t.op == 0 && lane != Lane::Classic => {
+            let front_type = t.arg as i32;
+            if front_type != 1 && front_type != 2 {
+                return Err(engine_quote("front_type must be 1 or 2".into()));
+            }
+            Ok(Leaf::Region(
+                g.fronts
+                    .iter()
+                    .filter(|f| f.2 == front_type)
+                    .map(|f| (f.0, f.1))
+                    .collect(),
+            ))
+        }
         "temptation_count" if t.op == 0 => Ok(dyn_leaf(FEAT_TEMPT, t)),
         name if name == "temptation_count_behind" || name == "temptation_count_infront"
             || name == "temptation_opponent_count_behind"
             || name == "temptation_opponent_count_infront" =>
         {
-            // is_opponent keeps every runner an opponent only while every
-            // roster team is zero, so the opponent pair needs that gate.
+            // The classic kernel has no team-filtered reader, so the classic
+            // lane keeps needing an all-zero-team roster there; the retail
+            // reader drops same-team rows like the engine's is_opponent.
             let opponents = name.contains("opponent");
-            if opponents && s.any_team {
+            let behind = name.ends_with("behind");
+            if opponents && s.any_team && lane == Lane::Classic {
                 Err(format!(
                     "'{name}'{}{} needs a roster with every team at zero",
                     op_text(t.op),
                     t.arg
                 ))
             } else {
-                let feat = if name.ends_with("behind") { FEAT_TEMPT_B } else { FEAT_TEMPT_F };
+                // With every team at zero the filter is the identity, so only
+                // the retail lane with real teams needs the filtered readers.
+                let filtered = opponents && lane != Lane::Classic && s.any_team;
+                let feat = match (behind, filtered) {
+                    (true, false) => FEAT_TEMPT_B,
+                    (true, true) => FEAT_TEMPT_B_O,
+                    (false, false) => FEAT_TEMPT_F,
+                    (false, true) => FEAT_TEMPT_F_O,
+                };
                 Ok(dyn_leaf(feat, t))
             }
         }
@@ -3667,6 +3859,15 @@ fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, Str
         }
         "is_finalcorner_random" if t.op == 0 && t.arg == 1 => Ok(Leaf::Sampled),
         "distance_rate_after_random" if t.op == 0 && t.arg >= 0 => Ok(Leaf::Sampled),
+        // The sampler picks the first straight starting at or after the last
+        // corner, and only when that corner is within the final 1000 m
+        // (retail_initialization.rs:167-182). No qualifying row spends no draw.
+        "last_straight_random" if t.op == 0 && t.arg == 1 => Ok(Leaf::Sampled),
+        // The parser replaces every retail random term with its sampled
+        // trigger (condition_parser.rs:199-205), so random_lot's live
+        // solver-value filter never runs there: only the init lottery gates
+        // the arm (retail_initialization.rs:192).
+        "random_lot" if t.op == 0 && lane != Lane::Classic => Ok(Leaf::Sampled),
         other => Err(format!(
             "'{other}'{}{} is not ported",
             op_text(t.op),
@@ -3703,7 +3904,7 @@ fn emit_program(c: &mut Compiler, terms: &[Term], leaves: &[Leaf]) -> Result<usi
             if base + used >= SK_PMAX {
                 return Err("condition program overflow".into());
             }
-            c.words[SK_PROGRAMS + SK_PSTRIDE * (base + used)] = OP_AND;
+            c.words[c.layout.programs + SK_PSTRIDE * (base + used)] = OP_AND;
             used += 1;
         }
     }
@@ -3712,7 +3913,7 @@ fn emit_program(c: &mut Compiler, terms: &[Term], leaves: &[Leaf]) -> Result<usi
 }
 
 fn emit_leaf(c: &mut Compiler, slot: usize, t: &Term, leaf: &Leaf) -> Result<(), String> {
-    let at = SK_PROGRAMS + SK_PSTRIDE * slot;
+    let at = c.layout.programs + SK_PSTRIDE * slot;
     match leaf {
         Leaf::Dynamic { feat, cmp, arg } => {
             c.words[at] = OP_FEAT_I;

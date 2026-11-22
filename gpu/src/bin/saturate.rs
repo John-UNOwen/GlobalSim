@@ -7,7 +7,20 @@
 //!
 //! Run (needs the Intel oneAPI LIB on the environment, and no other GPU or
 //! CPU-heavy jobs while it runs):
-//!   cargo run --release --features race --bin saturate -- [--course 10504] [--cpu-races 400] [--launches 3] [--max-races N]
+//!   cargo run --release --features race --bin saturate -- [--request examples/cm-10701-race.jsonl] [--course ID] [--cpu-races 400] [--launches 3] [--max-races N]
+//!
+//! Workload: the first line of `--request` (a path from the repo root), run
+//! at seeds 1..N. The default is a real Champions Meeting race (course 10701,
+//! Chukyo 1200 m turf, 9 runners, 159 skills), made from a game race dump by
+//! `tools/race_dump_to_request.py`. `--request examples/v77-race.jsonl` is
+//! the earlier workload: 9 identical skill-less runners on course 10504.
+//! `--course` overrides the request's course id.
+//!
+//! A request the GPU lane refuses stops with the lane's reason. With
+//! `--strip-refused` the bench removes what the lane refuses, one step at a
+//! time, and prints each removal: a skill the refusal names, or, for a skill
+//! table overflow, the last skill of the runner holding the most. Both the
+//! CPU and the GPU then run the stripped request.
 //!
 //! Columns:
 //! - kernel-only: back-to-back launches of the same buffers with one sync
@@ -26,21 +39,25 @@ fn repo_file(rel: &str) -> std::path::PathBuf {
 }
 
 struct Args {
-    course: i32,
+    request: String,
+    course: Option<i32>,
     cpu_races: usize,
     launches: usize,
     max_races: Option<usize>,
+    strip_refused: bool,
 }
 
 fn args() -> Result<Args, String> {
-    let mut a = Args { course: 10504, cpu_races: 400, launches: 3, max_races: None };
+    let mut a = Args { request: "examples/cm-10701-race.jsonl".into(), course: None, cpu_races: 400, launches: 3, max_races: None, strip_refused: false };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("{flag} needs a value"));
         match flag.as_str() {
-            "--course" => a.course = value()?.parse().map_err(|e| format!("--course: {e}"))?,
+            "--request" => a.request = value()?,
+            "--course" => a.course = Some(value()?.parse().map_err(|e| format!("--course: {e}"))?),
             "--cpu-races" => a.cpu_races = value()?.parse().map_err(|e| format!("--cpu-races: {e}"))?,
             "--launches" => a.launches = value()?.parse().map_err(|e| format!("--launches: {e}"))?,
+            "--strip-refused" => a.strip_refused = true,
             "--max-races" => a.max_races = Some(value()?.parse().map_err(|e| format!("--max-races: {e}"))?),
             other => return Err(format!("unknown flag {other}")),
         }
@@ -77,20 +94,37 @@ fn cpu_run(request: &str, races: usize, threads: usize) -> Result<f64, String> {
 
 fn main() -> Result<(), String> {
     let a = args()?;
-    let base = std::fs::read_to_string(repo_file("examples/v77-race.jsonl"))
-        .map_err(|e| format!("request file: {e}"))?
+    let base = std::fs::read_to_string(repo_file(&a.request))
+        .map_err(|e| format!("request file {}: {e}", a.request))?
         .lines()
         .next()
         .ok_or("request file empty")?
         .to_string();
-    let request = race_exec::multi_request(&base, a.course, 1)?;
-    let geometry = std::fs::read_to_string(repo_file(&format!("data/course_geometry/{}.json", a.course)))
-        .map_err(|e| format!("geometry {}: {e}", a.course))?;
-    globalsim::register_course_geometry(a.course, geometry.clone());
+    let course = match a.course {
+        Some(id) => id,
+        None => globalsim_gpu::json::parse(&base)?
+            .get("courseId")
+            .and_then(|v| v.as_f64())
+            .ok_or("request has no courseId; pass --course")? as i32,
+    };
+    let geometry = std::fs::read_to_string(repo_file(&format!("data/course_geometry/{course}.json")))
+        .map_err(|e| format!("geometry {course}: {e}"))?;
+    globalsim::register_course_geometry(course, geometry.clone());
+    let mut ctx = race_exec::RaceContext::open()?;
+    ctx.register_geometry(course, &geometry)?;
+    let (base, removed) = gpu_runnable(&mut ctx, &base, course, a.strip_refused)?;
+    let request = race_exec::multi_request(&base, course, 1)?;
+    let (runners, skills) = roster(&base)?;
 
     // CPU first, so its timings never share the machine with the device run.
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    println!("workload: v77 line 1, course {}, seeds 1..N", a.course);
+    println!("workload: {} line 1, course {course}, {runners} runners, {skills} skills, seeds 1..N", a.request);
+    if !removed.is_empty() {
+        println!("stripped for the GPU lane ({} skills removed):", removed.len());
+        for line in &removed {
+            println!("  {line}");
+        }
+    }
     println!("\nCPU engine (PreparedRace::run, no retained frames)");
     cpu_run(&request, cores.min(a.cpu_races), cores)?; // warm
     let one_n = (a.cpu_races / cores).max(8);
@@ -101,8 +135,6 @@ fn main() -> Result<(), String> {
     println!("  1 thread : {one_n} races in {one_ms:.0} ms = {cpu_one:.1} races/s ({:.2} ms/race)", one_ms / one_n as f64);
     println!("  {cores} threads: {} races in {all_ms:.0} ms = {cpu_all:.1} races/s", a.cpu_races);
 
-    let mut ctx = race_exec::RaceContext::open()?;
-    ctx.register_geometry(a.course, &geometry)?;
     let device = ctx.device();
     let compute_units = device.compute_units.max(1) as usize;
     let (global_mem, max_alloc) = ctx.device_memory()?;
@@ -119,20 +151,27 @@ fn main() -> Result<(), String> {
     let n = template.runners();
 
     // Device bytes one race slot takes in a launch, and which buffer is the
-    // largest (it must fit one allocation).
-    let frames = race_exec::RACE_MAX_TICKS * n * 6 * 8;
-    let scr_u = race_exec::SCR_U_WORDS * 4;
-    let scr_d = race_exec::SRL_WORDS * 8;
+    // largest (it must fit one allocation). Scratch follows the record bucket,
+    // frames follow the course tick bound. The pd row and the skill table sit
+    // in the launch's request table, one row per distinct request (F1), so the
+    // sweep's repeated-request launch pays them once, not per race.
+    let rcap = race_exec::sk_rcap(template.records());
+    let frames = race_exec::course_tick_bound(template.course_distance()) * n * 6 * 8;
+    let scr_u = race_exec::scr_u_words(rcap, false) * 4;
+    let scr_d = race_exec::srl_words(rcap) * 8;
+    let skw = globalsim_gpu::skills_compile::sk_stride_at(template.sk_emax());
+    let req_table = race_exec::RIL_STRIDE * 8 + skw * 4;
     let per_race = frames + scr_u + scr_d
-        + race_exec::RI_STRIDE * 4 + race_exec::RIL_STRIDE * 8 + race_exec::SK_STRIDE * 4
+        + race_exec::RI_STRIDE * 4
         + race_exec::ST_STRIDE * 4 + race_exec::EV_STRIDE * 4;
     let largest = frames.max(scr_u).max(scr_d);
-    let by_memory = (global_mem as f64 * 0.85 / per_race as f64) as usize;
+    let by_memory = ((global_mem as f64 * 0.85 - req_table as f64) / per_race as f64) as usize;
     let by_alloc = (max_alloc as usize) / largest;
     let cap = a.max_races.unwrap_or(by_memory.min(by_alloc)).max(1);
     println!(
-        "one race slot: {:.2} MiB (frames {:.2}, scratch {:.2} + {:.2}); memory holds about {by_memory}, one allocation {by_alloc}; sweeping up to {cap}",
+        "one race slot: {:.2} MiB (frames {:.2}, scratch {:.2} + {:.2}), request table {:.2} MiB per distinct request (skill table bucket {}); memory holds about {by_memory}, one allocation {by_alloc}; sweeping up to {cap}",
         per_race as f64 / 1048576.0, frames as f64 / 1048576.0, scr_u as f64 / 1048576.0, scr_d as f64 / 1048576.0,
+        req_table as f64 / 1048576.0, template.sk_emax(),
     );
 
     // Correctness guard: the seed-1 race of a batched launch equals the CPU
@@ -179,10 +218,28 @@ fn main() -> Result<(), String> {
         );
     }
 
-    // End to end at the best width: what one app batch pays per race.
+    // End to end at the best width: what one app batch pays per race, in
+    // both slice regimes (F7), so the launch-boundary cost is on the table.
     let (m, _) = best;
     let budget_mb = (m * frames).div_ceil(1 << 20) + 1;
     std::env::set_var("GSIM_GPU_FRAME_BUDGET_MB", budget_mb.to_string());
+    ctx.set_slice_policy(Some(race_exec::SlicePolicy::Off));
+    let mut prepared: Vec<race_exec::Prepared> = (1..=m as i32).map(|s| template.with_seed(s)).collect();
+    let t = Instant::now();
+    let (run, _) = ctx.run_prepared(&mut prepared, None)?;
+    drop(prepared);
+    let wall = t.elapsed().as_secs_f64() * 1e3;
+    let flagged = run.races.iter().filter(|r| r.fallback.is_some()).count();
+    let s = &run.stage_ms;
+    let rate = m as f64 / wall * 1e3;
+    println!(
+        "\nend to end at {m} races, one launch: {wall:.0} ms = {rate:.1} races/s ({:.2}x the {cores}-thread CPU); upload {:.0}, launch {:.0}, readback {:.0}, decode {:.0} ms; {flagged} flagged",
+        rate / cpu_all, s.upload_ms, s.launch_ms, s.readback_ms, s.decode_ms,
+    );
+
+    // Fresh Prepared: run_prepared moves each race's geometry out on its way
+    // through the launch, so a second pass cannot reuse the first batch.
+    ctx.set_slice_policy(None);
     let mut prepared: Vec<race_exec::Prepared> = (1..=m as i32).map(|s| template.with_seed(s)).collect();
     let t = Instant::now();
     let (run, _) = ctx.run_prepared(&mut prepared, None)?;
@@ -191,10 +248,104 @@ fn main() -> Result<(), String> {
     let s = &run.stage_ms;
     let rate = m as f64 / wall * 1e3;
     println!(
-        "\nend to end at {m} races: {wall:.0} ms = {rate:.1} races/s ({:.2}x the {cores}-thread CPU); upload {:.0}, launch {:.0}, readback {:.0}, decode {:.0} ms; {flagged} flagged",
-        rate / cpu_all, s.upload_ms, s.launch_ms, s.readback_ms, s.decode_ms,
+        "end to end at {m} races, sliced: {wall:.0} ms = {rate:.1} races/s ({:.2}x the {cores}-thread CPU); {flagged} flagged",
+        rate / cpu_all,
     );
+    println!(
+        "  slice launches {}, slowest {:.0} ms; upload {:.0}, launch {:.0}, readback {:.0}, decode {:.0} ms",
+        s.slices, s.slice_max_ms, s.upload_ms, s.launch_ms, s.readback_ms, s.decode_ms,
+    );
+    if flagged > 0 {
+        return Err(format!("{flagged} races fell back in the sliced end-to-end run"));
+    }
     Ok(())
+}
+
+/// The request as the GPU lane will run it. A refusal is an error unless
+/// `strip` is set, in which case the refused part is removed and the bench
+/// goes on; each removal is returned as one line naming the runner, the skill
+/// and the lane's reason.
+fn gpu_runnable(ctx: &mut race_exec::RaceContext, base: &str, course: i32, strip: bool) -> Result<(String, Vec<String>), String> {
+    use globalsim_gpu::json::{self, Value};
+    let mut value = json::parse(base)?;
+    let mut removed = Vec::new();
+    loop {
+        let mut text = String::new();
+        json::to_string_into(&value, &mut text);
+        let prepared = ctx.prepare(&race_exec::multi_request(&text, course, 1)?, 1)?;
+        let Some(reason) = prepared.host_fallback_reason().map(str::to_string) else {
+            return Ok((text, removed));
+        };
+        if !strip {
+            return Err(format!("the workload falls back on the GPU: {reason} (--strip-refused benches it without the refused skills)"));
+        }
+        if removed.len() >= 64 {
+            return Err(format!("still refused after 64 removals: {reason}"));
+        }
+        let named = reason
+            .split_whitespace()
+            .skip_while(|w| *w != "skill")
+            .nth(1)
+            .filter(|w| w.chars().all(|c| c.is_ascii_digit()))
+            .map(str::to_string);
+        let Value::Object(map) = &mut value else { return Err("request is not an object".into()) };
+        let Some(Value::Array(horses)) = map.get_mut("horses") else { return Err("request has no horses".into()) };
+        let id_of = |s: &Value| s.get("skillId").and_then(|v| v.as_str()).map(str::to_string);
+        let before = removed.len();
+        match named {
+            Some(sid) => {
+                for (i, h) in horses.iter_mut().enumerate() {
+                    if let Some(skills) = skills_of(h) {
+                        let had = skills.len();
+                        skills.retain(|s| id_of(s).as_deref() != Some(sid.as_str()));
+                        if skills.len() != had {
+                            removed.push(format!("runner {i}: {sid} ({reason})"));
+                        }
+                    }
+                }
+            }
+            None if reason.contains("overflow") => {
+                let most = horses
+                    .iter_mut()
+                    .enumerate()
+                    .filter_map(|(i, h)| skills_of(h).map(|s| (i, s.len())))
+                    .max_by_key(|&(i, n)| (n, std::cmp::Reverse(i)))
+                    .map(|(i, _)| i);
+                if let Some(i) = most {
+                    if let Some(skill) = skills_of(&mut horses[i]).and_then(|s| s.pop()) {
+                        removed.push(format!("runner {i}: {} ({reason})", id_of(&skill).unwrap_or_default()));
+                    }
+                }
+            }
+            None => {}
+        }
+        if removed.len() == before {
+            return Err(format!("cannot strip this refusal: {reason}"));
+        }
+    }
+}
+
+/// A runner's skills array, when it has one.
+fn skills_of(h: &mut globalsim_gpu::json::Value) -> Option<&mut Vec<globalsim_gpu::json::Value>> {
+    use globalsim_gpu::json::Value;
+    match h {
+        Value::Object(hm) => match hm.get_mut("skills") {
+            Some(Value::Array(s)) => Some(s),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Runner and skill counts of a request, for the workload line.
+fn roster(request: &str) -> Result<(usize, usize), String> {
+    let value = globalsim_gpu::json::parse(request)?;
+    let horses = value.get_array("horses")?;
+    let skills = horses
+        .iter()
+        .map(|h| h.get("skills").and_then(|s| s.as_array()).map_or(0, |s| s.len()))
+        .sum();
+    Ok((horses.len(), skills))
 }
 
 /// Wall-clock HH:MM:SS (local time is not in std; UTC is enough to line the

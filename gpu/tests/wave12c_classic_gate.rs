@@ -328,14 +328,17 @@ const SAMPLED: [(i64, &str); 18] = [
 /// activates the skill would prove nothing, so the activation is a gate too.
 #[test]
 fn every_sampled_name_answers_bit_exact_one_at_a_time() {
-    let mut problems: Vec<String> = Vec::new();
-    for (sid, cond) in SAMPLED {
-        for seed in SEEDS {
-            let label = format!("sid {sid} {cond}");
-            let request = solo_battery(seed, &[(sid, cond)]);
-            gate(&label, &request, seed, &[sid], &mut problems);
-        }
-    }
+    let cases = SAMPLED.iter().flat_map(|&(sid, cond)| SEEDS.iter().map(move |&seed| (sid, cond, seed)));
+    let problems: Vec<String> = crate::par::map(cases, |(sid, cond, seed)| {
+        let mut problems = Vec::new();
+        let label = format!("sid {sid} {cond}");
+        let request = solo_battery(seed, &[(sid, cond)]);
+        gate(&label, &request, seed, &[sid], &mut problems);
+        problems
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     assert!(problems.is_empty(), "{} problems:\n{}", problems.len(), problems.join("\n"));
 }
 

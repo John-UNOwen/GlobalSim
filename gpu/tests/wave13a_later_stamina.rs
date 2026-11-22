@@ -248,11 +248,23 @@ fn staminasyoubu_long_courses_answer_bit_exact() {
     let mut problems: Vec<String> = Vec::new();
     let mut fired: Vec<u32> = Vec::new();
     let mut diffs: Vec<String> = Vec::new();
+    // Every (course, seed, rewrite) runs side by side (crate::par). The
+    // answers come back in loop order.
+    let cases = courses.iter().flat_map(|&(course, _)| {
+        SEEDS.iter().flat_map(move |&seed| [None, Some((B_WISDOM, B_STAMINA))].map(move |rewrite| (course, seed, rewrite)))
+    });
+    let mut answers = crate::par::map(cases, |(course, seed, rewrite)| {
+        let mut problems = Vec::new();
+        let (stats, diff) = assert_seed_bit_exact(course, seed, rewrite, &mut problems);
+        (stats, diff, problems)
+    })
+    .into_iter();
     for (course, tier) in courses {
         let mut course_fires = 0u32;
         for seed in SEEDS {
             for rewrite in [None, Some((B_WISDOM, B_STAMINA))] {
-                let (stats, diff) = assert_seed_bit_exact(course, seed, rewrite, &mut problems);
+                let (stats, diff, mut case_problems) = answers.next().expect("one answer per case");
+                problems.append(&mut case_problems);
                 course_fires += stats[4];
                 diffs.push(format!(
                     "course {course} (tier {tier}) seed {seed}{}: first flagged frame difference vs unflagged {:?}",

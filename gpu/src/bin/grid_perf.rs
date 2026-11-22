@@ -1,7 +1,8 @@
 //! Grid n=120 launch profile: the per-seed marginal cost at 120 runners for
 //! single races and small batches, with the stage split, plus a check that a
 //! batch crossing the frame-byte launch budget decodes identically to the
-//! same races launched one at a time.
+//! same races launched one at a time. `gpu::ROSTER_CAP` caps a roster at 18,
+//! so every request here falls back by size unless the cap is raised.
 
 use globalsim_gpu::json::Value;
 use globalsim_gpu::{json, race_exec};

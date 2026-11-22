@@ -40,13 +40,10 @@ pub const RACE_KERNEL_SOURCE: &str = concat!(
 pub const BUILD_OPTIONS: &str = "-cl-fp32-correctly-rounded-divide-sqrt";
 
 /// The runner capacity every runner-indexed kernel region sizes to, on both
-/// lanes. The game never fields more than 18, so 18 is the default and keeps a
-/// race slot small enough to launch thousands at once. `wide-roster` restores
-/// the engine's 120-horse grid band (experimentalGrid 21 to 120) on the GPU;
-/// without it those rosters refuse by size and the CPU engine answers them.
-#[cfg(feature = "wide-roster")]
-pub const ROSTER_CAP: usize = 120;
-#[cfg(not(feature = "wide-roster"))]
+/// lanes. The game never fields more than 18, so 18 is the hard limit and a
+/// race slot stays small enough to launch thousands at once. The engine
+/// answers a larger roster on the CPU: past this cap the lane refuses by
+/// size (`race_exec::RACE_MAXR`, `classic_exec::CLS_MAXR`).
 pub const ROSTER_CAP: usize = 18;
 
 /// `BUILD_OPTIONS` plus the capacity defines, so the kernels' `RACE_MAXR` and
@@ -54,9 +51,50 @@ pub const ROSTER_CAP: usize = 18;
 pub fn build_options() -> String {
     format!("{BUILD_OPTIONS} -D RACE_MAXR={ROSTER_CAP} -D CLS_MAXR={ROSTER_CAP}")
 }
+
+/// The race program variant that compiles the diagnostics journal in (the
+/// debug-scratch path). The default race program runs without it.
+pub fn diag_build_options() -> String {
+    format!("{} -D SK_DIAG", build_options())
+}
+
+/// The race program at one record bucket. The scratch regions size to
+/// `rcap`, and the top bucket keeps the default build options so the
+/// hot-path program is unchanged.
+pub fn bucket_build_options(rcap: usize) -> String {
+    let base = build_options();
+    if rcap >= crate::skills_compile::SK_RMAX {
+        base
+    } else {
+        format!("{base} -D SK_RCAP={rcap}")
+    }
+}
+
+/// The diagnostics program at one record bucket.
+pub fn diag_bucket_build_options(rcap: usize) -> String {
+    let base = diag_build_options();
+    if rcap >= crate::skills_compile::SK_RMAX {
+        base
+    } else {
+        format!("{base} -D SK_RCAP={rcap}")
+    }
+}
+
+/// The race program for one full define set: the effect-cap bucket the skill
+/// table was packed at, the record bucket the scratch sizes to, and the
+/// journal in or out. The buckets move regions and resize scratch only, so the
+/// arithmetic stays identical across variants.
+pub fn race_bucket_build_options(emax: usize, rcap: usize, diag: bool) -> String {
+    let base = if diag {
+        diag_bucket_build_options(rcap)
+    } else {
+        bucket_build_options(rcap)
+    };
+    format!("{base} -D SK_EMAX={emax}")
+}
 // The classic lane carries the bit-exact powf table for the mid-race stat
 // refresh (race_solver.rs:1330-1340 recomputes the guts and power derived
-// terms when a delivered stat effect lands); construction stays host side.
+// terms when a delivered stat effect lands). Construction stays host side.
 pub const CLASSIC_KERNEL_SOURCE: &str = concat!(
     include_str!("kernels/rng_core.cl"),
     "\n",
@@ -212,6 +250,17 @@ impl Spike {
         Program::builder()
             .cmplr_opt(build_options())
             .source(source)
+            .build(&self.context)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The race program for one (effect-cap bucket, record bucket, journal)
+    /// define set, so the kernel's table offsets and scratch regions match a
+    /// table the compiler packed and sized for that pair.
+    pub fn build_race_program(&self, emax: usize, rcap: usize, diag: bool) -> Result<Program, String> {
+        Program::builder()
+            .cmplr_opt(race_bucket_build_options(emax, rcap, diag))
+            .source(RACE_KERNEL_SOURCE)
             .build(&self.context)
             .map_err(|e| e.to_string())
     }

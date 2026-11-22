@@ -11,6 +11,7 @@ use crate::dep_cpu;
 use crate::initialization::{self, StatsCase};
 use crate::json::{self, Value};
 use crate::race::{FallbackReason, RaceOutcome, RaceRunner};
+use crate::race_exec::{self, SlicePolicy};
 use crate::random_gen::Rule30CARng;
 use ocl::{Buffer, Queue, flags};
 
@@ -104,6 +105,10 @@ pub const CLS_ST_STRIDE: usize = 16 + 20 * CLS_MAXR;
 pub const S_FALLBACK: usize = 0;
 pub const S_TICKS: usize = 1;
 pub const S_END: usize = 2;
+/// F7 slice accounting, the kernel's `S_RPOVER` and `S_DONE`. The record
+/// overflow flag survives slice launches in the status word.
+pub const S_RPOVER: usize = 4;
+pub const S_DONE: usize = 5;
 pub const CLS_ST_RUN0: usize = 16;
 pub const CLS_ST_RUN_STRIDE: usize = 20;
 
@@ -837,6 +842,12 @@ pub struct ClassicGpu {
 pub struct ClassicRun {
     pub device: crate::gpu::DeviceReport,
     pub build_ms: f64,
+    /// Kernel time across the batch's chunks: enqueue plus sync, no upload
+    /// or readback. The retail lane reports this in `StageTimings::launch_ms`.
+    pub launch_ms: f64,
+    /// F7 slice accounting: launches over the batch and the slowest slice.
+    pub slices: usize,
+    pub slice_max_ms: f64,
     pub races: Vec<ClassicGpu>,
 }
 
@@ -894,6 +905,11 @@ impl ClassicContext {
         let frames_bytes = CLS_MAX_TICKS * nmax * CLS_FRAME_COLS * std::mem::size_of::<f64>();
         const FRAME_BYTES_BUDGET: usize = 512 << 20;
         let chunk_len = (FRAME_BYTES_BUDGET / frames_bytes.max(1)).max(1);
+        let policy = race_exec::slice_policy_from_env();
+        let log = std::env::var_os("GSIM_GPU_SLICE_LOG").is_some();
+        let mut launch_ms = 0.;
+        let mut slices = 0usize;
+        let mut slice_max_ms = 0f64;
         for chunk_start in (0..m).step_by(chunk_len) {
             let mc = chunk_len.min(m - chunk_start);
             let mut ri_all = vec![0u32; mc * CLS_RI_STRIDE];
@@ -915,22 +931,73 @@ impl ClassicContext {
             let b_frames = read_write(&queue, &vec![0f64; mc * CLS_MAX_TICKS * nmax * CLS_FRAME_COLS])?;
             let b_status = read_write(&queue, &vec![0u32; mc * CLS_ST_STRIDE])?;
             let b_rp = read_write(&queue, &vec![0u32; mc * CLS_RP_STRIDE])?;
-            let kernel = ocl::Kernel::builder()
-                .program(&self.program)
-                .name("race_classic")
-                .queue(queue.clone())
-                .global_work_size(mc)
-                .arg(&b_ri)
-                .arg(&b_rd)
-                .arg(&b_su)
-                .arg(&b_sd)
-                .arg(&b_frames)
-                .arg(&b_status)
-                .arg(&b_rp)
-                .build()
-                .map_err(|e| e.to_string())?;
-            unsafe { kernel.enq().map_err(|e| e.to_string())? };
-            queue.finish().map_err(|e| e.to_string())?;
+            let mk_kernel = |resume: u32, slice_end: u32| -> Result<ocl::Kernel, String> {
+                ocl::Kernel::builder()
+                    .program(&self.program)
+                    .name("race_classic")
+                    .queue(queue.clone())
+                    .global_work_size(mc)
+                    .arg(&b_ri)
+                    .arg(&b_rd)
+                    .arg(&b_su)
+                    .arg(&b_sd)
+                    .arg(&b_frames)
+                    .arg(&b_status)
+                    .arg(&b_rp)
+                    .arg(slice_end)
+                    .arg(resume)
+                    .build()
+                    .map_err(|e| e.to_string())
+            };
+            // F7 slicing, same regime as the retail lane: one launch per tick
+            // range plus a status probe, until every lane is done or flagged.
+            let cap_ticks = CLS_MAX_TICKS as u32;
+            let mut probe = vec![0u32; mc * CLS_ST_STRIDE];
+            let mut resume = 0u32;
+            let mut slice_start = 0u32;
+            let mut slice_len = match policy {
+                SlicePolicy::Off => u32::MAX,
+                SlicePolicy::Fixed(t) => t,
+                SlicePolicy::Adaptive { .. } => race_exec::SLICE_FIRST_TICKS.min(cap_ticks),
+            };
+            loop {
+                let slice_end = slice_start.saturating_add(slice_len);
+                let kernel = mk_kernel(resume, slice_end)?;
+                let t_launch = std::time::Instant::now();
+                unsafe { kernel.enq().map_err(|e| e.to_string())? };
+                queue.finish().map_err(|e| e.to_string())?;
+                let el_ms = t_launch.elapsed().as_secs_f64() * 1e3;
+                launch_ms += el_ms;
+                slices += 1;
+                slice_max_ms = slice_max_ms.max(el_ms);
+                if policy == SlicePolicy::Off {
+                    break;
+                }
+                if log {
+                    eprintln!("classic slice {slice_start}..{slice_end} in {el_ms:.1} ms");
+                }
+                b_status.cmd().read(&mut probe).enq().map_err(|e| e.to_string())?;
+                queue.finish().map_err(|e| e.to_string())?;
+                let unfinished = probe
+                    .chunks(CLS_ST_STRIDE)
+                    .any(|s| s[S_FALLBACK] == 0 && s[S_DONE] == 0);
+                if !unfinished {
+                    break;
+                }
+                let next = match policy {
+                    SlicePolicy::Fixed(t) => t,
+                    SlicePolicy::Adaptive { target_ms } => {
+                        let scaled = (slice_len as f64) * (target_ms / el_ms.max(1.0));
+                        (scaled.round() as i64)
+                            .clamp(race_exec::SLICE_MIN_TICKS as i64, cap_ticks as i64)
+                            as u32
+                    }
+                    SlicePolicy::Off => break,
+                };
+                slice_start = slice_end;
+                slice_len = next;
+                resume = 1;
+            }
             b_status
                 .cmd()
                 .read(&mut status[chunk_start * CLS_ST_STRIDE..][..mc * CLS_ST_STRIDE])
@@ -1053,7 +1120,7 @@ impl ClassicContext {
             }
             races.push(out);
         }
-        Ok(ClassicRun { device: self.spike.device.clone(), build_ms: self.spike.build_ms, races })
+        Ok(ClassicRun { device: self.spike.device.clone(), build_ms: self.spike.build_ms, launch_ms, slices, slice_max_ms, races })
     }
 }
 
@@ -1097,13 +1164,64 @@ fn read_write<T: ocl::OclPrm>(queue: &Queue, data: &[T]) -> Result<Buffer<T>, St
 }
 
 /// Open a context, prepare every request and launch once.
+/// Calls made at the same time from several threads share one launch (see
+/// `crate::coalesce`). The classic lane takes mixed runner counts in one
+/// launch, so every job goes into it.
 pub fn run(requests: &[(String, i64)]) -> Result<ClassicRun, String> {
+    if crate::coalesce::enabled() {
+        return SHARED.submit(requests.to_vec(), ClassicContext::open, shared_batch);
+    }
     let ctx = ClassicContext::open()?;
     let mut prepared: Vec<Prepared> = Vec::with_capacity(requests.len());
     for (request, seed) in requests {
         prepared.push(ctx.prepare(request, *seed)?);
     }
     ctx.run_prepared(&mut prepared)
+}
+
+static SHARED: crate::coalesce::Coalescer<ClassicContext, Vec<(String, i64)>, ClassicRun> =
+    crate::coalesce::Coalescer::new();
+
+fn shared_batch(ctx: &mut ClassicContext, jobs: Vec<Vec<(String, i64)>>) -> Vec<Result<ClassicRun, String>> {
+    let mut answers: Vec<Option<Result<ClassicRun, String>>> = (0..jobs.len()).map(|_| None).collect();
+    let mut owners = Vec::new();
+    let mut lens = Vec::new();
+    let mut all: Vec<Prepared> = Vec::new();
+    for (j, requests) in jobs.iter().enumerate() {
+        let prepared: Result<Vec<Prepared>, String> = requests.iter().map(|(r, seed)| ctx.prepare(r, *seed)).collect();
+        match prepared {
+            Ok(p) => {
+                owners.push(j);
+                lens.push(p.len());
+                all.extend(p);
+            }
+            Err(e) => answers[j] = Some(Err(e)),
+        }
+    }
+    match ctx.run_prepared(&mut all) {
+        Ok(run) => {
+            let mut races = run.races.into_iter();
+            for (&j, &len) in owners.iter().zip(&lens) {
+                answers[j] = Some(Ok(ClassicRun {
+                    device: run.device.clone(),
+                    build_ms: run.build_ms,
+                    launch_ms: run.launch_ms,
+                    slices: run.slices,
+                    slice_max_ms: run.slice_max_ms,
+                    races: races.by_ref().take(len).collect(),
+                }));
+            }
+        }
+        Err(_) => {
+            let mut rest = all;
+            for (&j, &len) in owners.iter().zip(&lens) {
+                let tail = rest.split_off(len);
+                answers[j] = Some(ctx.run_prepared(&mut rest));
+                rest = tail;
+            }
+        }
+    }
+    answers.into_iter().map(|a| a.expect("every job answered")).collect()
 }
 
 /// The same run against a caller-supplied course table, the shape of

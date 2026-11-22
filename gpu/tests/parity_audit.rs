@@ -322,22 +322,13 @@ fn app_traffic_answers_full_replies_byte_equal() {
 
 /// Skill ids the retail compiler refuses, normalized to the family the
 /// refusal names: the skill id is dropped, and a condition refusal keeps
-/// only the missing leaf behind the colon. 688 of the 751 ids compile.
-const RETAIL_REFUSALS: [&str; 17] = [
-    "'is_badstart'==0 is not ported",
-    "'is_basis_distance'==0 is not ported",
-    "'is_basis_distance'==1 is not ported",
-    "'is_exist_chara_id'==1002 is not ported",
+/// only the missing leaf behind the colon. 741 of the 751 ids compile, the
+/// target-18, is_badstart, straight_front_type, lastspurt,
+/// last_straight_random, random_lot and is_exist_chara_id families having
+/// left the list with the E1a port.
+const RETAIL_REFUSALS: [&str; 5] = [
     "'is_other_character_activate_advantage_skill' needs the field's team-filtered previous-tick advantage pair set",
-    "'last_straight_random'==1 is not ported",
-    "'lastspurt'==2 is not ported",
-    "'random_lot'==15 is not ported",
-    "'random_lot'==30 is not ported",
-    "'random_lot'==50 is not ported",
-    "'straight_front_type'==2 is not ported",
-    "PowerUp is not ported to the retail kernel",
     "condition has more than 4 arms",
-    "effect target 18 is not ported",
     "effect target 19 is not ported",
     "effect target 20 is not ported",
     "has no alternatives",
@@ -346,8 +337,8 @@ const RETAIL_REFUSALS: [&str; 17] = [
 /// Drop the per-id prefix and the condition text so a refusal maps to its
 /// documented family: "skill 200131 condition '...': 'x'==1 is not ported"
 /// and "skill 200141 condition '...': 'x'==0 is not ported" both normalize
-/// to their leaf clause, and "skill 200151 PowerUp is not ported..." to the
-/// bare sentence.
+/// to their leaf clause, and "skill 200401 condition has more than 4 arms"
+/// to the bare sentence.
 fn refusal_family(id: &str, reason: &str) -> String {
     let mut family = reason.to_string();
     let prefix = format!("skill {id} ");
@@ -407,12 +398,10 @@ fn every_merged_skill_compiles_or_refuses_by_name_retail() {
     assert!(unexpected.is_empty(), "undocumented retail refusals:\n{}", unexpected.join("\n"));
 }
 
-/// Classic counterparts of RETAIL_REFUSALS, same normalization. 445 of the
+/// Classic counterparts of RETAIL_REFUSALS, same normalization. 451 of the
 /// 751 ids compile.
-const CLASSIC_REFUSALS: [&str; 54] = [
+const CLASSIC_REFUSALS: [&str; 52] = [
     "'is_badstart'==0 is not ported",
-    "'is_basis_distance'==0 is not ported",
-    "'is_basis_distance'==1 is not ported",
     "'is_exist_chara_id'==1002 is not ported",
     "'is_other_character_activate_advantage_skill' needs the field's team-filtered previous-tick advantage pair set",
     "'lastspurt'==2 is not ported",
@@ -573,7 +562,7 @@ fn gate_reasons_enumerates_exactly_the_documented_fallbacks() {
             Some(accepted()),
         ),
         (
-            "classic roster past 120",
+            "classic roster far past the cap",
             format!(r#"{{"courseId":10504,"horses":[{}]}}"#, vec!["{}"; 121].join(",")),
             Some(accepted()),
         ),
@@ -588,20 +577,16 @@ fn gate_reasons_enumerates_exactly_the_documented_fallbacks() {
             Some(accepted()),
         ),
         (
-            "retail roster past 144",
+            "retail roster far past the cap",
             format!(r#"{{"courseId":10504,"experimentalRetailRuntime":true,"horses":[{}]}}"#, vec!["{}"; 145].join(",")),
             Some(accepted()),
         ),
         (
-            "classic non-grid field past the band",
+            "classic non-grid field past the cap",
             format!(r#"{{"courseId":10504,"horses":[{}]}}"#, vec!["{}"; 25].join(",")),
             Some(accepted()),
         ),
     ];
-    // At the default 18-runner cap every roster past 18 refuses by size first,
-    // so the 24-runner band refusal can only be reached under wide-roster.
-    let band = cfg!(feature = "wide-roster")
-        .then_some("non-grid fields above 24 runners are outside the validated lane band");
     let documented: BTreeSet<String> = [
         "no GPU passes the exactness gate",
         "missing cl_khr_fp64, missing CL_FP_DENORM in single_fp_config, missing CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT, missing CL_FP_DENORM in double_fp_config",
@@ -616,7 +601,6 @@ fn gate_reasons_enumerates_exactly_the_documented_fallbacks() {
         "World geometry requires the experimental runtime and standard starting grid",
     ]
     .into_iter()
-    .chain(band)
     .map(str::to_string)
     .collect();
     let mut named: BTreeSet<String> = BTreeSet::new();

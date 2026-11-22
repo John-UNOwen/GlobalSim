@@ -21,6 +21,13 @@ fn plan_root(skill_data: &str, horses: &str) -> skills_compile::SkillsPlan {
     skills_compile::plan(&root, &course)
 }
 
+fn plan_root_classic(skill_data: &str, horses: &str) -> skills_compile::SkillsPlan {
+    let root_text = format!("{{\"skillData\":{{{skill_data}}},\"horses\":[{horses}]}}");
+    let root = json::parse(&root_text).expect("root parses");
+    let course = json::parse(COURSE).expect("course parses");
+    skills_compile::plan_classic(&root, &course)
+}
+
 /// One alternative with the given condition, cooldown and effect list.
 fn alt(cond: &str, cooldown: i64, effects: &[&str]) -> String {
     format!(
@@ -228,8 +235,10 @@ fn roster_reads_fold() {
         "not three horses",
     );
 
-    // With a nonzero team the opponent counts drop same-team receivers the
-    // identity map cannot model, so they refuse by name there.
+    // With a nonzero team the opponent counts drop same-team receivers. The
+    // retail kernel mirrors the engine's is_opponent filter, so they stay
+    // live there; the classic kernel has no filtered reader, so the classic
+    // lane refuses the behind pair by name there.
     let teams = concat!(
         r#"{"skills":["550001"],"strategy":"Nige","teamId":3},"#,
         r#"{"skills":[],"strategy":"Nige","teamId":3}"#
@@ -240,10 +249,20 @@ fn roster_reads_fold() {
             teams,
         )
     };
-    refused(&team_plan("temptation_opponent_count_behind>=1"), "temptation_opponent_count_behind");
-    refused(
+    is_live(
+        &team_plan("temptation_opponent_count_behind>=1"),
+        "retail opponent behind keeps working with teams",
+    );
+    is_live(
         &team_plan("running_style_temptation_opponent_count_nige>=1"),
-        "running_style_temptation_opponent_count_nige",
+        "retail opponent style keeps working with teams",
+    );
+    refused(
+        &plan_root_classic(
+            &format!("\"550001\":{}", alt("temptation_opponent_count_behind>=1", 500000, &["{\"type\":10,\"target\":1,\"modifier\":0}"])),
+            teams,
+        ),
+        "temptation_opponent_count_behind",
     );
     is_live(&team_plan("temptation_count_behind>=1"), "plain count keeps working");
 }

@@ -333,8 +333,27 @@ fn retail_later_stamina_answers_bit_exact() {
     register_geometry(10108);
     let mut problems: Vec<String> = Vec::new();
     let mut totals = [0u32; 5];
+    // The nine seed runs are independent. They run side by side (crate::par)
+    // and the checks below take them in the original loop order.
+    let plain = Some((600.0, 30000.0, 600.0));
+    let cases = SEEDS
+        .iter()
+        .map(|&s| (10504, s, None, false))
+        .chain(SEEDS.iter().map(|&s| (10504, s, None, true)))
+        .chain(SEEDS.iter().map(|&s| (10108, s, plain, false)));
+    let mut answers = crate::par::map(cases, |(course, seed, rewrite, recovery)| {
+        let mut problems = Vec::new();
+        let stats = assert_retail_seed(course, seed, rewrite, recovery, &mut problems);
+        (stats, problems)
+    })
+    .into_iter();
+    let mut take = |problems: &mut Vec<String>| {
+        let (stats, mut case_problems) = answers.next().expect("one answer per case");
+        problems.append(&mut case_problems);
+        stats
+    };
     for seed in SEEDS {
-        let stats = assert_retail_seed(10504, seed, None, false, &mut problems);
+        let stats = take(&mut problems);
         for (slot, value) in stats.iter().enumerate() {
             totals[slot] += value;
         }
@@ -346,7 +365,7 @@ fn retail_later_stamina_answers_bit_exact() {
         }
     }
     for seed in SEEDS {
-        let stats = assert_retail_seed(10504, seed, None, true, &mut problems);
+        let stats = take(&mut problems);
         for (slot, value) in stats.iter().enumerate() {
             totals[slot] += value;
         }
@@ -358,8 +377,7 @@ fn retail_later_stamina_answers_bit_exact() {
         }
     }
     for seed in SEEDS {
-        let stats =
-            assert_retail_seed(10108, seed, Some((600.0, 30000.0, 600.0)), false, &mut problems);
+        let stats = take(&mut problems);
         for (slot, value) in stats.iter().enumerate() {
             totals[slot] += value;
         }
