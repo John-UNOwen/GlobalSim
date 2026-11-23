@@ -31,7 +31,9 @@
 #endif
 #define SK_PROGRAMS (SK_EFFECTS + SK_ESTRIDE * SK_EMAX)
 #define SK_ARMS (SK_PROGRAMS + SK_PSTRIDE * 3072)
-#define SK_REGIONS (SK_ARMS + SK_ASTRIDE * 256)
+// Arm pool entries in the compiled table, skills_compile::SK_AMAX.
+#define SK_AMAX 256
+#define SK_REGIONS (SK_ARMS + SK_ASTRIDE * SK_AMAX)
 #define SK_TERMS (SK_REGIONS + SK_GSTRIDE * 2048)
 #define SK_TAGS (SK_TERMS + SK_MSTRIDE * 160)
 // The retail lane builds this program with `-D SK_TMAX=<bucket>` to match a
@@ -65,7 +67,9 @@
 #define SK_SLOPEMAX 16
 #define SK_WINMAX 16
 #define SK_MWINMAX 64
-#define SK_ARMMAX 4
+// Top-level '@' arms per record, mirroring skills_compile::SK_ARMMAX. The
+// record blocks below size their per-arm areas from this.
+#define SK_ARMMAX 8
 // One runner's random-activation pool, sized by the host's refusal guard
 // (skills_compile::SK_PICKMAX).
 #define SK_PICKMAX 64
@@ -87,6 +91,16 @@
 #define SK_FLAG_INIT_BUMP 16384
 #define SK_FLAG_SYOUBU 262144
 #define SK_FLAG_AFTEREND 524288
+// The record's arm programs are pure read-only push/fold chains with no
+// sampled term, so the scan may run them on the straight-line plan walk.
+#define SK_FLAG_PLAN 1048576
+// The alternative is the follow-up arm, keyed by the id with the followup
+// suffix (race_solver_builder.rs:589): it shares no cooldown state or timers
+// with the plain records of the skill id.
+#define SK_FLAG_FOLLOW 2097152
+// The alternative holds a non-self effect, so the constructor pass has
+// no field to fire it with.
+#define SK_FLAG_NO_FIELD 4194304
 
 #define SK_TERM_ALL_CORNER 0
 #define SK_TERM_STRAIGHT 1
@@ -111,6 +125,10 @@
 #define OP_TRUE 0
 #define OP_AND 1
 #define OP_OR 2
+// Membership in a compiled precondition region run, one Or group's chain
+// (race_solver.rs:2267 pairs it with the group's program). Operand 1 is the
+// absolute region index, operand 2 the run length.
+#define OP_REG 3
 #define OP_FEAT_I 4
 #define FEAT_ORDER 1
 #define FEAT_ORDER_RATE 2
@@ -219,6 +237,7 @@
 #define SK_EFF_LANESPEED 28
 #define SK_EFF_KAKARI 29
 #define SK_EFF_ACCEL 31
+#define SK_EFF_ALLSTAT 32      // AllStatusUp: five self bumps, one effect
 #define SK_EFF_SETLANE 35      // SetTargetLane
 #define SK_EFF_IMMUNE 38       // DebuffImmunity
 #define SK_EFF_RECOVERY 9
@@ -230,32 +249,33 @@
 #define SK_S_DEAD 3
 #define SK_S_DISABLED 4
 
-// Word layout of one record's state block (SKR_STRIDE words).
-#define SKR_STRIDE 26
+// Word layout of one record's state block (SKR_STRIDE words). The per-arm
+// window counts take one word per arm slot, so every word from SKR_USED on
+// derives from SK_ARMMAX.
 #define SKR_STATE 0
 #define SKR_NWIN 1
 #define SKR_SINGLE 2
 #define SKR_LATCH 3
-#define SKR_AWIN0 4
-#define SKR_AWIN1 5
-#define SKR_AWIN2 6
-#define SKR_AWIN3 7
-#define SKR_USED 8         // the record owner has activated this skill id
-#define SKR_AA_RUN 9       // a delayed running activation exists for this record
-#define SKR_AA_UNAPPLIED 10 // activations queued for this record's next turn
-#define SKR_GREEN 11       // this (runner, skill id) counted in the green set
-#define SKR_RESERVED 12    // the random-skill reservation picked this record
-#define SKR_AA_COUNT 13    // per-effect-slot delivered counts, SKR_AA_COUNT + e
-#define SKR_WISFAIL 21     // the ordinary lottery failed; only reservations fire
-#define SKR_ORD 24         // reply ordinal while a pending activation is live, 0 none
-#define SKR_PEND 25        // this record holds the (runner, skill id) pending slot
+#define SKR_AWIN0 4         // per-arm window counts, SKR_AWIN0 + a
+#define SKR_USED (SKR_AWIN0 + SK_ARMMAX) // the record owner has activated this skill id
+#define SKR_AA_RUN (SKR_USED + 1)       // a delayed running activation exists for this record
+#define SKR_AA_UNAPPLIED (SKR_USED + 2) // activations queued for this record's next turn
+#define SKR_GREEN (SKR_USED + 3)        // this (runner, skill id) counted in the green set
+#define SKR_RESERVED (SKR_USED + 4)     // the random-skill reservation picked this record
+#define SKR_AA_COUNT (SKR_USED + 5)     // per-effect-slot delivered counts, SKR_AA_COUNT + e
+#define SKR_WISFAIL (SKR_AA_COUNT + 8)  // the ordinary lottery failed; only reservations fire
+#define SKR_ORD (SKR_WISFAIL + 3)       // reply ordinal while a pending activation is live, 0 none
+#define SKR_PEND (SKR_ORD + 1)          // this record holds the (runner, skill id) pending slot
+#define SKR_EMASK (SKR_PEND + 1)        // effect slots whose timer was written, only those age
+#define SKR_STRIDE (SKR_EMASK + 1)
 
 // Double layout of one record's dynamic block (SKD_STRIDE doubles). The
 // effect timers are indexed by effect slot; an effect fires at most once per
 // (skill, detail) cycle, so one timer chain per slot mirrors the engine's
-// per-receiver duration timers.
-#define SKD_STRIDE 276
-#define SKD_EFF_T 268    // per-effect duration timers, negative while active
+// per-receiver duration timers. The per-arm chains sit between the merged
+// windows and the timers, 16 pairs wide per arm slot.
+#define SKD_EFF_T (SKD_ARMS + 2 * SK_WINMAX * SK_ARMMAX) // per-effect duration timers, negative while active
+#define SKD_STRIDE (SKD_EFF_T + 8) // 8 effect slots, skills_compile::SK_EMAXSLOT
 #define SKD_ANY_LAST 4    // observe_anyskill: last activation count seen
 #define SKD_ANY_TRUES 5   // observe_anyskill: activations already counted
 #define SKD_ANY_RESULT 6  // observe_anyskill: changed flag, read by FEAT_ANYACT

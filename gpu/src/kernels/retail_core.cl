@@ -56,7 +56,7 @@
 // those slots zero. The slot follows the per-runner block below.
 // Per-runner block, slot RI_RUN0 + RI_RUN_STRIDE * r.
 #define RI_RUN0 16
-#define RI_RUN_STRIDE 13
+#define RI_RUN_STRIDE 14
 #define RR_STYLE 0           // base_running_style (1..5)
 #define RR_STRATEGY 1        // resolved strategy (1..5)
 #define RR_DISTAPT 2         // distance aptitude 0..7
@@ -70,6 +70,7 @@
 #define RR_STAPT 10          // strategy aptitude 0..7
 #define RR_SUAPT 11          // surface aptitude 0..7
 #define RR_TEAM 12           // fixed team id, 0 no team (race_field.rs:461 drop)
+#define RR_CHARA 13          // fixed chara id (race_field.rs:441 chara fan)
 #define RI_DEBUG_TICK (RI_RUN0 + RI_RUN_STRIDE * RACE_MAXR)
 #define RI_FULL (RI_DEBUG_TICK + 14) // 1: write the full-reply channels and exports
 // Compact launch: 1 or 2 kept frame rows instead of every runner's. The
@@ -201,7 +202,7 @@
 #define PD_FC_HALF0 (PD_CF_DIST + 11)          // final_corner_half start, NaN when the course has none
 #define PD_FC_HALF1 (PD_CF_DIST + 12)          // final_corner_half end
 #define PD_RUN0 (PL_FRONT_LANE + 32)           // per runner, stride PD_RUN_STRIDE
-#define PD_RUN_STRIDE 16
+#define PD_RUN_STRIDE 22
 // The later-stamina request flag and the solver stream pair left by the
 // engine's construction draws, per runner (race_exec.rs PRD_LATER).
 #define PRD_LATER 11
@@ -219,6 +220,12 @@
 #define PRD_GUTS_ACC 9         // bumped guts accumulator f64, NaN when no bump
 #define PRD_BOOST_SPEED 14     // bumped speed field f64, 0 when no bump
 #define PRD_SPEED_ACC 15       // bumped speed accumulator f64, NaN when no bump
+#define PRD_BOOST_STAM 16      // bumped stamina field f64, 0 when no bump
+#define PRD_STAM_ACC 17        // bumped stamina accumulator f64, NaN when no bump
+#define PRD_BOOST_POWER 18     // bumped power field f64, 0 when no bump
+#define PRD_POWER_ACC 19       // bumped power accumulator f64, NaN when no bump
+#define PRD_RAW_STAM 20        // bumped raw stamina f64, NaN when no bump
+#define PRD_RAW_POWER 21       // bumped raw power f64, NaN when no bump
 #define PRD_SPOT_PROF 10       // strategy proficiency scaling the live spot duration
 
 // ---------------------------------------------------------------------------
@@ -236,7 +243,7 @@
 #define SCR_HP_OUT (SCR_HP_IN + RACE_MAXR * IIU)        // RACE_MAXR * 180, ob 172 then olb
 #define SCR_STATE (SCR_HP_OUT + RACE_MAXR * 180)
 // Integer state, one RACE_MAXR-wide column per slot (field base + runner index).
-#define SI_SLOTS 95
+#define SI_SLOTS 96
 #define SI_STRIDE (SI_SLOTS * RACE_MAXR)
 #define SI_SLOT(n) ((n) * RACE_MAXR)
 #define SI_STRATEGY SI_SLOT(0)
@@ -334,6 +341,7 @@
 #define SI_ADVC0 SI_SLOT(92)       // this-tick advantage kind mask, kinds 0..31
 #define SI_ADVC1 SI_SLOT(93)       // this-tick advantage kind mask, kinds 32..63
 #define SI_HEALSEQ SI_SLOT(94)     // ordinal of this runner's latest self heal
+#define SI_CHARA SI_SLOT(95)       // fixed chara id (race_field.rs:441 chara fan)
 #define CP_UNSUPPORTED 1u
 #define CP_CUTOFF 2u
 #define CP_WASBLK 4u
@@ -492,6 +500,11 @@
 #define SK_JRN_N 0
 #endif
 #define SK_JRN_T (SK_JRN + SK_JRN_N)
+// The tick mirror the journal records and the channel records stamp with.
+// A program with neither reader (GSIM_NO_REPLY, no SK_DIAG) leaves it unwritten.
+#if defined(SK_DIAG) || !defined(GSIM_NO_REPLY)
+#define SK_TICK_MIRROR 1
+#endif
 // Words of per-race u32 scratch, the scr_u stride. The full-reply channels
 // live in their own buffer, so only full-request slots carry them.
 #define SCR_WORDS (SK_JRN_T + 1)
@@ -518,6 +531,18 @@
 #define SCR_RC_KAK (SCR_RC_PHR + 1 + RC_PHR_CAP)
 #define RC_KAK_CAP 1024
 #define RC_WORDS (SCR_RC_KAK + 1 + RC_KAK_CAP)
+// Launch shape (host RaceShape, -D GSIM_NO_REPLY): a program whose launch
+// carries no full request folds every channel guard false, so the writes,
+// the capture walks behind them and the exports drop out of the image and
+// the block is never touched. The full-shape program keeps the old define
+// set and its old behavior.
+#ifdef GSIM_NO_REPLY
+#define rc_on(rcb) (0u)
+#define ri_full(ri) (0u)
+#else
+#define rc_on(rcb) ((rcb)[SCR_RC_ON])
+#define ri_full(ri) ((ri)[RI_FULL])
+#endif
 
 // Per-race scratch f64, one RACE_MAXR-wide column per slot (field base +
 // runner index). Array fields keep RACE_MAXR slots per element:
@@ -701,7 +726,7 @@ static void race_event(__global uint* ev, __global uint* st, const int runner,
 // writes so the host falls back cleanly instead of reading a torn record.
 static __global uint* rc_take(__global uint* rcb, __global uint* st,
     const int base, const int cap, const int len) {
-    if (rcb[SCR_RC_ON] == 0u) {
+    if (rc_on(rcb) == 0u) {
         return 0;
     }
     const uint used = rcb[base];
@@ -3370,6 +3395,12 @@ static void sk_seq_remove(__global uint* q, const uint tok) {
     }
 }
 
+// A slot timer starts aging where it is written, so the per-tick sweep skips
+// the slots that never held one. The bit stays set once written.
+static void sk_age_mark(__global uint* sks, const int rec, const int slot) {
+    sks[SKR_STRIDE * rec + SKR_EMASK] |= 1u << slot;
+}
+
 // The f64 modifier a token carries. A pool token carries the runtime value
 // registered at application time (a re-drawn roll or a counter tier), which
 // is exactly what the engine keeps in its active-skill entry.
@@ -3803,6 +3834,26 @@ static int sk_eval(__global const uint* sk, const int prog_base, const int prog_
         if (op == OP_AND) {
             stack[top - 2] = (char)(stack[top - 2] && stack[top - 1]);
             top -= 1;
+        } else if (op == OP_OR) {
+            stack[top - 2] = (char)(stack[top - 2] || stack[top - 1]);
+            top -= 1;
+        } else if (op == OP_REG) {
+            // A precondition group's own chain, paired with its program
+            // inside the Or closure (race_solver.rs:2267).
+            const double pos = sd[SD_POS + r];
+            const __global const uint* rg = sk + SK_REGIONS + SK_GSTRIDE * (int)nd[1];
+            int hit = 0;
+            for (int q = 0; q < (int)nd[2]; q++) {
+                const double s = as_double((ulong)rg[SK_GSTRIDE * q]
+                    | ((ulong)rg[SK_GSTRIDE * q + 1] << 32));
+                const double e = as_double((ulong)rg[SK_GSTRIDE * q + 2]
+                    | ((ulong)rg[SK_GSTRIDE * q + 3] << 32));
+                if (s <= pos && pos < e) {
+                    hit = 1;
+                    break;
+                }
+            }
+            stack[top++] = (char)hit;
         } else if (op == OP_TRUE) {
             stack[top++] = (char)(nd[1] != 0u);
         } else {
@@ -3834,11 +3885,44 @@ static double sk_word_f64(__global const uint* w) {
 // arm passes when the position sits in its runtime chain and its program
 // holds. Single records keep the plain program path (the engine's
 // extra_condition has no membership closures without an Or node).
+// The plan walk for records the host marked SK_FLAG_PLAN: no sampled term,
+// so every leaf is a pure read of the tick state and one false leaf settles
+// the whole chain. The emitter's postfix shape is push at slot 0 and slot 1,
+// then fold and push alternating, so the walk reads the push slots only and
+// never touches the fold slots or the kind word: the operand word tells a
+// constant (0 or 1) from a comparison leaf (feat * 8 + cmp, never below 8).
+static int sk_eval_plan(__global const uint* sk, const int prog_base, const int prog_len,
+    __global const double* wd, __global const uint* si, __global const double* shl,
+    __global const double* sd, __global const double* pd, __global const float* sf,
+    __global const uint* rs, __global const uint* sks, const int r, const int n,
+    const double distance) {
+    if (prog_len == 0) {
+        return 0;
+    }
+    for (int i = 0; i < prog_len; i = (i == 0) ? 1 : i + 2) {
+        const __global const uint* nd = sk + SK_PROGRAMS + SK_PSTRIDE * (prog_base + i);
+        const uint code = nd[1];
+        if (code < 8u) {
+            if (code == 0u) {
+                return 0;
+            }
+            continue;
+        }
+        const double arg = as_double((ulong)nd[2] | ((ulong)nd[3] << 32));
+        const double v = sk_feat_value(code, arg, wd, si, shl, sd, pd, sf, rs,
+            sk, sks, r, n, distance);
+        if (!sk_feat_cmp(code, v, arg, n)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int sk_eval_arms(__global const uint* sk, __global const uint* rd,
     __global double* wd, __global uint* sks, const int rec,
     __global const uint* si, __global const double* shl, __global const double* sd,
     __global const double* pd, __global const float* sf, __global const uint* rs,
-    const int r, const int n, const double distance) {
+    const int r, const int n, const double distance, const int plan) {
     const int narms = (int)rd[20];
     for (int a = 0; a < narms; a++) {
         const __global uint* ar = sk + SK_ARMS + SK_ASTRIDE * ((int)rd[21] + a);
@@ -3850,8 +3934,11 @@ static int sk_eval_arms(__global const uint* sk, __global const uint* rd,
         if (!sk_win_any(wd, SKD_ARMS + 2 * SK_WINMAX * a, nwin, pos)) {
             continue;
         }
-        if (sk_eval(sk, (int)ar[1], (int)ar[0], wd, si, shl, sd, pd, sf, rs, sks, r,
-            n, distance)) {
+        if (plan
+            ? sk_eval_plan(sk, (int)ar[1], (int)ar[0], wd, si, shl, sd, pd, sf, rs,
+                sks, r, n, distance)
+            : sk_eval(sk, (int)ar[1], (int)ar[0], wd, si, shl, sd, pd, sf, rs, sks, r,
+                n, distance)) {
             return 1;
         }
     }
@@ -4154,7 +4241,7 @@ static int sk_targets_heal(__global const uint* si, __global const uint* st,
 // (race_solver.rs:2504-2539, 2642-2648). A cross-target slot re-draws the fan
 // at its turn and takes the owner's value, which is exact for the kinds whose
 // delivery is one timer and one value in the receiver's order.
-static void aa_apply(__global const uint* sk, __global uint* scr, __global uint* rcb,
+static void aa_apply(__global const uint* sk, __global uint* sks, __global uint* scr, __global uint* rcb,
     __global uint* si,
     __global const uint* rs, __global double* sd, __global double* skd, __global uint* st,
     __global uint* bank,
@@ -4197,6 +4284,7 @@ static void aa_apply(__global const uint* sk, __global uint* scr, __global uint*
         : (sk_queued_kind(kind) || kind == SK_EFF_SETLANE
             || kind == SK_EFF_GOAL_OUT || kind == SK_EFF_GOAL_IN || kind == SK_EFF_IMMUNE)) {
         wda[SKD_EFF_T + slot] = adur < 0.0 ? -INFINITY : -adur;
+        sk_age_mark(sks, rec, slot);
     }
     int outs[RACE_MAXR];
     int nrecv = 1;
@@ -4324,7 +4412,7 @@ static void aa_event1(__global const uint* sk, __global uint* sks,
         }
     }
     for (int a = 0; a < na; a++) {
-        aa_apply(sk, scr, rcb, si, rs, sd, skd, st, bank, paired, n, r, a_rec[a], a_slot[a],
+        aa_apply(sk, sks, scr, rcb, si, rs, sd, skd, st, bank, paired, n, r, a_rec[a], a_slot[a],
             a_dur[a], dt, 1);
     }
 }
@@ -4393,7 +4481,7 @@ static void aa_turns(__global const uint* sk, __global uint* sks,
     for (int a = 0; a < na; a++) {
         // Turn deliveries run after every runner's prepare pass for the tick,
         // so no receiver's timer map is still un-stepped in front of them.
-        aa_apply(sk, scr, rcb, si, rs, sd, skd, st, bank, paired, n, r, a_rec[a], a_slot[a],
+        aa_apply(sk, sks, scr, rcb, si, rs, sd, skd, st, bank, paired, n, r, a_rec[a], a_slot[a],
             a_dur[a], 0.0f, retail);
     }
     if (aa_retire(sk, sks, skd, si, scr, sd, r)) {
@@ -4593,8 +4681,18 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
         }
         __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
         __global double* wd = skd + SKD_STRIDE * rec;
-        for (int w = SKD_EFF_T; w < SKD_STRIDE; w++) {
-            wd[w] = (double)(convert_float_rte((float)wd[w]) + dt);
+        const int eff_base = (int)rd[6];
+        const int n_eff = (int)rd[5];
+        // Only slots a fire or an arm wrote hold a timer, and SKR_EMASK
+        // marks those, so a never-written slot keeps its init 0.0.
+        const uint emask = sks[SKR_STRIDE * rec + SKR_EMASK];
+        if (emask != 0u) {
+            for (int w = 0; w < n_eff; w++) {
+                if ((emask & (1u << w)) == 0u) {
+                    continue;
+                }
+                wd[SKD_EFF_T + w] = (double)(convert_float_rte((float)wd[SKD_EFF_T + w]) + dt);
+            }
         }
         wd[SKD_INSTANCE] = (double)(convert_float_rte((float)wd[SKD_INSTANCE]) + dt);
         wd[SKD_RUN_T] = (double)(convert_float_rte((float)wd[SKD_RUN_T]) + dt);
@@ -4603,18 +4701,21 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
         // zero leaves every receiver's order, the caster's own included. The
         // current-speed kinds drain in their own reverse pass, which owns the
         // natural expiry impulse.
-        const int eff_base = (int)rd[6];
-        const int n_eff = (int)rd[5];
-        for (int e = 0; e < n_eff; e++) {
-            const int kind = (int)(sk + SK_EFFECTS)[SK_ESTRIDE * (uint)(eff_base + e)];
-            if (!sk_queued_kind(kind) || kind == SK_EFF_CURRENT
-                || kind == SK_EFF_CURRENT_NAT) {
-                continue;
-            }
-            if (wd[SKD_EFF_T + e] >= 0.0) {
-                const uint tok = SK_TOK_EFF((uint)rec, (uint)e);
-                for (int j = 0; j < n; j++) {
-                    sk_seq_remove(sk_seq(scr, kind) + j * SK_SEQN, tok);
+        if (emask != 0u) {
+            for (int e = 0; e < n_eff; e++) {
+                if ((emask & (1u << e)) == 0u) {
+                    continue;
+                }
+                const int kind = (int)(sk + SK_EFFECTS)[SK_ESTRIDE * (uint)(eff_base + e)];
+                if (!sk_queued_kind(kind) || kind == SK_EFF_CURRENT
+                    || kind == SK_EFF_CURRENT_NAT) {
+                    continue;
+                }
+                if (wd[SKD_EFF_T + e] >= 0.0) {
+                    const uint tok = SK_TOK_EFF((uint)rec, (uint)e);
+                    for (int j = 0; j < n; j++) {
+                        sk_seq_remove(sk_seq(scr, kind) + j * SK_SEQN, tok);
+                    }
                 }
             }
         }
@@ -4641,7 +4742,7 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
     for (int r = 0; r < n; r++) {
         aa_flip(sk, sks, skd, scr, r, dist_f);
     }
-    if (rcb[SCR_RC_ON] != 0u) {
+    if (rc_on(rcb) != 0u) {
         // The deactivate hook of lib.rs:688-723 pushes the pending tuple when
         // the last tracked entry of a (runner, id) leaves. The scan mirrors
         // that with the record timers, the kernel's live-entry ledger.
@@ -4690,22 +4791,33 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
     }
 }
 
-// skill_targets for the rank-window codes, the kakari group code and the
-// style group code: the first `limit` candidates in the engine's order. The
-// ahead code (9) slices the published order outward ahead of self, the behind
-// code (10) includes self then walks behind, the visible code (4) filters the
-// order by this tick's visible column, the group code (21) takes every runner
-// whose strategy equals limit and who is currently rushing, and the style code
-// (18) takes every runner whose strategy equals limit, uncapped and no rush
-// requirement (race_field.rs:439-445). The debuff same-team drop is applied by
-// the caller on this capped list, matching race_field.rs:458-461.
+// skill_targets for the rank-window codes, the kakari group code, the style
+// group code, the team code and the character code: the first `limit`
+// candidates in the engine's order. The ahead code (9) slices the published
+// order outward ahead of self, the behind code (10) includes self then walks
+// behind, the visible code (4) filters the order by this tick's visible
+// column, the group code (21) takes every runner whose strategy equals limit
+// and who is currently rushing, the style code (18) takes every runner whose
+// strategy equals limit, uncapped and no rush requirement
+// (race_field.rs:439-445), the team code (11) takes the owner's whole team,
+// owner included, only while the owner has a team, uncapped
+// (race_field.rs:454), and the character code (22) takes every runner whose
+// fixed chara id equals limit, owner included, uncapped
+// (race_field.rs:441). The debuff same-team drop is applied by the caller on
+// this capped list, matching race_field.rs:458-461.
 static int sk_targets(__global const uint* si, __global const uint* rs,
     __global const uint* scr, const int r, const int target, const int limit,
     const int n, int* outs) {
+    if (target == 7) {
+        // The engine's fallback arm (race_field.rs:455) hands code 7 an
+        // empty list, so the fire delivers to nobody.
+        return 0;
+    }
     const int rank = (int)si[SI_RANKCOL + r];
     const int vis_base = (int)(SCR_LISTS + (uint)r * LIST_STRIDE + RACE_MAXR);
     const int vis_len = (int)si[SI_L_VISN + r];
-    const int cap = (target == 21 || target == 18) ? RACE_MAXR : limit;
+    const int cap = (target == 21 || target == 18 || target == 11 || target == 22)
+        ? RACE_MAXR : limit;
     int cnt = 0;
     for (int k = 0; k < n && cnt < cap; k++) {
         int j;
@@ -4723,6 +4835,16 @@ static int sk_targets(__global const uint* si, __global const uint* rs,
             j = (int)rs[RS_ORDER + k];
             if (j == r || field_style((int)si[SI_STRATEGY + j]) != (limit == 5 ? 1 : limit)
                 || (target == 21 && !(int)si[SI_KAKARI + j])) {
+                continue;
+            }
+        } else if (target == 11) {
+            j = (int)rs[RS_ORDER + k];
+            if ((int)si[SI_TEAM + r] == 0 || si[SI_TEAM + j] != si[SI_TEAM + r]) {
+                continue;
+            }
+        } else if (target == 22) {
+            j = (int)rs[RS_ORDER + k];
+            if (si[SI_CHARA + j] != (uint)limit) {
                 continue;
             }
         } else {
@@ -4950,7 +5072,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
     __global uint* tgtp = 0;
     int tgt_res = 0;
     __global uint* tgt0 = 0;
-    if (rcb[SCR_RC_ON] != 0u && !sid0) {
+    if (rc_on(rcb) != 0u && !sid0) {
         tgt_res = 6 + n_eff * (1 + RACE_MAXR);
         __global uint* tgt = rc_take(rcb, st, SCR_RC_TGT, RC_TGT_CAP, tgt_res);
         if (tgt != 0) {
@@ -5081,11 +5203,13 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
                 if (sk_queued_kind(kind)) {
                     const double dur = convert_float_rte(scaled);
                     wd[SKD_EFF_T + e] = dur < 0.0 ? -INFINITY : -dur;
+                    sk_age_mark(sks, rec, e);
                 } else if (scaled > 0.0) {
                     // A delivered effect also leaves the caster a timed aux
                     // entry holding the skill id, which counts toward that
                     // id's remaining duration (race_solver.rs:2531-2534).
                     wd[SKD_EFF_T + e] = -(double)convert_float_rte(scaled);
+                    sk_age_mark(sks, rec, e);
                 }
                 int outs[RACE_MAXR];
                 int cnt;
@@ -5289,9 +5413,9 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
             // field. The engine rebuilds max hp only after the constructor
             // pass (hp.init follows the constructor fires) and on fan
             // delivery refresh (race_solver.rs:2644-2648); a mid-race self
-            // fire never touches it. A wisdom-gated constructor fire is
-            // already baked into the init seeds and hp, so it writes nothing.
-            if ((rd[2] & SK_FLAG_INIT_BUMP) == 0) {
+            // fire never touches it. A static fire, gated or not, is already
+            // baked into the init seeds and hp, so it writes nothing.
+            if ((rd[2] & (SK_FLAG_INIT_BUMP | SK_FLAG_BUMPED)) == 0) {
                 const float value = (float)sd[SD_STAM_A + r] + convert_float_rte(modifier);
                 sd[SD_STAM_A + r] = (double)value;
                 sd[SD_STAM + r] = fmin(fmax((double)value, 1.0), 2000.0);
@@ -5307,7 +5431,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
             // field, and engine :2562 moves raw_power beside it. The three
             // live physics consumers (target speed, lane movement, accel)
             // read horse.power afresh each tick, so the sf cache follows.
-            if ((rd[2] & SK_FLAG_INIT_BUMP) == 0) {
+            if ((rd[2] & (SK_FLAG_INIT_BUMP | SK_FLAG_BUMPED)) == 0) {
                 const float value = (float)sd[SD_HPP_A + r] + convert_float_rte(modifier);
                 sd[SD_HPP_A + r] = (double)value;
                 sd[SD_HPP + r] = fmin(fmax((double)value, 1.0), 2000.0);
@@ -5360,6 +5484,51 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
             }
             continue;
         }
+        if (kind == SK_EFF_ALLSTAT) {
+            // Engine :2569-2577 chains all five accumulators and fields,
+            // the raw pair beside stamina and power, as one effect. Static
+            // fires are host or init-bump baked words, so this arm carries
+            // the non-static fires; the spurt cache writes once after the
+            // guts chain, since the step head recomputes it from the final
+            // fields anyway.
+            if ((rd[2] & (SK_FLAG_INIT_BUMP | SK_FLAG_BUMPED)) == 0) {
+                float value = (float)sd[SD_HPS + r] + convert_float_rte(modifier);
+                sd[SD_HPS + r] = (double)value;
+                value = (float)sd[SD_STAM_A + r] + convert_float_rte(modifier);
+                sd[SD_STAM_A + r] = (double)value;
+                sd[SD_STAM + r] = fmin(fmax((double)value, 1.0), 2000.0);
+                sd[SD_RAWST + r] = fmax(sd[SD_RAWST + r] + modifier, 1.0);
+                if (init_pass != 0) {
+                    sk_hp_stamina_reset(si, sd, shl, pd, dist_f, r);
+                }
+                value = (float)sd[SD_HPP_A + r] + convert_float_rte(modifier);
+                sd[SD_HPP_A + r] = (double)value;
+                sd[SD_HPP + r] = fmin(fmax((double)value, 1.0), 2000.0);
+                sd[SD_RAWPW + r] = fmax(sd[SD_RAWPW + r] + modifier, 1.0);
+                sf[SF_ACCEL_BASE + r] = convert_float_rte(sd[SD_HPP + r]);
+                value = (float)sd[SD_HPG_A + r] + convert_float_rte(modifier);
+                sd[SD_HPG_A + r] = (double)value;
+                sd[SD_HPG + r] = fmin(fmax((double)value, 1.0), 2000.0);
+                sf[SF_BMIN_VAL + r] = phys_minimum_speed(pd,
+                    convert_float_rte(sd[SD_HPG + r]), dist_f);
+                const float speed = convert_float_rte(fmin(fmax(sd[SD_HPS + r], 1.0), 2000.0));
+                const int table[8] = {10500, 10000, 9000, 8000, 6000, 4000, 2000, 1000};
+                const float aptitude =
+                    convert_float_rte((float)table[(int)si[SI_DISTAPT + r]]) * 0.0001f;
+                sf[SF_SPURT_MAX + r] = convert_float_rte(phys_maximum_spurt_speed(pd, speed,
+                    (int)si[SI_STRATEGY + r], aptitude, dist_f, sk_powf_word(pd, sd[SD_HPG + r])));
+                if (init_pass != 0) {
+                    sf[SF_HPG + r] = sk_hp_guts_factor(pd, convert_float_rte(sd[SD_HPG + r]));
+                }
+                value = (float)sd[SD_HPW_A + r] + convert_float_rte(modifier);
+                sd[SD_HPW_A + r] = (double)value;
+                sd[SD_HPW + r] = fmin(fmax((double)value, 1.0), 2000.0);
+                if (init_pass != 0) {
+                    sf[SF_HPW + r] = convert_float_rte(sd[SD_HPW + r]);
+                }
+            }
+            continue;
+        }
         if (kind == SK_EFF_GOAL_OUT || kind == SK_EFF_GOAL_IN || kind == SK_EFF_IMMUNE) {
             // The engine keeps a timed aux entry for these kinds, and its
             // duration counts toward the id's remaining time
@@ -5367,6 +5536,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
             // an f32 value; the store keeps it raw.
             const double dur = scaled;
             wd[SKD_EFF_T + e] = dur < 0.0 ? -INFINITY : -dur;
+            sk_age_mark(sks, rec, e);
             sk_aux_arm(sd + (kind == SK_EFF_GOAL_OUT ? SD_GOAL_OUT
                 : (kind == SK_EFF_GOAL_IN ? SD_GOAL_IN : SD_IMMUNE)) + r, scaled);
             continue;
@@ -5377,6 +5547,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
             // (race_solver.rs:2545-2548).
             const double dur = scaled;
             wd[SKD_EFF_T + e] = dur < 0.0 ? -INFINITY : -dur;
+            sk_age_mark(sks, rec, e);
             if (!sk_goal_push(sd, r, convert_float_rte(modifier), scaled)) {
                 st[ST_FALLBACK] = 1u;
                 st[ST_ARG] = FB_SKILL_SEQ;
@@ -5394,6 +5565,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
         }
         const double dur = scaled;
         wd[SKD_EFF_T + e] = dur < 0.0 ? -INFINITY : -dur;
+        sk_age_mark(sks, rec, e);
         __global uint* q1 = sk_seq(scr, kind) + r * SK_SEQN;
         const uint tok = SK_TOK_EFF((uint)rec, (uint)e);
         if (sk_seq_find(q1, tok) < 0 && !sk_seq_push(q1, tok)) {
@@ -5408,7 +5580,7 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
     // live (runner, id) slot's ordinal, else takes the next sequence number
     // (lib.rs:660-682).
     __global uint* act = 0;
-    if (rcb[SCR_RC_ON] != 0u && !sid0) {
+    if (rc_on(rcb) != 0u && !sid0) {
         act = rc_take(rcb, st, SCR_RC_ACT, RC_ACT_CAP, 10);
     }
     if (act != 0) {
@@ -5555,6 +5727,11 @@ static void skills_fire(__global const uint* sk, __global uint* sks,
         }
         const __global const uint* od = sk + SK_RECORDS + SK_RSTRIDE * other;
         if ((int)od[0] != (int)rd[0] || (int)od[1] != r) {
+            continue;
+        }
+        // The follow-up arm keys its own cooldown (race_solver_builder.rs:589),
+        // so the plain group parks and wakes it never.
+        if (((od[2] ^ rd[2]) & SK_FLAG_FOLLOW) != 0u) {
             continue;
         }
         __global uint* os = sks + SKR_STRIDE * other;
@@ -5802,8 +5979,11 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
                 // The reservation fire bypasses the arms, the windows and the
                 // extra condition, so even a wisdom-failed retained primary
                 // fires once its shared key is ready (race_solver.rs:2263-2277).
-                const int key_ready = state == (uint)SK_S_READY
-                    || (state == (uint)SK_S_DISABLED && wd[SKD_COOLDOWN] >= 0.0);
+                // The constructor pass adds its field gate there: a record with
+                // a non-self effect waits for the loop (race_solver.rs:2265).
+                const int key_ready = (state == (uint)SK_S_READY
+                    || (state == (uint)SK_S_DISABLED && wd[SKD_COOLDOWN] >= 0.0))
+                    && (init_pass == 0 || (rd[2] & SK_FLAG_NO_FIELD) == 0u);
                 if (key_ready) {
                     const double gap = sd[SD_POS + (int)rs[RS_ORDER + 0]] - pos;
                     skills_fire(sk, sks, skd, scr, rcb, si, shl, sd, pd, sf, rs, rec, r,
@@ -5823,10 +6003,11 @@ static void skills_scan(__global const uint* sk, __global uint* sks,
                 continue;
             }
             if (!sk_eval_arms(sk, rd, wd, sks, rec, si, shl, sd, pd, sf, rs, r, n,
-                distance)) {
+                distance, (rd[2] & SK_FLAG_PLAN) != 0u)) {
                 continue;
             }
-            if (init_pass != 0 && (rd[2] & SK_FLAG_INIT_DEFER) != 0u) {
+            if (init_pass != 0
+                && (rd[2] & (SK_FLAG_INIT_DEFER | SK_FLAG_NO_FIELD)) != 0u) {
                 continue;
             }
             // The staminasyoubu extra condition (race_solver_builder.rs:833):

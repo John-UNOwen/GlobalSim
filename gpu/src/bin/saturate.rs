@@ -7,7 +7,7 @@
 //!
 //! Run (needs the Intel oneAPI LIB on the environment, and no other GPU or
 //! CPU-heavy jobs while it runs):
-//!   cargo run --release --features race --bin saturate -- [--request examples/cm-10701-race.jsonl] [--course ID] [--cpu-races 400] [--launches 3] [--max-races N]
+//!   cargo run --release --features race --bin saturate -- [--request examples/cm-10701-race.jsonl] [--course ID] [--cpu-races 400] [--launches 3] [--max-races N] [--compact]
 //!
 //! Workload: the first line of `--request` (a path from the repo root), run
 //! at seeds 1..N. The default is a real Champions Meeting race (course 10701,
@@ -21,6 +21,9 @@
 //! time, and prints each removal: a skill the refusal names, or, for a skill
 //! table overflow, the last skill of the runner holding the most. Both the
 //! CPU and the GPU then run the stripped request.
+//!
+//! With `--compact` every launched race keeps one frame row (the app's
+//! compact lane), and the slot model, guard comparison and sweep follow it.
 //!
 //! Columns:
 //! - kernel-only: back-to-back launches of the same buffers with one sync
@@ -45,10 +48,11 @@ struct Args {
     launches: usize,
     max_races: Option<usize>,
     strip_refused: bool,
+    compact: bool,
 }
 
 fn args() -> Result<Args, String> {
-    let mut a = Args { request: "examples/cm-10701-race.jsonl".into(), course: None, cpu_races: 400, launches: 3, max_races: None, strip_refused: false };
+    let mut a = Args { request: "examples/cm-10701-race.jsonl".into(), course: None, cpu_races: 400, launches: 3, max_races: None, strip_refused: false, compact: false };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("{flag} needs a value"));
@@ -58,6 +62,7 @@ fn args() -> Result<Args, String> {
             "--cpu-races" => a.cpu_races = value()?.parse().map_err(|e| format!("--cpu-races: {e}"))?,
             "--launches" => a.launches = value()?.parse().map_err(|e| format!("--launches: {e}"))?,
             "--strip-refused" => a.strip_refused = true,
+            "--compact" => a.compact = true,
             "--max-races" => a.max_races = Some(value()?.parse().map_err(|e| format!("--max-races: {e}"))?),
             other => return Err(format!("unknown flag {other}")),
         }
@@ -144,26 +149,28 @@ fn main() -> Result<(), String> {
         global_mem as f64 / (1u64 << 30) as f64, max_alloc as f64 / (1u64 << 30) as f64,
     );
 
-    let template = ctx.prepare(&request, 1)?;
+    let mut template = ctx.prepare(&request, 1)?;
     if let Some(reason) = template.host_fallback_reason() {
         return Err(format!("the workload falls back on the GPU: {reason}"));
     }
     let n = template.runners();
 
-    // Device bytes one race slot takes in a launch, and which buffer is the
-    // largest (it must fit one allocation). Scratch follows the record bucket,
-    // frames follow the course tick bound. The pd row and the skill table sit
-    // in the launch's request table, one row per distinct request (F1), so the
-    // sweep's repeated-request launch pays them once, not per race.
+    // One race slot in bytes. Scratch follows the record bucket, frames the
+    // course tick bound and the kept row count. The request table holds the
+    // pd row and skill table once per distinct request (F1), not per race.
     let rcap = race_exec::sk_rcap(template.records());
-    let frames = race_exec::course_tick_bound(template.course_distance()) * n * 6 * 8;
+    let tick_bound = race_exec::course_tick_bound(template.course_distance());
     let scr_u = race_exec::scr_u_words(rcap, false) * 4;
     let scr_d = race_exec::srl_words(rcap) * 8;
+    let tail = race_exec::RI_STRIDE * 4 + race_exec::ST_STRIDE * 4 + race_exec::EV_STRIDE * 4;
+    let slot = |rows: usize| tick_bound * rows * 6 * 8 + scr_u + scr_d + tail;
+    // With --compact the launched races keep one frame row, so the sweep
+    // sizes against that slot.
+    let rows = if a.compact { 1 } else { n };
+    let frames = tick_bound * rows * 6 * 8;
     let skw = globalsim_gpu::skills_compile::sk_stride_at(template.sk_emax(), template.sk_tmax());
     let req_table = race_exec::RIL_STRIDE * 8 + skw * 4;
-    let per_race = frames + scr_u + scr_d
-        + race_exec::RI_STRIDE * 4
-        + race_exec::ST_STRIDE * 4 + race_exec::EV_STRIDE * 4;
+    let per_race = slot(rows);
     let largest = frames.max(scr_u).max(scr_d);
     let by_memory = ((global_mem as f64 * 0.85 - req_table as f64) / per_race as f64) as usize;
     let by_alloc = (max_alloc as usize) / largest;
@@ -173,6 +180,22 @@ fn main() -> Result<(), String> {
         per_race as f64 / 1048576.0, frames as f64 / 1048576.0, scr_u as f64 / 1048576.0, scr_d as f64 / 1048576.0,
         req_table as f64 / 1048576.0, template.sk_emax(),
     );
+    // The frame block is the only region a launch shape changes, so the
+    // shapes differ in slot size alone.
+    for (label, r) in [("full frames", n), ("compact 1 row", 1), ("compact 2 rows", 2.min(n))] {
+        let s = slot(r);
+        let holds = ((global_mem as f64 * 0.85 - req_table as f64) / s as f64) as usize;
+        println!(
+            "shape {label} ({r} frame rows): slot {:.2} MiB (frames {:.2}), memory holds about {holds}",
+            s as f64 / 1048576.0,
+            (tick_bound * r * 6 * 8) as f64 / 1048576.0,
+        );
+    }
+    if a.compact {
+        if !template.set_frame_rows(&[0]) {
+            return Err("--compact: the template refused the one-row mask".into());
+        }
+    }
 
     // Correctness guard: the seed-1 race of a batched launch equals the CPU
     // engine frame for frame, so the timed launches run a known-good chain.
@@ -184,7 +207,20 @@ fn main() -> Result<(), String> {
             return Err(format!("guard: seed 1 fell back: {reason}"));
         }
         let cpu = dep_cpu::run_cpu_race(&request, 1)?;
-        let bits = |f: &Vec<Vec<[f64; 6]>>| f.iter().flatten().flatten().map(|v| v.to_bits()).collect::<Vec<u64>>();
+        // A compact launch returns only the kept rows, so the comparison
+        // reads those rows out of the CPU's full frames.
+        let kept = prepared[0].kept_frame_rows().to_vec();
+        let bits = |f: &Vec<Vec<[f64; 6]>>| -> Vec<u64> {
+            f.iter()
+                .flat_map(|tick| {
+                    if kept.is_empty() {
+                        tick.iter().flat_map(|v| v.map(|x| x.to_bits())).collect::<Vec<u64>>()
+                    } else {
+                        kept.iter().flat_map(|&r| tick[r].map(|x| x.to_bits())).collect::<Vec<u64>>()
+                    }
+                })
+                .collect()
+        };
         if bits(&race.frames) != bits(&cpu.frames) {
             return Err("guard: GPU seed 1 frames differ from the CPU engine".into());
         }
@@ -237,8 +273,8 @@ fn main() -> Result<(), String> {
         rate / cpu_all, s.upload_ms, s.launch_ms, s.readback_ms, s.decode_ms,
     );
 
-    // Fresh Prepared: run_prepared moves each race's geometry out on its way
-    // through the launch, so a second pass cannot reuse the first batch.
+    // Second pass on slices: each race carries its geometry as a shared Arc,
+    // so a launched Prepared can go through the launch again (F3).
     ctx.set_slice_policy(None);
     let mut prepared: Vec<race_exec::Prepared> = (1..=m as i32).map(|s| template.with_seed(s)).collect();
     let t = Instant::now();

@@ -322,20 +322,15 @@ fn app_traffic_answers_full_replies_byte_equal() {
 
 /// Skill ids the retail compiler refuses, normalized to the family the
 /// refusal names: the skill id is dropped, and a condition refusal keeps
-/// only the missing leaf behind the colon. Of the 751 ids, all but the
-/// over-four-arms shapes compile: the target-18, is_badstart,
-/// straight_front_type, lastspurt, last_straight_random, random_lot and
-/// is_exist_chara_id families left with the E1a port, the kakari fan and
-/// heal fan with X5, the advantage marks with X5's condition port, and the
-/// raceInactive carnival entries compile as installed no-ops.
-const RETAIL_REFUSALS: [&str; 1] = [
-    "condition has more than 4 arms",
-];
+/// only the missing leaf behind the colon. No id refuses on this roster:
+/// the 300101 chara fan compiles since the team and chara fans landed
+/// (race_field.rs:454, :441), dead arm or not.
+const RETAIL_REFUSALS: [&str; 0] = [];
 
 /// Drop the per-id prefix and the condition text so a refusal maps to its
 /// documented family: "skill 200131 condition '...': 'x'==1 is not ported"
 /// and "skill 200141 condition '...': 'x'==0 is not ported" both normalize
-/// to their leaf clause, and "skill 200401 condition has more than 4 arms"
+/// to their leaf clause, and "skill 200401 condition has more than 8 arms"
 /// to the bare sentence.
 fn refusal_family(id: &str, reason: &str) -> String {
     let mut family = reason.to_string();
@@ -396,10 +391,11 @@ fn every_merged_skill_compiles_or_refuses_by_name_retail() {
     assert!(unexpected.is_empty(), "undocumented retail refusals:\n{}", unexpected.join("\n"));
 }
 
-/// Classic counterparts of RETAIL_REFUSALS, same normalization. 453 of the
-/// 751 ids compile; the raceInactive carnival entries compile as installed
-/// no-ops on this lane too.
-const CLASSIC_REFUSALS: [&str; 51] = [
+/// Classic counterparts of RETAIL_REFUSALS, same normalization. The over-
+/// four-arms ids compile here too, cc_sk_init merges every arm immediately.
+/// 465 of the 751 ids compile; the raceInactive carnival entries compile as
+/// installed no-ops on this lane too.
+const CLASSIC_REFUSALS: [&str; 50] = [
     "'is_badstart'==0 is not ported",
     "'is_exist_chara_id'==1002 is not ported",
     "'is_other_character_activate_advantage_skill' needs the field's team-filtered previous-tick advantage pair set",
@@ -408,7 +404,6 @@ const CLASSIC_REFUSALS: [&str; 51] = [
     "'random_lot'==30 is not ported",
     "'random_lot'==50 is not ported",
     "'straight_front_type'==2 is not ported",
-    "condition has more than 4 arms",
     "condition term 'activate_count_all' reads live runtime state with no reader in the classic kernel",
     "condition term 'activate_count_end_after' reads live runtime state with no reader in the classic kernel",
     "condition term 'activate_count_heal' reads live runtime state with no reader in the classic kernel",

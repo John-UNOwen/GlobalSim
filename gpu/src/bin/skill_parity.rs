@@ -34,10 +34,17 @@
 //!   --trace             every field, side by side: the first full-reply
 //!                       channel whose content differs, then the engine's and
 //!                       the kernel's detail and target event streams
+//!   --check-unfired     also run one race per never-fired skill on the GPU:
+//!                       the skill did not fire on the CPU, so the GPU must not
+//!                       fire it either (bit-exact frames, no fallback)
+//!   --events ID         print the CPU skillDetailEvents of the first race the
+//!                       search tried for ID, to see what the engine reported
 //!
 //! Each skill ends as one of: match, diverge (first divergent tick), fallback
 //! (the GPU refused the race), refused (does not compile in any field), cap
-//! (compiles alone but overflows the field's tables), never fired.
+//! (compiles alone but overflows the field's tables), cpu error (the engine
+//! rejected every race the search built), never fired, and with
+//! --check-unfired, unfired diverge / unfired fallback.
 use globalsim_gpu::json::{self, Value};
 use globalsim_gpu::skills_compile::{self, ClassicExtras};
 use globalsim_gpu::{dep_cpu, full_reply, race_exec};
@@ -256,6 +263,8 @@ struct Opts {
     bisect: bool,
     reduce: bool,
     trace: bool,
+    check_unfired: bool,
+    events: Option<String>,
 }
 
 fn parse_args() -> Result<Opts, String> {
@@ -273,6 +282,8 @@ fn parse_args() -> Result<Opts, String> {
             "--bisect" => o.bisect = true,
             "--reduce" => o.reduce = true,
             "--trace" => o.trace = true,
+            "--check-unfired" => o.check_unfired = true,
+            "--events" => o.events = Some(val("--events")?),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => o.fields.push(x),
         }
@@ -286,7 +297,10 @@ fn parse_args() -> Result<Opts, String> {
 enum Outcome {
     Refused(String),
     Cap(String),
-    NeverFired,
+    // Every race the search built for the skill failed on the CPU.
+    CpuError(String),
+    // The first race the CPU ran without the skill firing, for --check-unfired.
+    NeverFired(Option<(usize, usize, i64)>),
     Cases(Vec<(usize, usize, i64)>), // (field, runner, seed)
 }
 
@@ -542,6 +556,8 @@ fn main() -> Result<(), String> {
         let mut refusals: Vec<String> = Vec::new();
         let mut caps: Vec<String> = Vec::new();
         let mut compiled_somewhere = false;
+        let mut probe: Option<(usize, usize, i64)> = None;
+        let mut cpu_err: Option<String> = None;
         'search: for extra in 0..=o.extra_seeds {
             let max_r = usable.iter().map(|&f| fields[f].runners).max().unwrap_or(0);
             for runner in 0..max_r {
@@ -565,7 +581,24 @@ fn main() -> Result<(), String> {
                         continue;
                     }
                     let seed = f.seed + extra;
-                    let Ok(cpu) = dep_cpu::run_cpu_race(&text_of(&req), seed) else { continue };
+                    // A failed CPU run used to be skipped silently, which made an
+                    // engine rejection look like a skill that never fired.
+                    let cpu = match dep_cpu::run_cpu_race(&text_of(&req), seed) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            cpu_err.get_or_insert(format!("{} runner {runner} seed {seed}: {e}", f.label));
+                            continue;
+                        }
+                    };
+                    if probe.is_none() {
+                        probe = Some((fi, runner, seed));
+                        if o.events.as_deref() == Some(id.as_str()) {
+                            println!("== events for {id}: {} runner {runner} seed {seed}", f.label);
+                            for (h, s, d, t) in &cpu.detail_events {
+                                println!("  horse {h} skill {s} detail {d} t {t}");
+                            }
+                        }
+                    }
                     let want: i64 = id.parse().unwrap_or(-1);
                     if cpu.detail_events.iter().any(|&(h, s, _, _)| h == runner && s == want) {
                         cases.push((fi, runner, seed));
@@ -589,8 +622,10 @@ fn main() -> Result<(), String> {
             Outcome::Refused(refusals[0].rsplit(": ").next().unwrap_or(&refusals[0]).to_string())
         } else if !compiled_somewhere {
             Outcome::Cap(caps.first().cloned().unwrap_or_default())
+        } else if probe.is_none() {
+            Outcome::CpuError(cpu_err.unwrap_or_default())
         } else {
-            Outcome::NeverFired
+            Outcome::NeverFired(probe)
         }
     });
     println!("search done, {:.0} s in", t0.elapsed().as_secs_f64());
@@ -598,10 +633,16 @@ fn main() -> Result<(), String> {
     // GPU check of every firing case.
     let mut flat: Vec<(usize, (String, i64))> = Vec::new();
     for (k, out) in outcomes.iter().enumerate() {
-        if let Outcome::Cases(cs) = out {
-            for &(fi, runner, seed) in cs {
-                flat.push((k, (text_of(&with_skill(&fields[fi], runner, &ids[k])), seed)));
+        match out {
+            Outcome::Cases(cs) => {
+                for &(fi, runner, seed) in cs {
+                    flat.push((k, (text_of(&with_skill(&fields[fi], runner, &ids[k])), seed)));
+                }
             }
+            Outcome::NeverFired(Some((fi, runner, seed))) if o.check_unfired => {
+                flat.push((k, (text_of(&with_skill(&fields[*fi], *runner, &ids[k])), *seed)));
+            }
+            _ => {}
         }
     }
     let reqs: Vec<(String, i64)> = flat.iter().map(|(_, r)| r.clone()).collect();
@@ -619,7 +660,14 @@ fn main() -> Result<(), String> {
         let (rank, kind, detail) = match &outcomes[k] {
             Outcome::Refused(r) => (2, "refused", r.clone()),
             Outcome::Cap(r) => (1, "cap", r.clone()),
-            Outcome::NeverFired => (3, "never fired", String::new()),
+            Outcome::CpuError(r) => (1, "cpu error", r.clone()),
+            Outcome::NeverFired(probe) => match (probe, per_skill.get(&k).and_then(|rs| rs.first())) {
+                (Some((fi, runner, seed)), Some(Err(e))) => {
+                    let kind = if e.starts_with("fallback") { "unfired fallback" } else { "unfired diverge" };
+                    (0, kind, format!("{} runner {runner} seed {seed}: {e}", fields[*fi].label))
+                }
+                _ => (3, "never fired", String::new()),
+            },
             Outcome::Cases(cs) => {
                 let rs = &per_skill[&k];
                 let bad: Vec<String> = cs

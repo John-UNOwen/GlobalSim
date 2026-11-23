@@ -461,7 +461,7 @@ static void sk_init_wis_bump(__global const uint* sk, __global const uint* sks,
         float value = convert_float_rte(as_float(rb[US_WISB]));
         for (int e = 0; e < (int)rd[5]; e++) {
             const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * ((int)rd[6] + e);
-            if ((int)ef[0] != 5) continue;
+            if ((int)ef[0] != 5 && (int)ef[0] != SK_EFF_ALLSTAT) continue;
             value += convert_float_rte(as_double((ulong)ef[6] | ((ulong)ef[7] << 32)));
         }
         rb[US_WISB] = as_uint(clamp_1_2000_f32(value));

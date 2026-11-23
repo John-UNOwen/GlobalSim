@@ -57,7 +57,7 @@ Suites:
 | --- | --- |
 | `lib` (28 tests) | Vendored engine tests pass inside this crate |
 | `reference_trace` | The in-crate runner reproduces `restricted_trace.json` from the Jax oracle byte-for-byte (CRLF normalized) |
-| `layout` | The three `repr(C)` kernel structs are 104/36/244 bytes with the exact field offsets, `kernel_params()` equals the engine's `Parameters` public methods for every scalar the kernel reads, and the 18-horse layout is pinned (`SK_STRIDE` 55,872 against the cap, `SCR_U_WORDS` 265,537 with the diag and reply-channel sizes, the record-bucket scratch, and the classic strides derived from the cap) |
+| `layout` | The three `repr(C)` kernel structs are 104/36/244 bytes with the exact field offsets, `kernel_params()` equals the engine's `Parameters` public methods for every scalar the kernel reads, and the 18-horse layout is pinned (`SK_STRIDE` 55,872 against the cap, `SCR_U_WORDS` 270,401 with the diag and reply-channel sizes, the record-bucket scratch, the classic strides derived from the cap, the define set each launch shape builds, and scratch offsets equal across shapes) |
 | `comparator` | No device needed: one injected wrong value in a fake GPU outcome reports exactly the injected tick, runner, field and both raw bit patterns, equal frames with a flag are not parity |
 | `gpu_gate` | See below |
 | `rng_gate` (gpu only) | See "RNG port" below |
@@ -144,14 +144,14 @@ independently of the runner count, and they are most of a race slot (see
 ## Full-device throughput (`saturate`)
 
 ```powershell
-cargo run --release --features race --bin saturate -- [--course 10504] [--cpu-races 400] [--launches 3] [--max-races N]
+cargo run --release --features race --bin saturate -- [--course 10504] [--cpu-races 400] [--launches 3] [--max-races N] [--compact]
 ```
 
 The other benches launch at most a few hundred races, one work item each,
 which leaves most of a GPU idle. `saturate` reads the device's global memory
 and largest allocation, sizes one race slot, and sweeps the launch width up to
 what memory holds (`GSIM_GPU_FRAME_BUDGET_MB` lifts the 512 MiB frame budget
-per launch for this). It prints kernel-only races per second at each width
+per launch for this, `--compact` runs the one-frame-row sampling shape of F4). It prints kernel-only races per second at each width
 (back-to-back launches, one sync), one end-to-end batch at the best width,
 and the CPU engine on one thread and on every core for the same request and
 seeds. A guard checks that a batched GPU seed 1 equals the CPU engine frame
@@ -246,6 +246,11 @@ The launch boundaries cost nothing measurable at this width. `slice_gate`
 pins that sliced frames are `to_bits`-equal to one-shot launches and to the
 CPU engine on the CM and v77 fields, including the case where the finish
 tick lands exactly on a slice boundary, and the whole suite runs sliced.
+
+The widest launch `saturate` runs is 4,338 races (the default cm-10701 field
+across seeds, widened to what device memory holds), measured after the
+arm-cap raise grew the per-race scratch: 17 slices, the slowest launch 577 ms,
+3.5x under the stock timeout, end to end 9.7 s, 0 flagged.
 
 The classic lane needed the same treatment: its frame budget caps one launch
 at 86 races (512 MiB), and measured launches at that width ran 819 ms
@@ -398,6 +403,43 @@ the launch stage fell 44% even though the launch grew by 468 races. The guard
 prints `GPU seed 1 matches the CPU engine frame for frame` with 0 flagged,
 sliced and unsliced, and `slice_gate` covers the sliced resume against the
 shared table.
+
+### F4: one race program per launch shape
+
+A launch knows what it will read back: a sampling launch reads frames only,
+a full launch reads the reply stream too, and `run_with_skill_scratch` wants
+the journal. The host builds one program per shape (`RaceShape` in
+`gpu.rs`, `from_flags` reads the chunk and the scratch flag per launch),
+`-D GSIM_NO_REPLY` compiles the reply channels out of the no-reply shapes
+(`rc_on` and `ri_full` fold to constants, the reply snapshot zeroing drops
+out), and the journal stays behind `SK_DIAG`. The program cache keys on
+`(emax, tmax, rcap, shape)`, and a compact frame-row mask changes frame
+memory only, so it reuses the sampling program.
+
+| shape | race slot | memory holds | sliced races/s |
+| --- | --- | --- | --- |
+| full reply | 2.33 MiB | 4,336 | 503.5 |
+| sampling, 1 frame row | 1.36 MiB | 7,423 | 559.7 at 6,144 |
+
+Per-race memory is the same in every shape (the journal and reply buffer
+were already outside the slot), the compact rows come from B1's frame
+memory, and the shape cut is the program itself: the sampling image is
+62,064 B smaller, and a no-reply launch skips the reply-buffer fill. The
+full shape compiles the byte-identical define string of the old program, so
+`sk_profile --full` keeps printing `full reply: bit-exact (1160590 bytes)`,
+and `shape_program_gate` runs one chain through the sampling, diag and full
+entry points and compares. `saturate --compact` sweeps the 1-row shape.
+
+### F5: program images on disk
+
+`GSIM_GPU_PROGRAM_CACHE=<dir>` stores each compiled race program under the
+directory and loads later ones with `clCreateProgramWithBinary`. The file
+name keys the kernel source and the build options, the header repeats them
+with the device name and driver version, and any mismatch rebuilds and
+rewrites. On this B580 the source build takes 8.8 ms and a reload 7.2 ms,
+Intel's driver cache being warm. `GSIM_GPU_PROGRAM_LOG=1` prints the cache
+hit and miss lines and the milliseconds each launch program took to become
+ready.
 
 ## Bench
 

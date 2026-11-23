@@ -83,3 +83,13 @@ required-features = ["race"]
 name = "skill_parity"
 path = "src/bin/skill_parity.rs"
 required-features = ["race"]
+
+[[bin]]
+name = "sk_profile"
+path = "src/bin/sk_profile.rs"
+required-features = ["race"]
+
+[[bin]]
+name = "lws_sweep"
+path = "src/bin/lws_sweep.rs"
+required-features = ["race"]

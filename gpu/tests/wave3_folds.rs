@@ -155,11 +155,22 @@ fn activation_history_folds() {
         "is_used_skill_id for an absent id",
     );
 
-    // The record's own activation is the only writer of its used bit, so the
-    // engine's self-referential gate is false forever.
-    is_dead(
+    // The follow-up arm reads the id group's fired bit, set when an
+    // alternative activates (race_solver.rs:2669). The classic kernel tracks
+    // no used bit, so the arm folds dead there.
+    is_live(
         &one_runner("is_activate_other_skill_detail==1"),
         "is_activate_other_skill_detail self gate",
+    );
+    is_dead(
+        &plan_root_classic(
+            &format!(
+                "\"550001\":{}",
+                alt("is_activate_other_skill_detail==1", 500000, &["{\"type\":10,\"target\":1,\"modifier\":0}"])
+            ),
+            r#"{"skills":["550001"]}"#,
+        ),
+        "is_activate_other_skill_detail on the classic lane",
     );
 }
 
@@ -284,5 +295,55 @@ fn still_refused_constructs_by_name() {
     refused(
         &one_runner("temptation_count_opponent_behind>=1"),
         "temptation_count_opponent_behind",
+    );
+}
+
+/// One alternative with a precondition, condition and effect list.
+fn alt_pre(pre: &str, cond: &str, effects: &[&str]) -> String {
+    format!(
+        "{{\"rarity\":1,\"wisdomCheck\":0,\"priority\":0,\"alternatives\":[{{\"precondition\":\"{pre}\",\"condition\":\"{cond}\",\"cooldown\":500000,\"baseDuration\":40000,\"effects\":[{}]}}]}}",
+        effects.join(",")
+    )
+}
+
+fn pre_plan(pre: &str) -> skills_compile::SkillsPlan {
+    plan_root(
+        &format!("\"550001\":{}", alt_pre(pre, "phase>=2", &["{\"type\":10,\"target\":1,\"modifier\":0}"])),
+        r#"{"skills":["550001"]}"#,
+    )
+}
+
+#[test]
+fn precondition_or_groups_fold_to_a_union() {
+    // The engine reads an '@' precondition as an Or over its groups. This
+    // course's distanceType matches only the second group, and that group
+    // folds true, so the watch latches across the whole course.
+    is_live(&pre_plan("distance_type==4&phase>=2@distance_type==3"), "true group union");
+    // Every group collapses and no alternative is built, the engine's skip.
+    is_dead(&pre_plan("distance_type==4&phase>=2@distance_type==4"), "all-false groups");
+    // Groups carrying dynamics pair their own chain with their own program,
+    // the engine's Or closure, so they compile.
+    is_live(&pre_plan("phase>=2@phase>=3"), "multi-group dynamics pair per group");
+}
+
+#[test]
+fn condition_dead_still_gates_unported_targets() {
+    // A condition that folds false inerts only the condition path. The record
+    // stays a random-activation candidate (race_solver.rs:2710-2711), fired
+    // with targets the engine draws fresh, so the target gate cannot be skipped.
+    // The same shape with the team fan behind it: the fan is ported, so the
+    // dead mirror still carries the random candidate.
+    let dead11 = plan_root(
+        &format!("\"550001\":{}", alt_pre("", "distance_type==4", &["{\"type\":27,\"target\":11,\"modifier\":1500}"])),
+        r#"{"skills":["550001"]}"#,
+    );
+    is_dead(&dead11, "the ported target 11 fan keeps the dead mirror");
+    // The dead mirror keeps its job for the effects the kernel can deliver.
+    is_dead(
+        &plan_root(
+            &format!("\"550001\":{}", alt_pre("", "distance_type==4", &["{\"type\":27,\"target\":1,\"modifier\":1500}"])),
+            r#"{"skills":["550001"]}"#,
+        ),
+        "self effect keeps the dead mirror",
     );
 }

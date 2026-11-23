@@ -220,7 +220,8 @@ pub struct CourseTables {
 /// per course followed by one overrun block per course. Lane-max and corner
 /// arrays are concatenated spans addressed through the course table.
 #[cfg(feature = "gpu")]
-pub fn course_tables(courses: &[FlatCourse]) -> CourseTables {
+pub fn course_tables<'a>(courses: impl IntoIterator<Item = &'a FlatCourse>) -> CourseTables {
+    let courses: Vec<&FlatCourse> = courses.into_iter().collect();
     let n_courses = courses.len();
     let mut cs: Vec<u32> = vec![0; n_courses * CS_STRIDE];
     let mut lm_b: Vec<f32> = Vec::new();
@@ -262,7 +263,7 @@ pub fn course_tables(courses: &[FlatCourse]) -> CourseTables {
     let mut sg_zd = Vec::with_capacity(2 * n_courses * NSEG);
     let mut sg_q = Vec::<f32>::with_capacity(8 * n_courses * NSEG);
     let mut sg_qd = Vec::<f32>::with_capacity(8 * n_courses * NSEG);
-    for co in courses {
+    for co in &courses {
         sg_x.extend_from_slice(&co.seg_x[..NSEG]);
         sg_xd.extend_from_slice(&co.seg_xd[..NSEG]);
         sg_z.extend_from_slice(&co.seg_z[..NSEG]);

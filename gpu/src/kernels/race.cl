@@ -276,7 +276,7 @@ static float race_step(__global uint* si, __global uint* scr, __global uint* rcb
         // The Conserve Power release rides the last-spurt transition.
         if (!was_spurting && (int)si[SI_SP_ACTIVE + r]) {
             // The engine captures the actual start pair at the transition.
-            if (rcb[SCR_RC_ON] != 0u) {
+            if (rc_on(rcb) != 0u) {
                 const ulong cbits = as_ulong(sd[SD_CLOCK + r]);
                 const ulong pbits = as_ulong(sd[SD_POS + r]);
                 st[ST_SPURTT0 + 2 * r] = (uint)cbits;
@@ -666,8 +666,10 @@ static int race_tick(__global uint* scr, __global uint* rcb, __global uint* si, 
     const float dist_f, const double section_length, const float pace_end_f,
     const float pm_range, const int pm_notfwd, const float dt, const int tick_cap) {
     // Diagnostics mirror: the journal helper stamps events with this tick.
+#ifdef SK_TICK_MIRROR
     scr[SK_JRN_T] = (uint)tick;
-    if (rcb[SCR_RC_ON] != 0u) {
+#endif
+    if (rc_on(rcb) != 0u) {
         // StyleLeaders::update over the cached ranks: the smallest-index
         // runner with the strictly smallest rank leads the style group.
         for (int j = 0; j < n; j++) {
@@ -874,7 +876,7 @@ static int race_tick(__global uint* scr, __global uint* rcb, __global uint* si, 
             si[SI_DASH + r] = 0u;
         }
     }
-    if (rcb[SCR_RC_ON] != 0u && tick >= 0) {
+    if (rc_on(rcb) != 0u && tick >= 0) {
         // The first frame whose step left the runner in the last spurt, and
         // PositioningScore::update: a phase change publishes the phase when
         // the runner led its style group at the cached ranks of this tick.
@@ -954,14 +956,20 @@ static int race_tick(__global uint* scr, __global uint* rcb, __global uint* si, 
     return 0;
 }
 
-/// The engine's constructor moves an enabled wisdom-gated record's self stat
-/// bumps into horse.stats before the hill, hp and seed reads. The engine
-/// chains every bump into the f32 accumulator (race_solver.rs:702) and the
-/// field is its clamp, so a later live fire reading the accumulator must not
-/// lose this bump: both the accumulator and the clamped field move here, the
-/// accumulator pre-seeded before the lottery. Replay that onto the stats
-/// output columns the whole race setup reads, once the lottery enabled the
-/// record.
+/// Engine add_stat_modifier: the accumulator chains in f32 from its seed
+/// (the unwritten field is the unwrap_or seed), the field then reads as the
+/// clamp of the accumulator.
+static void sk_bump_one(__global ulong* scol, __global double* sd, const int run,
+    const int slot, const int acc, const double modifier) {
+    double chain = sd[acc + run];
+    if (chain != chain) chain = (double)convert_float_rte(as_double(scol[slot]));
+    const float value = (float)chain + convert_float_rte(modifier);
+    sd[acc + run] = (double)value;
+    scol[slot] = as_ulong((double)clamp_1_2000_f32(value));
+}
+
+/// Replay the engine's constructor moves on an enabled wisdom-gated record's
+/// self stat bumps into horse.stats before the hill, hp and seed reads.
 static void sk_init_stat_bump(__global const uint* sk, __global const uint* sks,
     __global uint* scr, __global double* sd) {
     const int nrec = (int)sk[SK_NREC];
@@ -975,26 +983,30 @@ static void sk_init_stat_bump(__global const uint* sk, __global const uint* sks,
         for (int e = 0; e < (int)rd[5]; e++) {
             const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * ((int)rd[6] + e);
             const int kind = (int)ef[0];
+            const double modifier = as_double((ulong)ef[6] | ((ulong)ef[7] << 32));
+            // Engine :2569-2577 chains the five stats with the two raw
+            // fields beside them, one effect.
+            if (kind == SK_EFF_ALLSTAT) {
+                sk_bump_one(scol, sd, run, 7, SD_HPS, modifier);
+                sk_bump_one(scol, sd, run, 8, SD_STAM_A, modifier);
+                scol[5] = as_ulong(fmax(as_double(scol[5]) + modifier, 1.0));
+                sk_bump_one(scol, sd, run, 9, SD_HPP_A, modifier);
+                scol[6] = as_ulong(fmax(as_double(scol[6]) + modifier, 1.0));
+                sk_bump_one(scol, sd, run, 10, SD_HPG_A, modifier);
+                sk_bump_one(scol, sd, run, 11, SD_HPW_A, modifier);
+                continue;
+            }
             // Engine :2558 and :2562 move the raw stamina and power fields
             // at the same moment as the clamped field.
             if (kind == 2 || kind == 3) {
                 const int raw = kind == 2 ? 5 : 6;
-                scol[raw] = as_ulong(fmax(as_double(scol[raw])
-                    + as_double((ulong)ef[6] | ((ulong)ef[7] << 32)), 1.0));
+                scol[raw] = as_ulong(fmax(as_double(scol[raw]) + modifier, 1.0));
             }
             const int slot = kind == 1 ? 7 : kind == 2 ? 8 : kind == 3 ? 9 : kind == 4 ? 10 : kind == 5 ? 11 : -1;
             if (slot < 0) continue;
-            // Engine add_stat_modifier: the accumulator chains in f32 from its
-            // seed (the unwritten field is the unwrap_or seed), the field then
-            // reads as the clamp of the accumulator.
             const int acc = kind == 1 ? SD_HPS : kind == 2 ? SD_STAM_A : kind == 3 ? SD_HPP_A
                 : kind == 4 ? SD_HPG_A : SD_HPW_A;
-            double chain = sd[acc + run];
-            if (chain != chain) chain = (double)convert_float_rte(as_double(scol[slot]));
-            const float value = (float)chain
-                + convert_float_rte(as_double((ulong)ef[6] | ((ulong)ef[7] << 32)));
-            sd[acc + run] = (double)value;
-            scol[slot] = as_ulong((double)clamp_1_2000_f32(value));
+            sk_bump_one(scol, sd, run, slot, acc, modifier);
         }
     }
 }
@@ -1009,8 +1021,16 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
     __global const float* lm_l, __global const float* ce_b, __global const float* ce_e,
     __global const uint* ce_i, __global const uint* ce_f,
     __global const uint* sk_all, __global uint* events_all,
-    const uint tick_cap, const uint slice_end, const uint resume) {
+    const uint tick_cap, const uint slice_end, const uint resume,
+    const uint n_lanes) {
+    // A forced local work size pads the 1-D launch to a work-group multiple, so
+    // the tail group holds idle lanes past the real race count. They return
+    // here, before touching any buffer, and change no arithmetic: one work item
+    // is one whole race and lanes share no local memory or barriers.
     const int id = get_global_id(0);
+    if ((uint)id >= n_lanes) {
+        return;
+    }
     __global const uint* ri = ri_all + id * RI_STRIDE;
     // F1: the pd row and the skill table belong to the request, not the race.
     // The launch uploads one row per distinct request and points each slot at
@@ -1042,6 +1062,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         }
         // Full-reply exports start empty: the channel headers count from zero,
         // and the snapshot columns read as absent until the kernel writes them.
+#ifndef GSIM_NO_REPLY
         for (int r = 0; r < RACE_MAXR; r++) {
             st[ST_SNAPG0 + 2 * r] = 0u;
             st[ST_SNAPG0 + 2 * r + 1] = 0u;
@@ -1053,9 +1074,10 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             st[ST_SPURTD0 + 2 * r + 1] = 0u;
             st[ST_SPFIRST0 + r] = 0u;
         }
+#endif
         // The channel block only belongs to a full request. Other races share
         // the host's zero-filled sink block, so they must not write it.
-        if (ri[RI_FULL] != 0u) {
+        if (ri_full(ri) != 0u) {
             rcb[SCR_RC_ON] = ri[RI_FULL];
             rcb[SCR_RC_SEQ] = 0u;
             rcb[SCR_RC_RPT] = 0u;
@@ -1163,18 +1185,39 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             if (pd[base + PRD_BOOST_WIS] > 0.0) {
                 scol[11] = as_ulong(pd[base + PRD_BOOST_WIS]);
             }
+            // The construction StaminaUp, PowerUp and AllStatusUp fires also
+            // move the stamina and power fields and the raw pair, before the
+            // hp seed and the live seed block read any of them.
+            if (pd[base + PRD_BOOST_STAM] > 0.0) {
+                scol[8] = as_ulong(pd[base + PRD_BOOST_STAM]);
+            }
+            if (pd[base + PRD_BOOST_POWER] > 0.0) {
+                scol[9] = as_ulong(pd[base + PRD_BOOST_POWER]);
+            }
+            if (pd[base + PRD_RAW_STAM] == pd[base + PRD_RAW_STAM]) {
+                scol[5] = as_ulong(pd[base + PRD_RAW_STAM]);
+            }
+            if (pd[base + PRD_RAW_POWER] == pd[base + PRD_RAW_POWER]) {
+                scol[6] = as_ulong(pd[base + PRD_RAW_POWER]);
+            }
             // Seed the stat accumulators before the lottery-baked bumps move
             // the fields. The engine's add_stat_modifier chains every
             // construction fire into the f32 accumulator and a later live
             // fire recomputes the field from it, so a construction bump that
-            // only reached the field would vanish at that fire. Guts and
-            // wisdom carry the host's ungated chain, NaN when there is none;
-            // stamina and power start at the field, the unwrap_or seed.
+            // only reached the field would vanish at that fire. All five
+            // carry the host's ungated chain, NaN when there is none, and a
+            // NaN accumulator falls back to the field seed, the unwrap_or.
             sd[SD_HPS + r] = pd[base + PRD_SPEED_ACC];
             sd[SD_HPG_A + r] = pd[base + PRD_GUTS_ACC];
             sd[SD_HPW_A + r] = pd[base + PRD_WIS_ACC];
-            sd[SD_STAM_A + r] = (double)convert_float_rte(as_double(scol[8]));
-            sd[SD_HPP_A + r] = (double)convert_float_rte(as_double(scol[9]));
+            sd[SD_STAM_A + r] = pd[base + PRD_STAM_ACC];
+            if (sd[SD_STAM_A + r] != sd[SD_STAM_A + r]) {
+                sd[SD_STAM_A + r] = (double)convert_float_rte(as_double(scol[8]));
+            }
+            sd[SD_HPP_A + r] = pd[base + PRD_POWER_ACC];
+            if (sd[SD_HPP_A + r] != sd[SD_HPP_A + r]) {
+                sd[SD_HPP_A + r] = (double)convert_float_rte(as_double(scol[9]));
+            }
         }
 
         // One shared initialization block drives force offsets, delays, section
@@ -1309,6 +1352,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             si[SI_DISTAPT + r] = rb[RR_DISTAPT];
             si[SI_SUAPT + r] = rb[RR_SUAPT];
             si[SI_TEAM + r] = rb[RR_TEAM];
+            si[SI_CHARA + r] = rb[RR_CHARA];
             si[SI_RANK + r] = rb[RR_RANK];
             si[SI_PHASE + r] = 0u;
             si[SI_RPHASE + r] = 0u;
@@ -1599,17 +1643,19 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         // repeat, both mixed priority, so an activate_count gate that reads
         // short in the first sweep can fire in the repeat (race_solver.rs:1008-1022).
         if (sk_on) {
+#ifdef SK_TICK_MIRROR
             scr[SK_JRN_T] = 0u;
+#endif
             skills_scan(skt, sks, skd, scr, rcb, si, sd, shl, rs, pd, sf,
                 course_distance, -1, n, dist_f, 1, ev, st, bank, paired, 0);
             // The engine's constructor repeat pass runs with the startup flag on,
             // and its hook marks the ordinals those fires consume.
-            if (ri[RI_FULL] != 0u) {
+            if (ri_full(ri) != 0u) {
                 rcb[SCR_RC_RPT] = 1u;
             }
             skills_scan(skt, sks, skd, scr, rcb, si, sd, shl, rs, pd, sf,
                 course_distance, -1, n, dist_f, 1, ev, st, bank, paired, 1);
-            if (ri[RI_FULL] != 0u) {
+            if (ri_full(ri) != 0u) {
                 rcb[SCR_RC_RPT] = 0u;
             }
             // The engine's constructor fires precede enable_retail_runtime, so
@@ -1636,7 +1682,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             }
             sk_columns(skt, scr, sd, n);
         }
-        if (rcb[SCR_RC_ON] != 0u) {
+        if (rc_on(rcb) != 0u) {
             // The engine snapshots the two order keys from the live horse fields
             // after the constructor fires, before the startup pass can move them.
             for (int r = 0; r < n; r++) {

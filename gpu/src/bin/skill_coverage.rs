@@ -189,8 +189,9 @@ fn solo_request(base: &Value, id: &str, entry: &Value) -> Value {
     value
 }
 
-/// Solo-compile every id across all cores; the refusals come back in id order.
-fn solo_audit(base: &Value, ids: &[(String, Value)], course: &Value, extras: &ClassicExtras) -> Vec<Option<String>> {
+/// Solo-compile every id across all cores; the refusals come back in id order
+/// with each id's widest top-level '@' arm chain, even where a cap refused it.
+fn solo_audit(base: &Value, ids: &[(String, Value)], course: &Value, extras: &ClassicExtras) -> Vec<(Option<String>, usize)> {
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(ids.len().max(1));
     let chunk = ids.len().div_ceil(threads).max(1);
     std::thread::scope(|s| {
@@ -199,7 +200,10 @@ fn solo_audit(base: &Value, ids: &[(String, Value)], course: &Value, extras: &Cl
             .map(|part| {
                 s.spawn(move || {
                     part.iter()
-                        .map(|(id, entry)| skills_compile::plan_retail_with(&solo_request(base, id, entry), course, extras).reason)
+                        .map(|(id, entry)| {
+                            let plan = skills_compile::plan_retail_with(&solo_request(base, id, entry), course, extras);
+                            (plan.reason, plan.arms_max)
+                        })
                         .collect::<Vec<_>>()
                 })
             })
@@ -243,7 +247,7 @@ fn full_field(root: &Value, course: &Value, extras: &ClassicExtras) -> FieldStat
     let removed = strip_families.values().sum();
     let w = &plan.words;
     let usage = format!(
-        "{skills} skills, {removed} stripped, bucket {}/{}, records {}, effects {}, programs {}/{} (SK_PMAX), regions {}/{} (SK_GMAX), terms {}/{} (SK_MMAX), tags {} bytes used (cap {}), arms {}/{} (SK_AMAX)",
+        "{skills} skills, {removed} stripped, bucket {}/{}, records {}, effects {}, programs {}/{} (SK_PMAX), regions {}/{} (SK_GMAX), terms {}/{} (SK_MMAX), tags {} bytes used (cap {}), arms {}/{} (SK_AMAX), widest chain {} (cap {})",
         plan.emax,
         plan.tmax,
         w[SK_NREC],
@@ -258,6 +262,8 @@ fn full_field(root: &Value, course: &Value, extras: &ClassicExtras) -> FieldStat
         plan.tmax,
         plan.arms,
         SK_AMAX,
+        plan.arms_max,
+        SK_ARMMAX,
     );
     FieldStats { removed, tags: w[SK_NTAG], usage, strip_families, note }
 }
@@ -322,6 +328,8 @@ fn main() -> Result<(), String> {
 
             // id -> family -> the combinations it was refused on.
             let mut refused: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+            // Widest top-level '@' arm chain over the solo audit, with its id.
+            let mut widest = (0usize, String::new());
             let mut combos = 0usize;
             let mut peak: Option<(String, FieldStats)> = None;
             let mut strips: Vec<(String, FieldStats)> = Vec::new();
@@ -357,7 +365,10 @@ fn main() -> Result<(), String> {
                     let mut here = 0usize;
                     if !ids.is_empty() {
                         let base = solo_base(&sroot);
-                        for ((id, _), reason) in ids.iter().zip(solo_audit(&base, &ids, course, &extras)) {
+                        for ((id, _), (reason, arms_max)) in ids.iter().zip(solo_audit(&base, &ids, course, &extras)) {
+                            if arms_max > widest.0 {
+                                widest = (arms_max, id.clone());
+                            }
                             if let Some(r) = reason {
                                 here += 1;
                                 refused.entry(id.clone()).or_default().entry(refusal_family(id, &r)).or_default().push(label.clone());
@@ -411,6 +422,10 @@ fn main() -> Result<(), String> {
             } else {
                 print_histogram("  solo refusal histogram:", &families);
             }
+            println!(
+                "  widest top-level '@' arm chain over the solo audit: {} (skill {}), cap {}",
+                widest.0, widest.1, skills_compile::SK_ARMMAX
+            );
             if o.by_id || sweep {
                 println!("  refused ids:");
                 for (id, fams) in &refused {

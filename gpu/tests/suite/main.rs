@@ -10,6 +10,14 @@ mod par;
 
 #[path = "../app_preset_gate.rs"]
 mod app_preset_gate;
+#[path = "../allstat_gate.rs"]
+mod allstat_gate;
+#[path = "../engine_text_refusals_gate.rs"]
+mod engine_text_refusals_gate;
+#[path = "../empty_fan_gate.rs"]
+mod empty_fan_gate;
+#[path = "../phase_window_gate.rs"]
+mod phase_window_gate;
 #[path = "../advantage_fan_gate.rs"]
 mod advantage_fan_gate;
 #[path = "../badstart_gate.rs"]
@@ -32,6 +40,8 @@ mod dirt_pacemaker_gate;
 mod equivalence_gate;
 #[path = "../facade_gate.rs"]
 mod facade_gate;
+#[path = "../fan11_gate.rs"]
+mod fan11_gate;
 #[path = "../fold_gate.rs"]
 mod fold_gate;
 #[path = "../geometry_gate.rs"]
@@ -52,18 +62,28 @@ mod random_lot_gate;
 mod sampled_long_gate;
 #[path = "../chara_exist_gate.rs"]
 mod chara_exist_gate;
+#[path = "../chara_fan_dump.rs"]
+mod chara_fan_dump;
+#[path = "../dyn_pre_gate.rs"]
+mod dyn_pre_gate;
 #[path = "../coalesce_gate.rs"]
 mod coalesce_gate;
 #[path = "../layout.rs"]
 mod layout;
+#[path = "../lws_gate.rs"]
+mod lws_gate;
 #[path = "../paired_race_gate.rs"]
 mod paired_race_gate;
 #[path = "../parity_audit.rs"]
 mod parity_audit;
+#[path = "../plan_eval_gate.rs"]
+mod plan_eval_gate;
 #[path = "../powerup_gate.rs"]
 mod powerup_gate;
 #[path = "../preset_dump.rs"]
 mod preset_dump;
+#[path = "../request_cache_gate.rs"]
+mod request_cache_gate;
 #[path = "../race_diff.rs"]
 mod race_diff;
 #[path = "../reference_trace.rs"]
@@ -74,6 +94,10 @@ mod rng_gate;
 mod sk_emax_gate;
 #[path = "../sk_tmax_gate.rs"]
 mod sk_tmax_gate;
+#[path = "../shape_program_gate.rs"]
+mod shape_program_gate;
+#[path = "../sharp_turns_gate.rs"]
+mod sharp_turns_gate;
 #[path = "../sk_afterend_gate.rs"]
 mod sk_afterend_gate;
 #[path = "../skills_gate.rs"]
@@ -120,6 +144,10 @@ mod wave17_classic_drift;
 mod wave18_gate;
 #[path = "../wave19_overcap.rs"]
 mod wave19_overcap;
+#[path = "../wave20_cluster_dump.rs"]
+mod wave20_cluster_dump;
+#[path = "../wave20_followup_gate.rs"]
+mod wave20_followup_gate;
 #[path = "../wave1_folds.rs"]
 mod wave1_folds;
 #[path = "../wave1_gate.rs"]

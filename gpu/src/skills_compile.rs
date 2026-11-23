@@ -71,7 +71,12 @@ pub const SK_STRMAX: usize = 12;
 pub const SK_CORMAX: usize = 12;
 pub const SK_SLOPEMAX: usize = 16;
 pub const SK_REGMAX: usize = 16;
-pub const SK_ARMMAX: usize = 4;
+/// Top-level '@' arms per record, mirrored by the skills.cl SK_ARMMAX. The
+/// widest condition over the whole app table is 6 arms (the Sharp Turns trio
+/// 202241 to 202243, measured over all 1530 ids), so the cap sits at the
+/// next doubling and the runtime record blocks derive their arm areas from
+/// this constant on both sides.
+pub const SK_ARMMAX: usize = 8;
 /// One runner's random-activation pool bound. The reservation pass keeps the
 /// pool in per-race arrays this wide, so a wider pool is refused rather than
 /// truncated (race_solver.rs:2698-2717 walks an unbounded pending list).
@@ -160,6 +165,17 @@ pub const SK_FLAG_SYOUBU: u32 = 262144;
 /// collapses: one window past the course end, and the placeholder's cooldown is
 /// zero, not the wire's (race_solver_builder.rs:594-625).
 pub const SK_FLAG_AFTEREND: u32 = 524288;
+/// The retail scan may run this record's arm programs on the straight-line
+/// plan walk: live, and with no arm carrying a sampled term, so no leaf in
+/// any of its programs can consume a shared-stream draw.
+pub const SK_FLAG_PLAN: u32 = 1048576;
+/// The alternative is the engine's follow-up arm: its cooldown key carries
+/// the "#followup" suffix (race_solver_builder.rs:589), so it shares no
+/// cooldown state or timers with the plain records of the same skill id.
+pub const SK_FLAG_FOLLOW: u32 = 2097152;
+/// The alternative holds a non-self effect, so the fieldless constructor
+/// pass must not fire the record (race_solver.rs:2156, 2265, 2312).
+pub const SK_FLAG_NO_FIELD: u32 = 4194304;
 
 pub const SK_TERM_ALL_CORNER: u32 = 0;
 pub const SK_TERM_STRAIGHT: u32 = 1;
@@ -181,6 +197,7 @@ pub const SK_TERM_LOTTERY: u32 = 11;
 pub const OP_TRUE: u32 = 0;
 pub const OP_AND: u32 = 1;
 pub const OP_OR: u32 = 2;
+pub const OP_REG: u32 = 3;
 pub const OP_FEAT_I: u32 = 4;
 
 pub const FEAT_ORDER: u32 = 1;
@@ -304,6 +321,9 @@ pub struct SkillsPlan {
     pub tags_used: usize,
     /// Compiled condition-arm count, for coverage reports on SK_AMAX.
     pub arms: usize,
+    /// Widest top-level '@' arm chain seen in this field, counted even where
+    /// the per-record arm cap refused it, for the coverage sweep's cap sizing.
+    pub arms_max: usize,
 }
 
 /// A classic record whose trigger windows the builder rng resolves before
@@ -350,14 +370,14 @@ pub fn apply_classic_sampled(
 }
 
 pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
-    plan_lane(root, course, Lane::Retail, None, SK_EMAX, SK_TMAX)
+    plan_lane(root, course, Lane::Retail, None, SK_EMAX, SK_TMAX, true)
 }
 
 /// Compile against the classic (non-retail) runtime profile: the classic
 /// effect-value chain and durations, the classic condition leaves, and
 /// sampled leaves carried as host sampler jobs.
 pub fn plan_classic(root: &Value, course: &Value) -> SkillsPlan {
-    plan_lane(root, course, Lane::Classic, None, SK_EMAX, SK_TMAX)
+    plan_lane(root, course, Lane::Classic, None, SK_EMAX, SK_TMAX, false)
 }
 
 /// The classic host inputs the classic profile cannot re-derive from the
@@ -374,7 +394,7 @@ pub struct ClassicExtras {
 }
 
 pub fn plan_classic_with(root: &Value, course: &Value, extras: &ClassicExtras) -> SkillsPlan {
-    plan_lane(root, course, Lane::Classic, Some(extras), SK_EMAX, SK_TMAX)
+    plan_lane(root, course, Lane::Classic, Some(extras), SK_EMAX, SK_TMAX, false)
 }
 
 /// Compile against the retail profile with the host inputs the retail lane
@@ -383,8 +403,19 @@ pub fn plan_classic_with(root: &Value, course: &Value, extras: &ClassicExtras) -
 /// A field whose effects or tags pass the first bucket keeps escalating that
 /// cap's ladder, so one program usually serves every retail field.
 pub fn plan_retail_with(root: &Value, course: &Value, extras: &ClassicExtras) -> SkillsPlan {
+    plan_retail_with_plan(root, course, extras, true)
+}
+
+/// The retail plan with the SK_FLAG_PLAN marking switched, for the gate that
+/// runs a scene on the general stack walk with an otherwise identical table.
+pub fn plan_retail_with_plan(
+    root: &Value,
+    course: &Value,
+    extras: &ClassicExtras,
+    plan_enabled: bool,
+) -> SkillsPlan {
     let (mut e, mut t) = (0usize, 0usize);
-    let mut plan = plan_lane(root, course, Lane::Retail, Some(extras), SK_EMAX_BUCKETS[e], SK_TMAX_BUCKETS[t]);
+    let mut plan = plan_lane(root, course, Lane::Retail, Some(extras), SK_EMAX_BUCKETS[e], SK_TMAX_BUCKETS[t], plan_enabled);
     loop {
         if plan.effects_overflow && e + 1 < SK_EMAX_BUCKETS.len() {
             e += 1;
@@ -393,7 +424,7 @@ pub fn plan_retail_with(root: &Value, course: &Value, extras: &ClassicExtras) ->
         } else {
             return plan;
         }
-        plan = plan_lane(root, course, Lane::Retail, Some(extras), SK_EMAX_BUCKETS[e], SK_TMAX_BUCKETS[t]);
+        plan = plan_lane(root, course, Lane::Retail, Some(extras), SK_EMAX_BUCKETS[e], SK_TMAX_BUCKETS[t], plan_enabled);
     }
 }
 
@@ -404,6 +435,7 @@ fn plan_lane(
     extras: Option<&ClassicExtras>,
     emax: usize,
     tmax: usize,
+    plan_enabled: bool,
 ) -> SkillsPlan {
     let layout = sk_layout(emax, tmax);
     let mut c = Compiler {
@@ -421,6 +453,7 @@ fn plan_lane(
         neff: 0,
         nterm: 0,
         narm: 0,
+        arms_max: 0,
         team_stats: Vec::new(),
         lane,
         wisdom_on: false,
@@ -431,6 +464,7 @@ fn plan_lane(
         pack_seq: 0,
         classic_jobs: Vec::new(),
         drop_skill: false,
+        plan_enabled,
     };
     let skill_data = match root.get("skillData") {
         Some(v) => v,
@@ -606,6 +640,9 @@ struct Compiler {
     neff: usize,
     nterm: usize,
     narm: usize,
+    // Widest '@' group list seen, recorded before any arm cap refuses it, so
+    // the coverage sweep can size the cap from the real data.
+    arms_max: usize,
     // The engine's per-runner team stat totals (lib.rs PreparedRoster::new,
     // the retail_runtime branch), read by the value_usage 3 to 7 tier fold.
     team_stats: Vec<[f64; 5]>,
@@ -629,6 +666,10 @@ struct Compiler {
     // skill (lib.rs:728-739) and answers without it, so the runner loop
     // rolls the skill back and continues instead of refusing the race.
     drop_skill: bool,
+    // Retail only: mark draw-free live records SK_FLAG_PLAN so the kernel
+    // scan runs their arm programs on the straight-line plan walk. Tests
+    // turn it off to prove the walk transparent.
+    plan_enabled: bool,
 }
 
 fn f64_words(v: f64) -> [u32; 2] {
@@ -1351,6 +1392,7 @@ impl Compiler {
             tags_overflow: self.tags_overflow,
             tags_used: self.tags.len(),
             arms: self.narm,
+            arms_max: self.arms_max,
         }
     }
 
@@ -1457,6 +1499,27 @@ impl Compiler {
                 return;
             }
         };
+        // The retail builder scans every alternative's columns for this token
+        // before parsing (race_solver_builder.rs:501-509), and the race fails
+        // with the text quoted here. The classic lane registers a no-op name.
+        if self.lane != Lane::Classic {
+            for (index, alt) in alts.iter().enumerate() {
+                for (column, expression) in [
+                    ("condition", alt.get("condition").and_then(Value::as_str).unwrap_or("")),
+                    ("precondition", alt.get("precondition").and_then(Value::as_str).unwrap_or("")),
+                ] {
+                    if expression
+                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .any(|token| token == "is_exist_skill_id")
+                    {
+                        self.engine_error(format!(
+                            "skill {sid} detail {index}: unsupported {column} token is_exist_skill_id"
+                        ));
+                        return;
+                    }
+                }
+            }
+        }
         // The wisdom lottery draws once per cooldown key from one per-id rng
         // (builder :589, :1006-1011). Across two keys of one id the draws
         // follow the builder's reversed entry order, so a single-key id is
@@ -1574,6 +1637,10 @@ impl Compiler {
             // the main chain to the first precondition region's start, and checks
             // precondition membership plus its dynamics as a latched gate.
             let mut dead = false;
+            // Arm-folding dead only inerts the condition path. The record can
+            // still ride the random-activation lottery, where the engine
+            // re-targets from the definition regardless of the condition.
+            let mut arm_dead = false;
             // A lost classic wisdom draw leaves the entry unbuilt for this
             // runner (builder :1006-1011), which the dead record mirrors. The
             // per-(runner, key) lazy pick is one draw per id for the single
@@ -1651,54 +1718,176 @@ impl Compiler {
                         | FEAT_RTEMP..=FEAT_RTEMP_END | FEAT_DDRATE
                         | FEAT_DDTOPF | FEAT_VREMAIN)
                 });
+                // A '@' precondition is an Or over its groups: the engine
+                // pairs each group's chain with its program inside the
+                // combined closure (activation_conditions.rs:1454-1465).
+                // Static-only groups keep their chains and the vacuous
+                // program; a group with dynamics pairs its chain through an
+                // OP_REG leaf and the groups through OP_OR.
+                let multi = pre_terms.iter().skip(1).any(|t| t.or);
                 let mut pre_regions: Vec<(f64, f64)> = vec![(0.0, g.distance)];
-                for (t, leaf) in pre_terms.iter().zip(pre_leaves.iter()) {
-                    let next = match leaf {
-                        Leaf::True | Leaf::Dynamic { .. } => pre_regions.clone(),
-                        Leaf::False => Vec::new(),
-                        // The classic engine applies a sampled leaf's static
-                        // filter to the precondition chain and never samples
-                        // it: only condition triggers reach the sampler.
-                        Leaf::Sampled => match classic_sampled_regions(t, &g, &statics) {
-                            Ok(filt) => rmap_multi(&pre_regions, |r| {
-                                filt.iter().map(|b| intersect(*r, *b)).collect()
-                            }),
-                            Err(why) => {
-                                self.engine_error(why);
+                let mut pre_groups: Vec<(usize, usize)> = Vec::new();
+                let mut pre_chains: Vec<Vec<(f64, f64)>> = Vec::new();
+                let mut pre_dyn_groups = false;
+                if multi {
+                    pre_regions = Vec::new();
+                    for (i, t) in pre_terms.iter().enumerate() {
+                        if i == 0 || t.or {
+                            pre_groups.push((i, i + 1));
+                        } else {
+                            pre_groups.last_mut().unwrap().1 = i + 1;
+                        }
+                    }
+                    for &(gs, ge) in &pre_groups {
+                        let mut chain = vec![(0.0f64, g.distance)];
+                        for k in gs..ge {
+                            let next = match &pre_leaves[k] {
+                                Leaf::True => chain.clone(),
+                                Leaf::False => Vec::new(),
+                                Leaf::Region(list) => rmap_multi(&chain, |r| {
+                                    list.iter().map(|b| intersect(*r, *b)).collect()
+                                }),
+                                // A RegionDyn leaf restricts the chain AND
+                                // gates live, so its group needs the paired
+                                // program like any other dynamic group.
+                                Leaf::RegionDyn(list, _) => {
+                                    if self.lane == Lane::Classic {
+                                        self.unsupported(format!(
+                                            "skill {sid} precondition multi-group dynamics are not ported"
+                                        ));
+                                        return;
+                                    }
+                                    pre_dyn_groups = true;
+                                    rmap_multi(&chain, |r| {
+                                        list.iter().map(|b| intersect(*r, *b)).collect()
+                                    })
+                                }
+                                _ => {
+                                    if self.lane == Lane::Classic {
+                                        self.unsupported(format!(
+                                            "skill {sid} precondition multi-group dynamics are not ported"
+                                        ));
+                                        return;
+                                    }
+                                    pre_dyn_groups = true;
+                                    chain.clone()
+                                }
+                            };
+                            if next.len() > SK_REGMAX {
+                                self.unsupported(format!(
+                                    "skill {sid} precondition exceeds {SK_REGMAX} regions"
+                                ));
                                 return;
                             }
-                        },
-                        Leaf::Region(list) | Leaf::RegionDyn(list, _) => {
-                            rmap_multi(&pre_regions, |r| list.iter().map(|b| intersect(*r, *b)).collect())
+                            chain = next;
+                            if chain.is_empty() {
+                                break;
+                            }
                         }
-                    };
-                    if next.len() > SK_REGMAX {
+                        pre_chains.push(chain);
+                    }
+                    pre_regions = pre_chains.iter().flatten().copied().collect();
+                    if !pre_dyn_groups {
+                        pre_regions.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    }
+                    if pre_regions.len() > SK_REGMAX {
                         self.unsupported(format!(
                             "skill {sid} precondition exceeds {SK_REGMAX} regions"
                         ));
                         return;
                     }
-                    pre_regions = next;
+                } else {
+                    for (t, leaf) in pre_terms.iter().zip(pre_leaves.iter()) {
+                        let next = match leaf {
+                            Leaf::True | Leaf::Dynamic { .. } => pre_regions.clone(),
+                            Leaf::False => Vec::new(),
+                            // The classic engine applies a sampled leaf's static
+                            // filter to the precondition chain and never samples
+                            // it: only condition triggers reach the sampler.
+                            Leaf::Sampled => match classic_sampled_regions(t, &g, &statics) {
+                                Ok(filt) => rmap_multi(&pre_regions, |r| {
+                                    filt.iter().map(|b| intersect(*r, *b)).collect()
+                                }),
+                                Err(why) => {
+                                    self.engine_error(why);
+                                    return;
+                                }
+                            },
+                            Leaf::Region(list) | Leaf::RegionDyn(list, _) => {
+                                rmap_multi(&pre_regions, |r| list.iter().map(|b| intersect(*r, *b)).collect())
+                            }
+                        };
+                        if next.len() > SK_REGMAX {
+                            self.unsupported(format!(
+                                "skill {sid} precondition exceeds {SK_REGMAX} regions"
+                            ));
+                            return;
+                        }
+                        pre_regions = next;
+                    }
                 }
                 if pre_regions.is_empty() {
                     // The builder skips the whole alternative: continue, with no
                     // record to install.
                     dead = true;
                 } else {
-                    let push = self.push_regions(&pre_regions);
+                    let mut pre_spans: Vec<(u32, u32)> = Vec::new();
+                    let push = if multi && pre_dyn_groups {
+                        // Each group's chain stays contiguous so its OP_REG
+                        // leaf can point at its own run.
+                        let mut total = 0usize;
+                        let mut first = 0usize;
+                        for chain in &pre_chains {
+                            let (n, b) = self.push_regions(chain);
+                            if self.reason.is_some() {
+                                return;
+                            }
+                            if total == 0 {
+                                first = b;
+                            }
+                            total += n;
+                            pre_spans.push((b as u32, n as u32));
+                        }
+                        (total, first)
+                    } else {
+                        self.push_regions(&pre_regions)
+                    };
                     pre_n = push.0;
                     pre_reg_b = push.1;
                     seed = vec![(pre_regions[0].0, g.distance)];
                     let base = self.nprog;
-                    match emit_program(self, &pre_terms, &pre_leaves) {
-                        Ok(len) => {
-                            pre_prog_b = base;
-                            pre_prog_len = len;
+                    if multi && pre_dyn_groups {
+                        match emit_dyn_pre_program(self, &pre_terms, &pre_leaves, &pre_groups, &pre_spans) {
+                            Ok(len) => {
+                                pre_prog_b = base;
+                                pre_prog_len = len;
+                            }
+                            Err(why) => {
+                                self.nprog = base;
+                                self.unsupported(format!("skill {sid} precondition: {why}"));
+                                return;
+                            }
                         }
-                        Err(why) => {
-                            self.nprog = base;
-                            self.unsupported(format!("skill {sid} precondition: {why}"));
-                            return;
+                    } else if multi {
+                        // The chains carry every static group term, so the
+                        // group program is the vacuous truth.
+                        let at = self.layout.programs + SK_PSTRIDE * base;
+                        self.words[at] = OP_TRUE;
+                        self.words[at + 1] = 1;
+                        self.nprog += 1;
+                        pre_prog_b = base;
+                        pre_prog_len = 1;
+                    } else {
+                        match emit_program(self, &pre_terms, &pre_leaves) {
+                            Ok(len) => {
+                                pre_prog_b = base;
+                                pre_prog_len = len;
+                            }
+                            Err(why) => {
+                                self.nprog = base;
+                                self.unsupported(format!("skill {sid} precondition: {why}"));
+                                return;
+                            }
                         }
                     }
                 }
@@ -1719,6 +1908,7 @@ impl Compiler {
                     groups.last_mut().unwrap().1 = i + 1;
                 }
             }
+            self.arms_max = self.arms_max.max(groups.len());
             if groups.len() > SK_ARMMAX {
                 self.unsupported(format!(
                     "skill {sid} condition has more than {} arms",
@@ -1806,6 +1996,7 @@ impl Compiler {
                 // Every arm collapsed, so the union is empty and the builder
                 // skips the alternative.
                 dead = true;
+                arm_dead = true;
             }
             if !dead {
                 let pre_sig = if pre_trivial { String::new() } else { pre_text.to_string() };
@@ -1947,6 +2138,7 @@ impl Compiler {
             }
             if !dead && !arms.is_empty() && arms.iter().all(|a| a.1[0] & SK_ARM_DEAD != 0) {
                 dead = true;
+                arm_dead = true;
             }
 
             let arms_base = self.narm;
@@ -2140,26 +2332,30 @@ impl Compiler {
             }
             // Every term true with no precondition, random term or cooldown
             // fires once in the engine's constructor pass and is gone. Its
-            // 4/5/29 bumps are constants the init inputs already consume.
+            // self stat bumps are constants the init inputs already consume.
+            // Multi-arm conditions count too: a dead arm folds to False and
+            // contributes no window, so a live all-static record has one
+            // all-true arm, and !dead already says such an arm exists.
             let cooldown = alt.get("cooldown").and_then(Value::as_f64).unwrap_or(0.) / 10000.0;
             let static_core = !dead
                 && cooldown <= 0.0
                 && term_word == u32::MAX
                 && sampled_count == 0
-                && groups.len() <= 1
                 && pre_text.is_empty()
-                && leaves.iter().all(|l| matches!(l, Leaf::True));
+                && leaves.iter().all(|l| matches!(l, Leaf::True | Leaf::False));
             let static_fire = static_core && !wisdom;
             // The lottery decides a wisdom-gated constructor fire, which the
             // host cannot precompute, so the kernel bakes its self bumps after
-            // the roll. Kind 29 and non-1 value usages draw late and stay out.
+            // the roll. Kind 29 and non-1 value usages draw late and stay out;
+            // MultiplyStartDelay only scales the init delay draw, which the
+            // roll's own multiplier column already carries.
             let gated_static = static_core
                 && wisdom
                 && effect_list.iter().all(|ef| {
                     let k = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
                     let t = ef.get("target").and_then(Value::as_i64).unwrap_or(1) as i32;
                     let vu = ef.get("valueUsage").and_then(Value::as_f64).unwrap_or(1.0) as i32;
-                    matches!(k, 1..=5) && t == 1 && vu == 1
+                    (matches!(k, 1..=5 | 32) && t == 1 && vu == 1) || (k == 10 && t == 1)
                 });
             // The random-activation candidate filter keeps a record only when
             // every effect has a non-negative duration and a type past
@@ -2206,14 +2402,15 @@ impl Compiler {
                         && (!leaves[g.0..g.1].iter().any(|l| matches!(l, Leaf::Dynamic { .. }))
                             || leaves[g.0..g.1].iter().all(ctor_leaf))
                 });
+            // The constructor pass has no field, and a record there fires only
+            // when every effect targets the owner (race_solver.rs:2156).
+            let mut eff_non_self = false;
             for ef in effect_list {
                 let kind = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
                 if !matches!(kind, 1 | 2 | 3 | 4 | 5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 14
-                    | 21 | 22 | 27 | 28 | 29 | 31 | 35 | 36 | 37 | 38)
+                    | 21 | 22 | 27 | 28 | 29 | 31 | 32 | 35 | 36 | 37 | 38)
                 {
                     let reason = match kind {
-                        32 => "all-stat bump is a mid-race stat write with no kernel consumer"
-                            .to_string(),
                         33 | 34 => {
                             "has no SkillType variant (retail builder errors, no-ffi degrades to Noop)"
                         }
@@ -2224,6 +2421,7 @@ impl Compiler {
                     return;
                 }
                 let target = ef.get("target").and_then(Value::as_i64).unwrap_or(1) as i32;
+                eff_non_self |= target != 1;
                 // Target 18 fans to every runner of the targetValue style
                 // except the owner, uncapped, with the debuff filters
                 // (race_field.rs:439-461). The classic fan has no style branch.
@@ -2237,14 +2435,38 @@ impl Compiler {
                 // at targetValue (race_field.rs:442-453). The classic queue
                 // path delivers through the end-of-tick flush and stays refused.
                 let heal_fan = target == 23 && self.lane == Lane::Retail;
-                // The engine skips a dead alternative's effects before it even
-                // builds them (race_solver_builder.rs:556-571), so a folded-dead
-                // arm installs nothing and target 22 never runs. A live arm
-                // still refuses, keeping the fan off the kernel.
-                if !(dead || matches!(target, 1 | 4 | 9 | 10) || style_fan
-                    || (target == 21 && kind == 13) || kakari_fan || heal_fan) {
+                // An arm-folded record stays a random-activation candidate
+                // (race_solver.rs:2710-2711), so unported fans gate those too.
+                let ef_candidate = base_duration >= 0.0 && kind > 5 && kind != 32;
+                // Code 11 fans to every runner on the owner's team, owner
+                // included, code 22 to every runner with the targetValue
+                // chara id, both uncapped, both behind the debuff filter
+                // (race_field.rs:454, :441). The fans compare the carrier
+                // words, so a roster id past u32 refuses rather than aliasing.
+                let id_fan = matches!(target, 11 | 22) && self.lane == Lane::Retail;
+                if id_fan && !statics.ids_fit_u32 {
+                    self.unsupported(format!(
+                        "skill {sid} effect target {target}: a roster team or chara id \
+                         is outside the u32 carrier"
+                    ));
+                    return;
+                }
+                if !((dead && !(arm_dead && ef_candidate))
+                    || matches!(target, 1 | 4 | 9 | 10) || style_fan
+                    || (target == 21 && kind == 13) || kakari_fan || heal_fan || id_fan
+                    || (target == 7 && self.lane == Lane::Retail)) {
                     self.unsupported(format!(
                         "skill {sid} effect target {target} is not ported"
+                    ));
+                    return;
+                }
+                // A fan-delivered AllStatusUp re-runs as the receiver's five
+                // self bumps (race_field.rs:467-477), and the fan stat block
+                // carries the single-stat kinds only.
+                if kind == 32 && target != 1 && !dead {
+                    self.unsupported(format!(
+                        "skill {sid} effect target {target} on type 32: the all-stat bump \
+                         lands as five bumps on a fan receiver, which has no kernel arm"
                     ));
                     return;
                 }
@@ -2253,7 +2475,7 @@ impl Compiler {
                 // construction fire lands in a host bump below, a mid-race fire
                 // runs the engine's add_stat_modifier and refresh math in the
                 // kernel (race_solver.rs:2555-2565, :1330-1340).
-                if self.lane == Lane::Classic && matches!(kind, 13 | 36 | 37) && !dead {
+                if self.lane == Lane::Classic && matches!(kind, 13 | 32 | 36 | 37) && !dead {
                     self.unsupported(format!(
                         "skill {sid} type {kind} is not ported to the classic runtime"
                     ));
@@ -2344,17 +2566,18 @@ impl Compiler {
                     retail_skill_value(raw, multiplier)
                 };
                 let modifier = self.value_fold(runner, horse, value_usage, base_value);
-                // Mid-race guts fires move the live accumulator and field, and
-                // every guts-derived powf term (the spurt maximum, the duel and
-                // spot entry words) then recomputes from the field at read
-                // time. A construction-time self fire stays a baked constant.
-                if kind == 4 && !(static_fire && target == 1) && !dead {
+                // Mid-race guts writes move the live accumulator and field,
+                // and every guts-derived powf term (the spurt maximum, the
+                // duel and spot entry words) then recomputes from the field
+                // at read time. A construction-time self fire stays a baked
+                // constant.
+                if matches!(kind, 4 | 32) && !(static_fire && target == 1) && !dead {
                     self.live_guts = true;
                 }
                 if self.lane != Lane::Classic
                     && static_fire
                     && target == 1
-                    && matches!(kind, 1 | 4 | 5 | 29)
+                    && matches!(kind, 1 | 2 | 3 | 4 | 5 | 29 | 32)
                 {
                     self.bumps.push((runner, kind, modifier));
                     bumped = true;
@@ -2373,9 +2596,22 @@ impl Compiler {
                     }
                     bumped = true;
                 }
-                let target_value =
-                    ef.get("targetValue").and_then(Value::as_f64).unwrap_or(0.).max(0.0);
-                let target_value = target_value.min(SK_RMAX as f64) as u32;
+                let target_raw = ef.get("targetValue").and_then(Value::as_f64).unwrap_or(0.);
+                // Count and style codes cap targetValue at the roster. The
+                // chara fan compares the id word itself, so a value outside
+                // the u32 carrier refuses instead of wrapping to another id.
+                let target_value = if target == 22 && self.lane == Lane::Retail {
+                    if !(0.0..=u32::MAX as f64).contains(&target_raw) {
+                        self.unsupported(format!(
+                            "skill {sid} effect target 22 targetValue {target_raw} \
+                             is outside the u32 carrier"
+                        ));
+                        return;
+                    }
+                    target_raw as u32
+                } else {
+                    target_raw.max(0.0).min(SK_RMAX as f64) as u32
+                };
                 if !(base_duration >= 0.0 && kind > 5 && kind != 32) {
                     selig = false;
                 }
@@ -2434,6 +2670,7 @@ impl Compiler {
             // random-activation candidate (race_solver_builder.rs:594-625).
             let afterend =
                 dead && alt_index == 0 && self.lane != Lane::Classic && self.neff > eff_base;
+            let follow = condition.contains("is_activate_other_skill_detail");
             let at = SK_RECORDS + SK_RSTRIDE * self.nrec;
             self.words[at] = sid_num;
             self.words[at + 1] = runner as u32;
@@ -2454,7 +2691,11 @@ impl Compiler {
                 | (if gated_static { SK_FLAG_INIT_BUMP | SK_FLAG_BUMPED } else { 0 })
                 | (if unique { SK_FLAG_UNIQUE } else { 0 })
                 | (if dyn_gate { SK_FLAG_DYN } else { 0 })
-                | (if afterend { SK_FLAG_AFTEREND } else { 0 });
+                | (if afterend { SK_FLAG_AFTEREND } else { 0 })
+                | (if follow { SK_FLAG_FOLLOW } else { 0 })
+                | (if eff_non_self { SK_FLAG_NO_FIELD } else { 0 })
+                | (if self.plan_enabled && self.lane != Lane::Classic
+                    && !dead && term_word == u32::MAX { SK_FLAG_PLAN } else { 0 });
             self.words[at + 3] = priority as u32;
             self.words[at + 4] = rarity;
             self.words[at + 5] = (self.neff - eff_base) as u32;
@@ -3055,9 +3296,13 @@ fn level_multiplier(kind: i32, level: i64) -> f64 {
     const ACCEL: [f64; 11] = [1.00, 1.00, 1.02, 1.04, 1.06, 1.08, 1.10, 1.125, 1.15, 1.175, 1.20];
     const OTHER: [f64; 11] =
         [1.00, 1.00, 1.02, 1.04, 1.06, 1.08, 1.10, 1.12, 1.14, 1.16, 1.18];
+    // The engine folds the stat kinds, AllStatusUp included, through the
+    // stat table (race_solver_builder.rs:387-388).
+    const STAT: [f64; 11] = [1.00, 1.00, 1.01, 1.02, 1.03, 1.04, 1.05, 1.06, 1.07, 1.08, 1.10];
     match kind {
         27 => TARGET_SPEED[level],
         31 => ACCEL[level],
+        1..=5 | 32 => STAT[level],
         _ => OTHER[level],
     }
 }
@@ -3223,6 +3468,9 @@ struct Statics {
     sid_text: String,
     // Nonzero teams make the opponent counts differ from their plain ones.
     any_team: bool,
+    // Every roster teamId and charaId survives the u32 carrier words the
+    // team and chara fans compare, so neither can alias another runner.
+    ids_fit_u32: bool,
     // Wave-9c request folds. v_grade and v_time read the RaceParameters enums;
     // absent strings take the spec defaults "g1" and "midday" (lib.rs:284-285),
     // present unparsable ones fail the engine's own parse, so they refuse.
@@ -3267,10 +3515,14 @@ impl Statics {
         let mut chara_ids: Vec<i64> = Vec::new();
         let mut skill_count = 0i64;
         let mut any_team = false;
+        let mut ids_fit_u32 = true;
         if let Some(list) = root.get("horses").and_then(Value::as_array) {
             for other in list {
                 n_runners += 1;
                 let cid = other.get("charaId").and_then(Value::as_f64).unwrap_or(0.0) as i64;
+                let tid = other.get("teamId").and_then(Value::as_f64).unwrap_or(0.0) as i64;
+                ids_fit_u32 &= (0..=u32::MAX as i64).contains(&cid)
+                    && (0..=u32::MAX as i64).contains(&tid);
                 if !chara_ids.contains(&cid) {
                     chara_ids.push(cid);
                 }
@@ -3284,7 +3536,7 @@ impl Statics {
                     }
                     favorite_style = Some(code);
                 }
-                if other.get("teamId").and_then(Value::as_f64).unwrap_or(0.0) as i64 != 0 {
+                if tid != 0 {
                     any_team = true;
                 }
                 let mut holds = false;
@@ -3347,6 +3599,7 @@ impl Statics {
             sid: sid.parse::<u32>().unwrap_or(0) as f64,
             sid_text: sid.to_string(),
             any_team,
+            ids_fit_u32,
             grade: enum_code_or_default(root.get("grade").and_then(Value::as_str), grade_code, 100.0),
             race_time: enum_code_or_default(root.get("time").and_then(Value::as_str), time_code, 2.0),
             motivation: (horse
@@ -3683,6 +3936,10 @@ fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, Str
         "accumulatetime" => Ok(dyn_leaf(FEAT_CLOCK, t)),
         "activate_count_start" if t.op == 5 => Ok(dyn_leaf(FEAT_ACT0, t)),
         "activate_count_middle" if t.op == 5 => Ok(dyn_leaf(FEAT_ACT1, t)),
+        // The registry registers the gte filter only (activation_conditions.rs
+        // :1518), and every unregistered comparator runs the default error
+        // body at :48. Classic drops the skill, retail fails the race.
+        "activate_count_middle" => Err(engine_quote("unsupported comparison".to_string())),
         // The retail filter table only registers >= for the heal count and >
         // for the duel count, so other comparators stay refusals.
         "activate_count_heal" if t.op == 5 => Ok(dyn_leaf(FEAT_HEAL, t)),
@@ -3713,7 +3970,7 @@ fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, Str
         "corner" => Ok(dyn_leaf(FEAT_CORNER, t)),
         // v_corner_count is the course corner count (activation_conditions.rs
         // :1238), a course constant, and v_course_distance is its distance
-        // (:1239); both fold at compile.
+        // (:1239), both fold at compile.
         "corner_count" => Ok(fold(g.corners.len() as f64, t)),
         "course_distance" => Ok(fold(d, t)),
         // The retail sampler resolves the request argument to one corner row
@@ -3762,10 +4019,12 @@ fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, Str
         } else {
             Leaf::Dynamic { feat: FEAT_HEAL, cmp: 0, arg: Some(0.0) }
         }),
-        // The engine checks its own skill id in used_skills, and used_skills
-        // takes only self-fired ids. The record's first fire is the only way
-        // to set the bit, and the same gate blocks that fire, so the check
-        // is false forever and the record folds dead.
+        // The arm reads its own id from the runner's used_skills set
+        // (activation_conditions.rs:705, race_solver.rs:2669): SKR_USED is the
+        // fired record, so the follow-up lives once an alternative fired.
+        "is_activate_other_skill_detail" if t.op == 0 && t.arg == 1 && lane != Lane::Classic => {
+            Ok(Leaf::Dynamic { feat: FEAT_USED, cmp: 0, arg: Some(s.sid) })
+        }
         "is_activate_other_skill_detail" if t.op == 0 && t.arg == 1 => Ok(Leaf::False),
         // is_badstart keeps a live check on the runner's own start delay
         // against the engine's 0.08 s threshold (activation_conditions.rs:722-732).
@@ -3793,6 +4052,9 @@ fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, Str
         // lands in the roster's charaId set, missing ids counted as 0
         // (activation_conditions.rs:1584-1588, lib.rs:336). Only == and != are
         // registered, and the answer is request-constant.
+        // The engine registers this name as a pass-through no-op filter
+        // (activation_conditions.rs:1574), always true with no region change.
+        "is_exist_skill_id" if lane == Lane::Classic => Ok(Leaf::True),
         "is_exist_chara_id" if matches!(t.op, 0 | 1) && lane != Lane::Classic => {
             let hit = s.chara_ids.contains(&(t.arg as i64));
             Ok(if hit == (t.op == 0) { Leaf::True } else { Leaf::False })
@@ -3884,6 +4146,25 @@ fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, Str
         }
         "overtake_target_time" => Ok(dyn_leaf(FEAT_OTIME, t)),
         "phase" => Ok(dyn_leaf(FEAT_RPHASE, t)),
+        // The engine folds these phase windows as plain region filters
+        // (activation_conditions.rs:936-958), eq only; every other
+        // comparator runs the default error body, quoted as above.
+        name @ ("phase_firsthalf" | "phase_firstquarter" | "phase_laterhalf") => {
+            if t.op != 0 {
+                return Err(engine_quote("unsupported comparison".to_string()));
+            }
+            let start = phase_start(d, t.arg);
+            let end = phase_end(d, t.arg);
+            if start.is_nan() {
+                return Err(format!("'{name}' phase {} is outside the engine's 0..=3", t.arg));
+            }
+            let (lo, hi) = match name {
+                "phase_firstquarter" => (start, start + (end - start) / 4.0),
+                "phase_firsthalf" => (start, start + (end - start) / 2.0),
+                _ => ((start + end) / 2.0, end),
+            };
+            Ok(Leaf::Region(vec![(lo, hi)]))
+        }
         "popularity" => Ok(fold(s.popularity, t)),
         // The registry only registers eq, lte and gte immediate filters
         // (activation_conditions.rs:1020-1039, 1644-1648), and any other
@@ -4008,6 +4289,24 @@ fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, Str
         {
             Ok(Leaf::Sampled)
         }
+        // The retail init lottery scans every term name containing "random"
+        // before any parse (retail_initialization.rs:225), and sample_trigger
+        // fails these untraced names, failing the race (:193). The retail
+        // lane refuses with that error text; classic folds them as sampled.
+        "phase_firstquarter_random" | "phase_corner_random" | "phase_straight_random"
+        | "phase_first_half_straight_random" | "phase_latter_half_straight_random"
+        | "up_slope_random_later_half" | "run_at_full_speed_random"
+            if lane != Lane::Classic =>
+        {
+            // The lottery checks the operator before the name dispatch
+            // (retail_initialization.rs:226), so a non-eq form quotes the
+            // operator error, the eq form the trigger error.
+            Err(engine_quote(if t.op == 0 {
+                format!("Untraced retail random trigger: {}", t.name)
+            } else {
+                format!("Untraced retail random operator: {}{}", t.name, op_text(t.op))
+            }))
+        }
         "phase_random" | "phase_firsthalf_random" | "phase_laterhalf_random"
             if t.op == 0 && (0..=4).contains(&t.arg) =>
         {
@@ -4090,5 +4389,60 @@ fn emit_leaf(c: &mut Compiler, slot: usize, t: &Term, leaf: &Leaf) -> Result<(),
             c.words[at + 1] = if matches!(leaf, Leaf::False) { 0 } else { 1 };
         }
     }
+    Ok(())
+}
+
+/// A multi-group dynamic precondition program: each group pairs its own
+/// chain membership with its dynamic leaves, and the groups fold through
+/// OP_OR, exactly the engine's Or closure (activation_conditions.rs:1454-1465).
+/// Static leaves already sit in the chains, so they need no nodes.
+fn emit_dyn_pre_program(
+    c: &mut Compiler,
+    terms: &[Term],
+    leaves: &[Leaf],
+    groups: &[(usize, usize)],
+    spans: &[(u32, u32)],
+) -> Result<usize, String> {
+    let base = c.nprog;
+    let mut used = 0usize;
+    for (gi, &(gs, ge)) in groups.iter().enumerate() {
+        let (rb, rn) = spans[gi];
+        put_node(c, base, &mut used, OP_REG, rb, rn)?;
+        for k in gs..ge {
+            if !matches!(&leaves[k], Leaf::Dynamic { .. } | Leaf::RegionDyn(..)) {
+                continue;
+            }
+            if base + used >= SK_PMAX {
+                return Err("precondition program overflow".into());
+            }
+            emit_leaf(c, base + used, &terms[k], &leaves[k])?;
+            used += 1;
+            put_node(c, base, &mut used, OP_AND, 0, 0)?;
+        }
+        if gi > 0 {
+            // The running value merges with this group's pair: g0 g1 OR g2 OR.
+            put_node(c, base, &mut used, OP_OR, 0, 0)?;
+        }
+    }
+    c.nprog += used;
+    Ok(used)
+}
+
+fn put_node(
+    c: &mut Compiler,
+    base: usize,
+    used: &mut usize,
+    op: u32,
+    a: u32,
+    b: u32,
+) -> Result<(), String> {
+    if base + *used >= SK_PMAX {
+        return Err("precondition program overflow".into());
+    }
+    let at = c.layout.programs + SK_PSTRIDE * (base + *used);
+    c.words[at] = op;
+    c.words[at + 1] = a;
+    c.words[at + 2] = b;
+    *used += 1;
     Ok(())
 }

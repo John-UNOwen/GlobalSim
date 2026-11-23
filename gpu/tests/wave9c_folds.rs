@@ -403,8 +403,8 @@ fn stamina_up_lowers_on_the_record_owner_and_the_fan() {
         "cross StaminaUp",
     );
     // A static self fire with the bump kinds mixed in (the 210141 shape)
-    // lowers: kinds 4 and 5 take the host bump, kind 2 lands as an init-pass
-    // write.
+    // lowers: every self stat kind chains through the host bump in effect
+    // order, so the shared accumulators add in the engine's order.
     let plan = plan(
         &alt(
             "grade>=0",
@@ -416,7 +416,7 @@ fn stamina_up_lowers_on_the_record_owner_and_the_fan() {
     );
     is_live(&plan, "static kind 2 with 4 and 5");
     let kinds: Vec<i32> = plan.bumps.iter().map(|b| b.1).collect();
-    assert_eq!(kinds, vec![4, 5], "kind 2 rides the kernel write, not the host bump");
+    assert_eq!(kinds, vec![2, 4, 5], "every static self stat kind rides the host bump");
 }
 
 #[test]

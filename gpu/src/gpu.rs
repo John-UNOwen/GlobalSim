@@ -58,6 +58,45 @@ pub fn diag_build_options() -> String {
     format!("{} -D SK_DIAG", build_options())
 }
 
+/// The launch shape a race program is specialized for: the regions a launch
+/// can touch. `Full` carries the reply channels, `Diag` the journal window.
+/// Compact row masks change frame memory, not the program, so they need no
+/// variant. A shape with neither flag is the sampling (and compact) hot path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RaceShape {
+    /// No reply channels, no journal: the sampling and compact hot path.
+    Sampling,
+    /// Reply channels on: a batch that can carry full requests.
+    Full,
+    /// Journal on, channels off: the debug-scratch path.
+    Diag,
+    /// Journal and channels on.
+    FullDiag,
+}
+
+impl RaceShape {
+    /// The shape of a launch whose chunk carries full requests, debug-scratch
+    /// races, both or neither.
+    pub const fn from_flags(full: bool, diag: bool) -> RaceShape {
+        match (full, diag) {
+            (false, false) => RaceShape::Sampling,
+            (true, false) => RaceShape::Full,
+            (false, true) => RaceShape::Diag,
+            (true, true) => RaceShape::FullDiag,
+        }
+    }
+
+    /// True when the program keeps the full-reply channels.
+    pub const fn reply(self) -> bool {
+        matches!(self, RaceShape::Full | RaceShape::FullDiag)
+    }
+
+    /// True when the program keeps the diagnostics journal.
+    pub const fn journal(self) -> bool {
+        matches!(self, RaceShape::Diag | RaceShape::FullDiag)
+    }
+}
+
 /// The race program at one record bucket. The scratch regions size to
 /// `rcap`, and the top bucket keeps the default build options so the
 /// hot-path program is unchanged.
@@ -80,14 +119,21 @@ pub fn diag_bucket_build_options(rcap: usize) -> String {
     }
 }
 
-/// The race program for one full define set: the effect-cap bucket, the tag-cap
-/// bucket, the record bucket the scratch sizes to, and the journal in or out.
-/// The first tag bucket keeps the plain define set and its warm program.
-pub fn race_bucket_build_options(emax: usize, tmax: usize, rcap: usize, diag: bool) -> String {
-    let base = if diag {
+/// The race program for one full define set: the effect-cap bucket, the
+/// tag-cap bucket, the record bucket the scratch sizes to, and the launch
+/// shape's region defines. The first tag bucket keeps its warm program.
+pub fn race_bucket_build_options(
+    emax: usize, tmax: usize, rcap: usize, shape: RaceShape,
+) -> String {
+    let base = if shape.journal() {
         diag_bucket_build_options(rcap)
     } else {
         bucket_build_options(rcap)
+    };
+    let base = if shape.reply() {
+        base
+    } else {
+        format!("{base} -D GSIM_NO_REPLY")
     };
     let base = format!("{base} -D SK_EMAX={emax}");
     if tmax == crate::skills_compile::SK_TMAX {
@@ -95,6 +141,136 @@ pub fn race_bucket_build_options(emax: usize, tmax: usize, rcap: usize, diag: bo
     } else {
         format!("{base} -D SK_TMAX={tmax}")
     }
+}
+
+/// One line of cache or build chatter, printed only when
+/// `GSIM_GPU_PROGRAM_LOG` is set.
+fn program_log(line: &str) {
+    if std::env::var_os("GSIM_GPU_PROGRAM_LOG").is_some() {
+        eprintln!("{line}");
+    }
+}
+
+/// FNV-1a over the bytes, for cache file keys and the request cache keys in
+/// `race_exec` (entries keep the full text and verify it, so a collision
+/// costs a miss, never a wrong entry). Eight bytes a round, a wider mix.
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut chunks = bytes.chunks_exact(8);
+    for c in &mut chunks {
+        let word = u64::from_le_bytes(c.try_into().unwrap());
+        h = (h ^ word).wrapping_mul(PRIME);
+    }
+    for b in chunks.remainder() {
+        h = (h ^ *b as u64).wrapping_mul(PRIME);
+    }
+    h
+}
+
+/// The cache file for one option set, keyed by kernel source and options.
+pub fn program_cache_path(dir: &std::path::Path, options: &str) -> std::path::PathBuf {
+    dir.join(format!(
+        "race-{:016x}-{:016x}.bin",
+        fnv1a64(RACE_KERNEL_SOURCE.as_bytes()),
+        fnv1a64(options.as_bytes()),
+    ))
+}
+
+const PROGRAM_CACHE_MAGIC: &[u8; 8] = b"GSIMPC01";
+
+/// Write the program's device binaries plus everything that had to match to
+/// compile them. The file lands via a temp rename, so a killed process
+/// cannot leave a half image.
+fn write_program_binary(
+    path: &std::path::Path, device: &DeviceReport, options: &str, program: &Program,
+) -> Result<(), String> {
+    use ocl::core::{ProgramInfo, ProgramInfoResult};
+    let ProgramInfoResult::Binaries(bins) =
+        program.info(ProgramInfo::Binaries).map_err(|e| e.to_string())?
+    else {
+        return Err("driver gave no program binaries".into());
+    };
+    let mut out: Vec<u8> = Vec::new();
+    out.extend_from_slice(PROGRAM_CACHE_MAGIC);
+    for text in [&device.name, &device.driver_version, options] {
+        out.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        out.extend_from_slice(text.as_bytes());
+    }
+    out.extend_from_slice(&(RACE_KERNEL_SOURCE.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(bins.len() as u32).to_le_bytes());
+    for bin in &bins {
+        out.extend_from_slice(&(bin.len() as u64).to_le_bytes());
+        out.extend_from_slice(bin);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let temp = path.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::write(&temp, &out).map_err(|e| e.to_string())?;
+    std::fs::rename(&temp, path).map_err(|e| e.to_string())
+}
+
+/// One little-endian field of a cache file, advancing `p`. Truncation comes
+/// back as an error, so the caller rebuilds from source instead of panicking.
+fn cache_u32(bytes: &[u8], p: &mut usize) -> Result<u32, String> {
+    if bytes.len() < *p + 4 {
+        return Err("program cache file truncated".into());
+    }
+    let v = u32::from_le_bytes(bytes[*p..*p + 4].try_into().unwrap());
+    *p += 4;
+    Ok(v)
+}
+
+fn cache_u64(bytes: &[u8], p: &mut usize) -> Result<u64, String> {
+    if bytes.len() < *p + 8 {
+        return Err("program cache file truncated".into());
+    }
+    let v = u64::from_le_bytes(bytes[*p..*p + 8].try_into().unwrap());
+    *p += 8;
+    Ok(v)
+}
+
+fn cache_text(bytes: &[u8], p: &mut usize) -> Result<String, String> {
+    let n = cache_u32(bytes, p)? as usize;
+    if bytes.len() < *p + n {
+        return Err("program cache file truncated".into());
+    }
+    let s = String::from_utf8_lossy(&bytes[*p..*p + n]).into_owned();
+    *p += n;
+    Ok(s)
+}
+
+/// Read a cached image back, refusing anything that does not carry this
+/// device, driver, kernel source and option set.
+fn parse_program_binary(
+    bytes: &[u8], device: &DeviceReport, options: &str,
+) -> Result<Vec<Vec<u8>>, String> {
+    if bytes.len() < 8 || &bytes[..8] != PROGRAM_CACHE_MAGIC {
+        return Err("not a program cache file".into());
+    }
+    let mut p = 8usize;
+    if cache_text(bytes, &mut p)? != device.name
+        || cache_text(bytes, &mut p)? != device.driver_version
+        || cache_text(bytes, &mut p)? != options
+    {
+        return Err("device, driver or options differ from the saved image".into());
+    }
+    let src_len = cache_u64(bytes, &mut p)? as usize;
+    if src_len != RACE_KERNEL_SOURCE.len() {
+        return Err("kernel source length differs from the saved image".into());
+    }
+    let n_bins = cache_u32(bytes, &mut p)? as usize;
+    let mut bins = Vec::with_capacity(n_bins.min(8));
+    for _ in 0..n_bins {
+        let n = cache_u64(bytes, &mut p)? as usize;
+        if bytes.len() < p + n {
+            return Err("program cache file truncated".into());
+        }
+        bins.push(bytes[p..p + n].to_vec());
+        p += n;
+    }
+    Ok(bins)
 }
 // The classic lane carries the bit-exact powf table for the mid-race stat
 // refresh (race_solver.rs:1330-1340 recomputes the guts and power derived
@@ -117,8 +293,10 @@ pub const CLASSIC_KERNEL_SOURCE: &str = concat!(
 const CL_DEVICE_NAME: u32 = 0x102B;
 const CL_DEVICE_EXTENSIONS: u32 = 0x1030;
 const CL_DEVICE_MAX_COMPUTE_UNITS: u32 = 0x1002;
+const CL_DEVICE_MAX_WORK_GROUP_SIZE: u32 = 0x1004;
 const CL_DEVICE_SINGLE_FP_CONFIG: u32 = 0x101B;
 const CL_DEVICE_DOUBLE_FP_CONFIG: u32 = 0x1032;
+const CL_DEVICE_DRIVER_VERSION: u32 = 0x102D;
 const CL_FP_DENORM: u64 = 0x1;
 const CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT: u64 = 0x80;
 
@@ -142,7 +320,9 @@ fn read_string(device: &Device, param: u32) -> Result<String, String> {
 pub struct DeviceReport {
     pub platform: String,
     pub name: String,
+    pub driver_version: String,
     pub compute_units: u64,
+    pub max_work_group_size: u64,
     pub single_fp_config: u64,
     pub double_fp_config: u64,
 }
@@ -182,7 +362,9 @@ fn candidates() -> Result<(Vec<Candidate>, Vec<(String, String)>), String> {
             let report = DeviceReport {
                 platform: platform_name.clone(),
                 name: name.clone(),
+                driver_version: read_string(&device, CL_DEVICE_DRIVER_VERSION).unwrap_or_else(|_| "unknown".into()),
                 compute_units: read_u64(&device, CL_DEVICE_MAX_COMPUTE_UNITS).unwrap_or(0),
+                max_work_group_size: read_u64(&device, CL_DEVICE_MAX_WORK_GROUP_SIZE).unwrap_or(0),
                 single_fp_config: read_u64(&device, CL_DEVICE_SINGLE_FP_CONFIG).unwrap_or(0),
                 double_fp_config: read_u64(&device, CL_DEVICE_DOUBLE_FP_CONFIG).unwrap_or(0),
             };
@@ -206,6 +388,7 @@ fn candidates() -> Result<(Vec<Candidate>, Vec<(String, String)>), String> {
 pub struct Spike {
     queue: Queue,
     context: ocl::Context,
+    core_device: Device,
     program: Program,
     pub device: DeviceReport,
     pub build_ms: f64,
@@ -224,6 +407,7 @@ impl Spike {
             }
             return Err(message);
         };
+        let core_device = device.clone();
         let context = ocl::Context::builder()
             .platform(platform)
             .devices(device.clone())
@@ -241,6 +425,7 @@ impl Spike {
         Ok(Spike {
             queue,
             context,
+            core_device,
             program,
             device: report,
             build_ms,
@@ -259,14 +444,58 @@ impl Spike {
     }
 
     /// The race program for one (effect-cap bucket, tag-cap bucket, record
-    /// bucket, journal) define set, so the kernel's table offsets and scratch
-    /// regions match a table the compiler packed and sized for those buckets.
-    pub fn build_race_program(&self, emax: usize, tmax: usize, rcap: usize, diag: bool) -> Result<Program, String> {
+    /// bucket, launch shape) define set, so the kernel's table offsets,
+    /// scratch regions and shape regions match what the compiler packed and
+    /// sized for them.
+    pub fn build_race_program(
+        &self, emax: usize, tmax: usize, rcap: usize, shape: RaceShape,
+    ) -> Result<Program, String> {
+        self.build_race_program_with(race_bucket_build_options(emax, tmax, rcap, shape))
+    }
+
+    fn build_race_program_with(&self, options: String) -> Result<Program, String> {
         Program::builder()
-            .cmplr_opt(race_bucket_build_options(emax, tmax, rcap, diag))
+            .cmplr_opt(options)
             .source(RACE_KERNEL_SOURCE)
             .build(&self.context)
             .map_err(|e| e.to_string())
+    }
+
+    /// The race program for one define set, served from the program binary
+    /// disk cache when `GSIM_GPU_PROGRAM_CACHE` names a directory. A stored
+    /// image reloads only when the device name, driver version, kernel source
+    /// and build options match what it was compiled from. A missing, stale or
+    /// rejected file falls back to the source build and rewrites the cache.
+    pub fn build_race_program_cached(
+        &self, emax: usize, tmax: usize, rcap: usize, shape: RaceShape,
+    ) -> Result<Program, String> {
+        let options = race_bucket_build_options(emax, tmax, rcap, shape);
+        let cache_dir = match std::env::var_os("GSIM_GPU_PROGRAM_CACHE") {
+            Some(dir) if !dir.is_empty() => std::path::PathBuf::from(dir),
+            _ => return self.build_race_program_with(options),
+        };
+        let path = program_cache_path(&cache_dir, &options);
+        match self.load_program_binary(&path, &options) {
+            Ok(program) => {
+                program_log(&format!("program cache hit: {}", path.display()));
+                return Ok(program);
+            }
+            Err(e) => program_log(&format!("program cache miss, {e}: {}", path.display())),
+        }
+        let program = self.build_race_program_with(options.clone())?;
+        if let Err(e) = write_program_binary(&path, &self.device, &options, &program) {
+            program_log(&format!("program cache write failed, {e}"));
+        }
+        Ok(program)
+    }
+
+    fn load_program_binary(&self, path: &std::path::Path, options: &str) -> Result<Program, String> {
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        let mut bins = parse_program_binary(&bytes, &self.device, options)?;
+        let refs: Vec<&[u8]> = bins.iter_mut().map(|b| b.as_slice()).collect();
+        let device = self.core_device.clone();
+        let no_opts = std::ffi::CString::new("").map_err(|e| e.to_string())?;
+        Program::with_binary(&self.context, &[device], &refs, &no_opts).map_err(|e| e.to_string())
     }
 
     pub fn kernel_build_failures(&self) -> u32 {

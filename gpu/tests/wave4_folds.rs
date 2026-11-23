@@ -121,16 +121,24 @@ fn lane_goal_kinds_compile_both_directions() {
 
 #[test]
 fn kakari_allstat_and_variantless_kinds_refuse_by_name() {
-    // 13 replaces the rush forced-end and ports; 32 is a mid-race all-stat
-    // bump, 33 and 34 have no SkillType variant at all.
+    // 13 replaces the rush forced-end and ports; 33 and 34 have no SkillType
+    // variant at all; 32 on a self target lowers now the bump bake and the
+    // live arm consume it, while its fan delivery stays refused.
     is_live(
         &one_runner("order>=2", 500000, &[r#"{"type":13,"target":1,"modifier":5000}"#]),
         "kakari extend",
     );
-    refused(
+    is_live(
         &one_runner("order>=2", 500000, &[r#"{"type":32,"target":1,"modifier":5000}"#]),
-        "all-stat bump",
+        "all-stat self",
     );
+    for target in [4i64, 9, 10] {
+        let effect = format!("{{\"type\":32,\"target\":{target},\"modifier\":1000}}");
+        refused(
+            &one_runner("order>=2", 500000, &[effect.as_str()]),
+            "five bumps",
+        );
+    }
     for kind in [33i64, 34] {
         let effect = format!("{{\"type\":{kind},\"target\":1,\"modifier\":1000}}");
         refused(

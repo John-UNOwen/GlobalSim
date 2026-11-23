@@ -20,24 +20,24 @@ fn default_layout_sizes_to_the_eighteen_horse_field() {
     // The default race program compiles the journal out, the diag variant
     // carries its 16,384-word window. The reply channels live in their own
     // rc buffer, outside the scratch stride, sized only for full requests.
-    assert_eq!(re::SCR_U_WORDS, 265601);
-    assert_eq!(re::SCR_U_WORDS_DIAG, 281985);
+    assert_eq!(re::SCR_U_WORDS, 270465);
+    assert_eq!(re::SCR_U_WORDS_DIAG, 286849);
     assert_eq!(re::RC_WORDS, 100892);
-    // Scratch follows the record bucket, 244 u32 words and 276 doubles per
+    // Scratch follows the record bucket, 249 u32 words and 404 doubles per
     // record slot. A launch takes the smallest bucket that holds the batch.
     assert_eq!(re::sk_rcap(0), 64);
     assert_eq!(re::sk_rcap(64), 64);
     assert_eq!(re::sk_rcap(65), 128);
     assert_eq!(re::sk_rcap(960), 960);
     assert_eq!(re::sk_rcap(961), 960);
-    assert_eq!(re::scr_u_words(64, false), 46977);
-    assert_eq!(re::scr_u_words(128, false), 62593);
-    assert_eq!(re::scr_u_words(256, false), 93825);
+    assert_eq!(re::scr_u_words(64, false), 47361);
+    assert_eq!(re::scr_u_words(128, false), 63297);
+    assert_eq!(re::scr_u_words(256, false), 95169);
     // The start-delay column the is_badstart port adds widens the sd stride,
     // so every record bucket's d64 scratch grows by RACE_MAXR words again.
-    assert_eq!(re::srl_words(64), 28244);
-    assert_eq!(re::srl_words(128), 45908);
-    assert_eq!(re::srl_words(256), 81236);
+    assert_eq!(re::srl_words(64), 36436);
+    assert_eq!(re::srl_words(128), 62292);
+    assert_eq!(re::srl_words(256), 114004);
     // The frame window follows the course, clamped to the engine ceiling.
     assert_eq!(re::course_tick_bound(0.0), 640);
     assert_eq!(re::course_tick_bound(500.0), 1475);
@@ -131,6 +131,57 @@ fn eval_st_define(expr: &str, val: &std::collections::HashMap<String, usize>, ma
         total += prod;
     }
     Some(total)
+}
+
+/// The host's record block mirrors must equal the strides skills.cl derives
+/// from its own SK_ARMMAX. If they drift, the host sizes the scratch blocks
+/// too small and the per-arm chains walk into the next record's words.
+#[cfg(feature = "race")]
+#[test]
+fn host_record_strides_match_the_opencl_kernel() {
+    use globalsim_gpu::race_exec as re;
+    let source = include_str!("../src/kernels/skills.cl");
+    let mut defs: Vec<(String, String)> = Vec::new();
+    for line in source.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("#define ") else { continue };
+        let rest = rest.split("//").next().unwrap_or(rest).trim();
+        let mut it = rest.splitn(2, |c: char| c.is_whitespace());
+        let name = it.next().unwrap_or("");
+        let expr = it.next().unwrap_or("").trim().to_string();
+        let takes = name == "SK_ARMMAX"
+            || name == "SK_WINMAX"
+            || name.starts_with("SKR_")
+            || name.starts_with("SKD_");
+        if name.is_empty() || expr.is_empty() || !takes {
+            continue;
+        }
+        defs.push((name.to_string(), expr));
+    }
+    let mut val: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for _ in 0..defs.len() + 2 {
+        let mut progressed = false;
+        for (name, expr) in &defs {
+            if val.contains_key(name) {
+                continue;
+            }
+            if let Some(n) = eval_st_define(expr, &val, re::RACE_MAXR) {
+                val.insert(name.clone(), n);
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    let arms_max = *val.get("SK_ARMMAX").expect("kernel SK_ARMMAX resolves");
+    assert_eq!(arms_max, globalsim_gpu::skills_compile::SK_ARMMAX, "the two arm caps differ");
+    let skr = *val.get("SKR_STRIDE").expect("kernel SKR_STRIDE resolves");
+    let skd = *val.get("SKD_STRIDE").expect("kernel SKD_STRIDE resolves");
+    assert_eq!(skr, re::SKR_STRIDE, "host SKR_STRIDE differs from the skills.cl block");
+    assert_eq!(skd, re::SKD_STRIDE, "host SKD_STRIDE differs from the skills.cl block");
+    // The per-arm chains must end exactly where the effect timers start.
+    let chain_end = val["SKD_ARMS"] + 2 * val["SK_WINMAX"] * arms_max;
+    assert_eq!(chain_end, val["SKD_EFF_T"], "per-arm chains collide with the effect timers");
 }
 
 #[test]
@@ -297,8 +348,52 @@ fn tag_cap_buckets_move_only_the_stride_tail() {
         assert_eq!(l.stride, sk::sk_stride_at(sk::SK_EMAX_BUCKETS[0], bucket));
     }
     assert_eq!(sk::sk_stride_at(256, 8192), sk::sk_stride_at(256, 4096) + 4096);
-    // A tag bucket past the default is the only thing the define set adds.
+    // A tag bucket past the default adds only SK_TMAX to the define set.
+    use globalsim_gpu::gpu::RaceShape;
     let opts = globalsim_gpu::gpu::race_bucket_build_options;
-    assert!(!opts(256, 4096, 960, false).contains("SK_TMAX"));
-    assert!(opts(256, 8192, 960, false).ends_with("-D SK_TMAX=8192"));
+    assert!(!opts(256, 4096, 960, RaceShape::Full).contains("SK_TMAX"));
+    assert!(opts(256, 8192, 960, RaceShape::Full).ends_with("-D SK_TMAX=8192"));
+    // Each launch shape adds only its own region defines. The full shapes
+    // keep the reply channels, the journal shapes add SK_DIAG, and the
+    // channel-free shapes fold the region out with GSIM_NO_REPLY.
+    let sampling = opts(256, 4096, 960, RaceShape::Sampling);
+    let full = opts(256, 4096, 960, RaceShape::Full);
+    let diag = opts(256, 4096, 960, RaceShape::Diag);
+    let full_diag = opts(256, 4096, 960, RaceShape::FullDiag);
+    assert!(sampling.ends_with("-D SK_EMAX=256") && sampling.contains("-D GSIM_NO_REPLY"));
+    assert!(!full.contains("GSIM_NO_REPLY") && !full.contains("SK_DIAG"));
+    assert!(diag.contains("-D SK_DIAG") && diag.contains("-D GSIM_NO_REPLY"));
+    assert!(full_diag.contains("-D SK_DIAG") && !full_diag.contains("GSIM_NO_REPLY"));
+    // The define-set flags derive the shapes from what a chunk carries.
+    assert_eq!(RaceShape::from_flags(false, false), RaceShape::Sampling);
+    assert_eq!(RaceShape::from_flags(true, false), RaceShape::Full);
+    assert_eq!(RaceShape::from_flags(false, true), RaceShape::Diag);
+    assert_eq!(RaceShape::from_flags(true, true), RaceShape::FullDiag);
+    for shape in [RaceShape::Sampling, RaceShape::Full, RaceShape::Diag, RaceShape::FullDiag] {
+        assert_eq!(shape.reply(), matches!(shape, RaceShape::Full | RaceShape::FullDiag));
+        assert_eq!(shape.journal(), matches!(shape, RaceShape::Diag | RaceShape::FullDiag));
+    }
+}
+
+/// The shape defines gate writes, not offsets: a launch's scratch strides
+/// follow only the record bucket and the journal flag, so one lane serves
+/// every shape at the same strides, and the journal window is the only
+/// region a shape flag adds.
+#[cfg(feature = "race")]
+#[test]
+fn shape_defines_move_no_scratch_offsets() {
+    use globalsim_gpu::race_exec as re;
+    for rcap in re::SK_BUCKETS {
+        assert_eq!(
+            re::scr_u_words(rcap, true),
+            re::scr_u_words(rcap, false) + re::SK_JRN_N,
+            "only the journal window follows the journal flag at bucket {rcap}"
+        );
+    }
+    for (rcap, words) in [(64, 47361), (128, 63297), (256, 95169)] {
+        assert_eq!(re::scr_u_words(rcap, false), words, "the no-journal stride at bucket {rcap}");
+    }
+    for (rcap, words) in [(64, 36436), (128, 62292), (256, 114004)] {
+        assert_eq!(re::srl_words(rcap), words, "the d64 stride at bucket {rcap} follows no shape flag");
+    }
 }

@@ -12,7 +12,9 @@ use crate::json::{self, Value};
 use crate::race::{FallbackReason, RaceOutcome, RaceRunner};
 use crate::random_gen::Rule30CARng;
 use crate::retail_geometry;
+use crate::gpu::RaceShape;
 use ocl::{Buffer, Queue, flags};
+use std::sync::Arc;
 
 // The layout bound every runner-indexed region sizes to: the game's 18-horse
 // field limit (`gpu::ROSTER_CAP`, the single source). Rosters above it refuse
@@ -47,9 +49,11 @@ pub const ST_STRIDE: usize = ST_HEALC + 1;
 // Skill scratch mirrors of retail_core.cl and skills.cl.
 pub const SK_STRIDE: usize = crate::skills_compile::SK_STRIDE;
 // The compiled table always keeps the SK_RMAX layout. Only the scratch
-// block is sized down, to the smallest bucket that holds the batch.
+// block is sized down, to the smallest bucket that holds the batch. The
+// 192 rung cuts a 162-record request (the CM field) from 256 down: 94
+// scratch records per lane fewer, and the slot still fits the batch.
 pub const SK_RMAX: usize = crate::skills_compile::SK_RMAX;
-pub const SK_BUCKETS: [usize; 4] = [64, 128, 256, SK_RMAX];
+pub const SK_BUCKETS: [usize; 5] = [64, 128, 192, 256, SK_RMAX];
 pub const fn sk_rcap(nrec: usize) -> usize {
     let mut i = 0;
     while i < SK_BUCKETS.len() {
@@ -60,9 +64,12 @@ pub const fn sk_rcap(nrec: usize) -> usize {
     }
     SK_RMAX
 }
-const SKR_STRIDE: usize = 26;
+// Mirrors of the record blocks in skills.cl, derived from the same arm cap.
+// State: 4 header words, one window count per arm slot, 19 tail words.
+pub const SKR_STRIDE: usize = 4 + crate::skills_compile::SK_ARMMAX + 19;
 const SK_SEQN: usize = 40;
-const SKD_STRIDE: usize = 276;
+// Dynamic: 140 head words, one 16-pair chain per arm slot, 8 effect timers.
+pub const SKD_STRIDE: usize = 140 + 2 * 16 * crate::skills_compile::SK_ARMMAX + 8;
 const SCR_SK: usize = SCR_BANKS + RACE_MAXR * BANK_WORDS;
 const fn sk_tseq(rcap: usize) -> usize { SCR_SK + rcap * SKR_STRIDE }
 const fn sk_aseq(rcap: usize) -> usize { sk_tseq(rcap) + rcap * SK_SEQN }
@@ -144,7 +151,7 @@ pub const RI_RC: usize = RI_DEBUG_TICK + 18;
 // every seed of one request. Mirror of retail_core.cl.
 pub const RI_REQ: usize = RI_DEBUG_TICK + 19;
 pub const RI_RUN0: usize = 16;
-pub const RI_RUN_STRIDE: usize = 13;
+pub const RI_RUN_STRIDE: usize = 14;
 pub const RR_STYLE: usize = 0;
 pub const RR_STRATEGY: usize = 1;
 pub const RR_DISTAPT: usize = 2;
@@ -155,6 +162,7 @@ pub const RR_CSSN: usize = 9;
 pub const RR_STAPT: usize = 10;
 pub const RR_SUAPT: usize = 11;
 pub const RR_TEAM: usize = 12;
+pub const RR_CHARA: usize = 13;
 pub const PT_SPURT: usize = 51;
 pub const PI_DISTANCE: usize = 106;
 pub const PD_CF_DIST: usize = PL_FRONT_LANE + 16;
@@ -170,7 +178,7 @@ pub const PD_FC_HALF1: usize = PD_CF_DIST + 12;
 // then recomputes the guts-derived powf words from the live field.
 pub const PD_LIVE_GUTS: usize = PD_CF_DIST + 13;
 pub const PD_RUN0: usize = PL_FRONT_LANE + 32;
-pub const PD_RUN_STRIDE: usize = 16;
+pub const PD_RUN_STRIDE: usize = 22;
 pub const PRD_POWF: usize = 0;
 pub const PRD_DUEL_T: usize = 1;
 pub const PRD_DUEL_A: usize = 2;
@@ -198,6 +206,15 @@ pub const PRD_R30_LO: usize = 13;
 // freeze from, and the unclamped accumulator, NaN when no bump chained.
 pub const PRD_BOOST_SPEED: usize = 14;
 pub const PRD_SPEED_ACC: usize = 15;
+// The construction stamina, power and raw-field bump words, same pair shape:
+// clamped field, NaN-marked accumulator, and the f64 raw max(1.0) chain the
+// StaminaUp, PowerUp and AllStatusUp constructor fires chain beside the field.
+pub const PRD_BOOST_STAM: usize = 16;
+pub const PRD_STAM_ACC: usize = 17;
+pub const PRD_BOOST_POWER: usize = 18;
+pub const PRD_POWER_ACC: usize = 19;
+pub const PRD_RAW_STAM: usize = 20;
+pub const PRD_RAW_POWER: usize = 21;
 pub const PC_LAST_STRAIGHT_START: usize = 184;
 pub const PC_LAST_CORNER_START: usize = 186;
 pub const PC_FIRST_MOVE_POINT: usize = 187;
@@ -265,7 +282,7 @@ const SCR_HP_IN: usize = SCR_INIT_OUT + OOU;
 const SCR_HP_OUT: usize = SCR_HP_IN + RACE_MAXR * IIU;
 const SCR_STATE: usize = SCR_HP_OUT + RACE_MAXR * 180;
 // SI_STRIDE mirror: retail_core.cl sizes the scalar block by SI_SLOTS.
-const SCR_SF: usize = SCR_STATE + 95 * RACE_MAXR;
+const SCR_SF: usize = SCR_STATE + 96 * RACE_MAXR;
 const SCR_LISTS: usize = SCR_SF + SF_STRIDE * RACE_MAXR;
 const SCR_CAND: usize = SCR_LISTS + LIST_STRIDE * RACE_MAXR;
 const SCR_CACHED: usize = (SCR_CAND + 3 * CAND_MAX + 63) & !63;
@@ -684,6 +701,56 @@ fn next_req() -> u32 {
     NEXT_REQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The pd words the stats pre-pass derivation leaves on a race, per runner
+/// in `PRD_DERIVED` order, plus the race-level live-guts word. They read the
+/// pre-pass adjusted stats, the request's construction bumps and request or
+/// engine-fixed scalars, so they are seed-independent and one row serves
+/// every seed and later launch of the request (F2). Words the derivation
+/// leaves untouched on a fresh zeroed pd are stored 0.0, so applying the row
+/// writes exactly the bytes the fresh derivation would.
+struct DerivedRow {
+    live_guts: f64,
+    /// n runners x `PRD_DERIVED.len()` words, row-major.
+    words: Vec<f64>,
+}
+
+/// The runner-row pd slots the pre-pass derivation writes, in the order
+/// `DerivedRow::words` stores them.
+const PRD_DERIVED: [usize; 19] = [
+    PRD_POWF, PRD_DUEL_T, PRD_DUEL_A, PRD_SPOT_M, PRD_SPOT_D,
+    PRD_BOOST_GUTS, PRD_BOOST_WIS, PRD_RUSH_BONUS, PRD_WIS_ACC,
+    PRD_GUTS_ACC, PRD_SPOT_PROF, PRD_BOOST_SPEED, PRD_SPEED_ACC,
+    PRD_BOOST_STAM, PRD_STAM_ACC, PRD_BOOST_POWER, PRD_POWER_ACC,
+    PRD_RAW_STAM, PRD_RAW_POWER,
+];
+
+/// One request's `DerivedRow` in the context cache, keyed by request text
+/// (the FNV hash only indexes it). Nothing in a row varies after the context
+/// opens: the globals, courses and grids are fixed at `RaceContext::open`,
+/// and a request carries its own skill table, so re-registered geometry does
+/// not stale them.
+struct CachedDerived {
+    key: u64,
+    request: Arc<str>,
+    row: Arc<DerivedRow>,
+}
+
+/// One prepared request in the context cache (F3): the compiled plan, parsed
+/// runner rows and attached geometry, stored pre-launch with geometry intact.
+/// A hit clones the template and reseeds the solver pair per seed, byte-exact.
+struct CachedPrepared {
+    key: u64,
+    request: String,
+    plan: bool,
+    epoch: u64,
+    template: Prepared,
+}
+
+/// Entries kept per request cache, newest last. The app's batch lane replays
+/// one request, so a small bound holds the hot entry without keeping every
+/// request a long session ever sent.
+const REQUEST_CACHE_MAX: usize = 8;
+
 /// Everything the launch needs about one race before the powf slot (it
 /// waits for the adjusted-guts pre-pass) and before the geometry tables.
 /// The seed enters this data only through the `ri[RI_SEED]` word: the stats
@@ -700,7 +767,7 @@ pub struct Prepared {
     n: usize,
     stats: Vec<StatsCase>,
     host_fallback: Option<String>,
-    geometry: Option<retail_geometry::FlatCourse>,
+    geometry: Option<Arc<retail_geometry::FlatCourse>>,
     seed: i32,
     sk: Vec<u32>,
     bumps: Vec<(usize, i32, f64)>,
@@ -717,6 +784,15 @@ pub struct Prepared {
     // Compact launch row mask: the kept runner indices, empty for the full
     // launch that writes every runner's frame row.
     frame_rows: Vec<usize>,
+    /// FNV-1a of the request bytes this race was prepared from. It indexes
+    /// the context's request caches, and the entries keep the text so equal
+    /// bytes answer and a colliding hash only costs a miss (F2).
+    req_hash: u64,
+    req_text: Arc<str>,
+    /// The request's derived stats words, set when the context has launched
+    /// or prepared the request before (F2). A launch applies them instead of
+    /// running the stats pre-pass for this race again.
+    derived: Option<Arc<DerivedRow>>,
 }
 
 impl Prepared {
@@ -740,9 +816,28 @@ impl Prepared {
         self.n
     }
 
+    /// The host-side kernel inputs as raw bits: the ri row, the pd row and
+    /// the compiled skill table. The cache gate uses them to check that a
+    /// prepared-cache clone carries exactly what a fresh parse produces.
+    pub fn host_input_bits(&self) -> (Vec<u32>, Vec<u64>, Vec<u32>) {
+        (self.ri.clone(), self.pd.iter().map(|v| v.to_bits()).collect(), self.sk.clone())
+    }
+
     /// Compiled skill records, the number that picks the scratch bucket.
     pub fn records(&self) -> usize {
         self.sk[crate::skills_compile::SK_NREC] as usize
+    }
+
+    /// The wire id and flags word of every compiled record, for the gate
+    /// that checks which records carry the plan-walk marking.
+    pub fn sk_record_flags(&self) -> Vec<(u32, u32)> {
+        (0..self.records())
+            .map(|i| {
+                let at = crate::skills_compile::SK_RECORDS
+                    + crate::skills_compile::SK_RSTRIDE * i;
+                (self.sk[at], self.sk[at + 2])
+            })
+            .collect()
     }
 
     /// Ask for the full-reply channels: the kernel writes the activation,
@@ -762,7 +857,7 @@ impl Prepared {
     /// row (its tail block needs them), so debug and compact refuse.
     /// Returns false when the mask is not accepted. The race then stays a
     /// full-frame launch.
-    pub(crate) fn set_frame_rows(&mut self, rows: &[usize]) -> bool {
+    pub fn set_frame_rows(&mut self, rows: &[usize]) -> bool {
         if rows.is_empty() || rows.len() > 2 || self.ri[RI_DEBUG_TICK] != 0 {
             return false;
         }
@@ -819,11 +914,15 @@ impl Prepared {
             sk_emax: 0,
             sk_tmax: 0,
             frame_rows: Vec::new(),
+            req_hash: 0,
+            req_text: Arc::from(""),
+            derived: None,
         }
     }
 
-    /// The clone of this prepared race that `prepare(request, seed)` would
-    /// return for another seed: one `ri` copy with `RI_SEED` rewritten.
+    /// The clone of this prepared race for another seed: one `ri` copy with
+    /// `RI_SEED` rewritten. The per-runner solver pair keeps the template's,
+    /// `reseed_solver_rows` rewrites it where a seed-exact clone needs that.
     /// Only valid for a parsed prepare (a stub has no `ri`).
     pub fn with_seed(&self, seed: i32) -> Prepared {
         let mut clone = self.clone();
@@ -831,6 +930,210 @@ impl Prepared {
         clone.seed = seed;
         clone
     }
+
+    /// Rewrite the pd solver pair per runner for this race's own seed, the
+    /// same draws a fresh parse writes. The pair is the only seed-dependent
+    /// pd word, and the kernel spends it only when `PRD_LATER` is set.
+    fn reseed_solver_rows(&mut self) {
+        let nslopes = self.ri[RI_NSLOPES] as usize;
+        for r in 0..self.n {
+            let (hi, lo) = construction_solver_pair(self.seed, r, nslopes);
+            let base = PD_RUN0 + PD_RUN_STRIDE * r;
+            self.pd[base + PRD_R30_HI] = hi as f64;
+            self.pd[base + PRD_R30_LO] = lo as f64;
+        }
+    }
+}
+
+/// Column of one runner-row slot inside a `DerivedRow` word row.
+const fn prd_col(slot: usize) -> usize {
+    let mut i = 0;
+    while i < PRD_DERIVED.len() {
+        if PRD_DERIVED[i] == slot {
+            return i;
+        }
+        i += 1;
+    }
+    0
+}
+
+/// Derive one request's `DerivedRow` from its first race's inputs and the
+/// pre-pass output at `offset`, arithmetic unchanged from the in-place
+/// derivation. Slots a fresh zeroed pd would leave untouched are stored 0.0.
+fn derive_row(
+    race: &Prepared,
+    prepass: Option<&initialization::RunOutput>,
+    offset: usize,
+) -> Result<DerivedRow, String> {
+    let count = race.stats.len();
+    let mut words = vec![0.0f64; count * PRD_DERIVED.len()];
+    let spurt_coef = race.pd[PT_SPURT + 2] as f32;
+    let spurt_pow = race.pd[PT_SPURT + 3] as f32;
+    let duel_speed = [
+        race.pd[PD_CF_SPEED] as f32,
+        race.pd[PD_CF_SPEED + 1] as f32,
+        race.pd[PD_CF_SPEED + 2] as f32,
+    ];
+    let duel_accel = [
+        race.pd[PD_CF_ACCEL] as f32,
+        race.pd[PD_CF_ACCEL + 1] as f32,
+        race.pd[PD_CF_ACCEL + 2] as f32,
+    ];
+    let proficiency = [1.1f64, 1.0, 0.85, 0.75, 0.6, 0.4, 0.2, 0.1];
+    for r in 0..count {
+        let (adjusted, mut raw_stam, mut raw_pow) = match prepass {
+            Some(out) => match &out.outs[offset + r] {
+                Out::Stats(s) => (
+                    s.adjusted_f64(),
+                    f64::from_bits(s.raw_stamina),
+                    f64::from_bits(s.raw_power),
+                ),
+                _ => return Err("stats pre-pass decode".into()),
+            },
+            None => ([0.; 5], 0., 0.),
+        };
+        let raw_guts = adjusted[3];
+        // The engine's constructor pass chains the static stat bumps as f32
+        // accumulators with the field clamped on every read, moves the raw
+        // fields in f64 with a max(1.0), and runs the bonus in f64.
+        let mut acc_speed = adjusted[0] as f32;
+        let mut acc_stam = adjusted[1] as f32;
+        let mut acc_pow = adjusted[2] as f32;
+        let mut acc_guts = raw_guts as f32;
+        let mut acc_wis = adjusted[4] as f32;
+        let mut bonus = 0.0f64;
+        let mut bump_speed = false;
+        let mut bump_stam = false;
+        let mut bump_pow = false;
+        let mut bump_guts = false;
+        let mut bump_wis = false;
+        for (_runner, kind, modifier) in race.bumps.iter().filter(|(b, _, _)| *b == r) {
+            match *kind {
+                1 => {
+                    acc_speed += *modifier as f32;
+                    bump_speed = true;
+                }
+                2 => {
+                    acc_stam += *modifier as f32;
+                    raw_stam = (raw_stam + *modifier).max(1.0);
+                    bump_stam = true;
+                }
+                3 => {
+                    acc_pow += *modifier as f32;
+                    raw_pow = (raw_pow + *modifier).max(1.0);
+                    bump_pow = true;
+                }
+                4 => {
+                    acc_guts += *modifier as f32;
+                    bump_guts = true;
+                }
+                5 => {
+                    acc_wis += *modifier as f32;
+                    bump_wis = true;
+                }
+                // One AllStatusUp chains five stats and both raw fields,
+                // the engine's :2569-2577 block read straight.
+                32 => {
+                    acc_speed += *modifier as f32;
+                    bump_speed = true;
+                    acc_stam += *modifier as f32;
+                    raw_stam = (raw_stam + *modifier).max(1.0);
+                    bump_stam = true;
+                    acc_pow += *modifier as f32;
+                    raw_pow = (raw_pow + *modifier).max(1.0);
+                    bump_pow = true;
+                    acc_guts += *modifier as f32;
+                    bump_guts = true;
+                    acc_wis += *modifier as f32;
+                    bump_wis = true;
+                }
+                _ => bonus += *modifier / 100.0,
+            }
+        }
+        let guts_eff = if bump_guts { acc_guts.clamp(1.0, 2000.0) as f64 } else { raw_guts };
+        let row = &mut words[r * PRD_DERIVED.len()..][..PRD_DERIVED.len()];
+        let bounded = (guts_eff as f32).clamp(1., 2000.);
+        row[prd_col(PRD_POWF)] = f64::from((bounded * spurt_coef).powf(spurt_pow).to_bits());
+        let guts = guts_eff.max(1.0);
+        let duel = |c: [f32; 3]| {
+            let argument = (guts as f32) * c[0];
+            let power = (argument as f64).powf(c[1] as f64) as f32;
+            (power * c[2]) as f64
+        };
+        row[prd_col(PRD_DUEL_T)] = duel(duel_speed);
+        row[prd_col(PRD_DUEL_A)] = duel(duel_accel);
+        let argument = (guts as f32) * 500.0_f32;
+        let power = (argument as f64).powf(0.6_f32 as f64) as f32;
+        row[prd_col(PRD_SPOT_M)] = (power * 0.0001_f32) as f64;
+        let stapt = race.ri[RI_RUN0 + RI_RUN_STRIDE * r + RR_STAPT] as usize;
+        row[prd_col(PRD_SPOT_D)] = (700.0 * guts).powf(0.5) * 0.012 * proficiency[stapt];
+        row[prd_col(PRD_SPOT_PROF)] = proficiency[stapt];
+        row[prd_col(PRD_BOOST_GUTS)] =
+            if bump_guts { acc_guts.clamp(1.0, 2000.0) as f64 } else { 0.0 };
+        row[prd_col(PRD_BOOST_WIS)] =
+            if bump_wis { acc_wis.clamp(1.0, 2000.0) as f64 } else { 0.0 };
+        // The kernel seeds the wisdom accumulator from the unclamped f32
+        // chain; NaN marks the field seed for runners with no bump.
+        row[prd_col(PRD_WIS_ACC)] = if bump_wis { f64::from(acc_wis) } else { f64::NAN };
+        row[prd_col(PRD_GUTS_ACC)] = if bump_guts { f64::from(acc_guts) } else { f64::NAN };
+        row[prd_col(PRD_RUSH_BONUS)] = f64::from(((bonus * 100.0) as f32).to_bits());
+        row[prd_col(PRD_BOOST_SPEED)] =
+            if bump_speed { acc_speed.clamp(1.0, 2000.0) as f64 } else { 0.0 };
+        row[prd_col(PRD_SPEED_ACC)] = if bump_speed { f64::from(acc_speed) } else { f64::NAN };
+        row[prd_col(PRD_BOOST_STAM)] =
+            if bump_stam { acc_stam.clamp(1.0, 2000.0) as f64 } else { 0.0 };
+        row[prd_col(PRD_STAM_ACC)] = if bump_stam { f64::from(acc_stam) } else { f64::NAN };
+        row[prd_col(PRD_BOOST_POWER)] =
+            if bump_pow { acc_pow.clamp(1.0, 2000.0) as f64 } else { 0.0 };
+        row[prd_col(PRD_POWER_ACC)] = if bump_pow { f64::from(acc_pow) } else { f64::NAN };
+        row[prd_col(PRD_RAW_STAM)] = if bump_stam { raw_stam } else { f64::NAN };
+        row[prd_col(PRD_RAW_POWER)] = if bump_pow { raw_pow } else { f64::NAN };
+    }
+    Ok(DerivedRow { live_guts: if race.live_guts { 1.0 } else { 0.0 }, words })
+}
+
+/// Write one request's derived words into a race's pd row, the same slots
+/// the removed per-race derivation wrote.
+fn apply_derived(race: &mut Prepared, row: &DerivedRow) {
+    race.pd[PD_LIVE_GUTS] = row.live_guts;
+    let mut at = 0usize;
+    for r in 0..race.stats.len() {
+        let base = PD_RUN0 + PD_RUN_STRIDE * r;
+        for slot in PRD_DERIVED {
+            race.pd[base + slot] = row.words[at];
+            at += 1;
+        }
+    }
+}
+
+/// The shared solver stream pair left by the engine's construction draws for
+/// one runner (the `RaceSolver::new` chain, race_solver.rs:975-1067). The
+/// `(hi, lo)` state after the chain. Nothing else in retail runtime draws on it.
+fn construction_solver_pair(seed_i32: i32, r: usize, nslopes: usize) -> (u32, u32) {
+    let seed_lo = (seed_i32 as i64 + r as i64 * 7919) as u32;
+    let mut builder = Rule30CARng::new(seed_lo, ref_race_seed_hi(seed_lo));
+    let d1 = builder.int32();
+    let _d2 = builder.int32();
+    let mut solver = Rule30CARng::new(d1, 0);
+    let _hp_seed = solver.int32();
+    let _gorosi = solver.int32();
+    let _pace = solver.int32();
+    let _gate_roll = solver.uniform(12252240.0);
+    let _random_lot = solver.uniform(100.0);
+    let _start_delay = solver.random();
+    for _ in 0..nslopes {
+        let _hill_lo = solver.int32();
+        let _hill_hi = solver.int32();
+    }
+    let _kakari = solver.uniform(7.0);
+    let _kakari_skip = solver.random();
+    let _r1 = solver.random();
+    let _r2 = solver.random();
+    let _r3 = solver.random();
+    for _ in 0..24 {
+        let _section = solver.random();
+    }
+    (solver.hi, solver.lo)
 }
 
 /// Parses one request into kernel inputs. A domain the kernel cannot answer
@@ -844,7 +1147,10 @@ fn prepare(
     grids: &Value,
     courses: &Value,
     registry: &mut GeometryRegistry,
+    plan_enabled: bool,
 ) -> Result<Prepared, String> {
+    let req_hash = crate::gpu::fnv1a64(request.as_bytes());
+    let req_text: Arc<str> = Arc::from(request);
     let root = json::parse(request)?;
     let course_id = root.get_i64("courseId")? as i32;
     let seed_i32 = i32::try_from(seed).map_err(|_| "seed does not fit an i32".to_string())?;
@@ -870,6 +1176,9 @@ fn prepare(
         sk_emax: 0,
         sk_tmax: 0,
         frame_rows: Vec::new(),
+        req_hash,
+        req_text: req_text.clone(),
+        derived: None,
     });
     // One validity test mirrors experimental_grid_enabled (src/lib.rs:262-272),
     // including its message, so invalid shapes flag with the engine's reason.
@@ -1015,33 +1324,11 @@ fn prepare(
     // pair per runner (RaceSolver::new, race_solver.rs:975-1067). Runtime
     // retail spends no other draw on this stream.
     for r in 0..horses.len() {
-        let seed_lo = (seed_i32 as i64 + r as i64 * 7919) as u32;
-        let mut builder = Rule30CARng::new(seed_lo, ref_race_seed_hi(seed_lo));
-        let d1 = builder.int32();
-        let _d2 = builder.int32();
-        let mut solver = Rule30CARng::new(d1, 0);
-        let _hp_seed = solver.int32();
-        let _gorosi = solver.int32();
-        let _pace = solver.int32();
-        let _gate_roll = solver.uniform(12252240.0);
-        let _random_lot = solver.uniform(100.0);
-        let _start_delay = solver.random();
-        for _ in 0..nslopes {
-            let _hill_lo = solver.int32();
-            let _hill_hi = solver.int32();
-        }
-        let _kakari = solver.uniform(7.0);
-        let _kakari_skip = solver.random();
-        let _r1 = solver.random();
-        let _r2 = solver.random();
-        let _r3 = solver.random();
-        for _ in 0..24 {
-            let _section = solver.random();
-        }
+        let (hi, lo) = construction_solver_pair(seed_i32, r, nslopes);
         let base = PD_RUN0 + PD_RUN_STRIDE * r;
         pd[base + PRD_LATER] = later_stamina as u8 as f64;
-        pd[base + PRD_R30_HI] = solver.hi as f64;
-        pd[base + PRD_R30_LO] = solver.lo as f64;
+        pd[base + PRD_R30_HI] = hi as f64;
+        pd[base + PRD_R30_LO] = lo as f64;
     }
 
     // Dense gate rank drives the retail starting lane.
@@ -1056,7 +1343,8 @@ fn prepare(
         strategy: Vec::new(),
         later_stamina,
     };
-    let sk_plan = crate::skills_compile::plan_retail_with(&root, course, &extras);
+    let sk_plan =
+        crate::skills_compile::plan_retail_with_plan(&root, course, &extras, plan_enabled);
     if let Some(reason) = &sk_plan.reason {
         return flagged(reason);
     }
@@ -1092,6 +1380,8 @@ fn prepare(
         // The fixed team id, the same value the engine reads for the debuff
         // same-team drop (lib.rs:335).
         ri[b + RR_TEAM] = horse.get("teamId").and_then(Value::as_f64).unwrap_or(0.0) as i64 as u32;
+        // The fixed chara id the engine's chara fan compares (lib.rs:336).
+        ri[b + RR_CHARA] = horse.get("charaId").and_then(Value::as_f64).unwrap_or(0.0) as i64 as u32;
         ri[b + RR_CSSN] = css.len().min(4) as u32;
         for (k, value) in css.iter().take(4).enumerate() {
             ri[b + RR_CSS0 + k] = *value as u32;
@@ -1120,7 +1410,7 @@ fn prepare(
             single_mode,
         });
     }
-    Ok(Prepared { ri, pd, req: next_req(), n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, live_guts: sk_plan.live_guts, debug_scratch: false, grid, full: false, sk_emax: sk_plan.emax, sk_tmax: sk_plan.tmax, frame_rows: Vec::new() })
+    Ok(Prepared { ri, pd, req: next_req(), n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, live_guts: sk_plan.live_guts, debug_scratch: false, grid, full: false, sk_emax: sk_plan.emax, sk_tmax: sk_plan.tmax, frame_rows: Vec::new(), req_hash, req_text, derived: None })
 }
 
 /// Engine rule: an installed skill whose definition carries a type 6 effect
@@ -1275,7 +1565,7 @@ pub fn run_kernel_only(requests: &[(String, i64)], warm: usize, timed: usize) ->
 #[derive(Default)]
 pub struct GeometryRegistry {
     injected: std::collections::HashMap<i32, String>,
-    courses: std::collections::HashMap<i32, (retail_geometry::FlatCourse, f32)>,
+    courses: std::collections::HashMap<i32, (Arc<retail_geometry::FlatCourse>, f32)>,
 }
 
 impl GeometryRegistry {
@@ -1298,7 +1588,7 @@ impl GeometryRegistry {
         Ok(())
     }
 
-    fn course(&mut self, course_id: i32, distance: f32) -> Result<(retail_geometry::FlatCourse, f32), String> {
+    fn course(&mut self, course_id: i32, distance: f32) -> Result<(Arc<retail_geometry::FlatCourse>, f32), String> {
         if let Some((flat, first_move)) = self.courses.get(&course_id) {
             return Ok((flat.clone(), *first_move));
         }
@@ -1317,7 +1607,7 @@ impl GeometryRegistry {
             }
         };
         let first_move = loaded.first_move_lane_point;
-        let flat = retail_geometry::flatten_course(&loaded);
+        let flat = Arc::new(retail_geometry::flatten_course(&loaded));
         self.courses.insert(course_id, (flat.clone(), first_move));
         Ok((flat, first_move))
     }
@@ -1394,6 +1684,29 @@ pub enum SlicePolicy {
 pub(crate) const SLICE_FIRST_TICKS: u32 = 32;
 /// The adaptive floor: below this many ticks a slice is launch overhead.
 pub(crate) const SLICE_MIN_TICKS: u32 = 16;
+
+/// The race kernel's pinned local (work-group) size, the C2 handoff route. One
+/// work item is one whole race and lanes share no `__local` memory or barriers,
+/// so the value schedules and never changes arithmetic: any value is bit-exact.
+/// `0` leaves the choice to the driver (the pre-C2 launch). A positive value
+/// pads the 1-D launch to a work-group multiple and the kernel returns the idle
+/// tail lanes through `n_lanes`. `GSIM_GPU_LOCAL` overrides it for experiments.
+///
+/// The B580 sweep (handoff "C2 sweep") pins 8: at the memory-bound full launch
+/// (~4,300 races, the app's batch width) a work group of 6 to 8 reaches 670
+/// races/s against the driver's 625 (a 7% lift), while 32 and above sit on the
+/// driver's number. `bin lws_sweep` re-runs that sweep.
+pub const RACE_LOCAL_WORK_SIZE: usize = 8;
+
+/// The race launch local size: the pinned `RACE_LOCAL_WORK_SIZE` unless
+/// `GSIM_GPU_LOCAL` names another. Unparsable or negative falls back to pinned.
+pub(crate) fn race_local_work_size() -> usize {
+    std::env::var("GSIM_GPU_LOCAL")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|&v| v >= 0)
+        .map_or(RACE_LOCAL_WORK_SIZE, |v| v as usize)
+}
 /// The adaptive per-launch target, in milliseconds.
 const SLICE_TARGET_MS: f64 = 500.0;
 
@@ -1519,10 +1832,10 @@ pub struct RaceContext {
     courses: Value,
     spike: crate::gpu::Spike,
     init_program: ocl::Program,
-    // Race programs by (effect bucket, tag bucket, record bucket, journal),
-    // built on first use. The top record bucket without the journal is built
-    // in open().
-    programs: Vec<(usize, usize, usize, bool, ocl::Program)>,
+    // Race programs by (effect bucket, tag bucket, record bucket, launch
+    // shape), built on first use. The top record bucket in the sampling
+    // shape is built in open().
+    programs: Vec<(usize, usize, usize, RaceShape, ocl::Program)>,
     registry: GeometryRegistry,
     lanes: Vec<LaneSet>,
     table_cache: Vec<TableSet>,
@@ -1531,6 +1844,21 @@ pub struct RaceContext {
     // Unset keeps the per-course bound. It only tightens the bound, so the
     // overflow fallback still covers any race the ceiling cuts short.
     tick_cap_limit: Option<usize>,
+    // SK_FLAG_PLAN marking on the retail scan gate, off only for the gate
+    // that proves the plan walk against the general stack walk.
+    plan_enabled: bool,
+    // The C2 local (work-group) size override. None takes the environment
+    // (`GSIM_GPU_LOCAL`, else the pinned default), Some forces a size on this
+    // context, the gate test's hook that keeps off the shared process env.
+    local_size_override: Option<usize>,
+    // Derived stats words per request text this context has launched, newest
+    // last (F2). A launch of a known request skips the stats pre-pass.
+    stats_cache: Vec<CachedDerived>,
+    // Prepared request hosts this context has parsed, newest last (F3). The
+    // geometry epoch invalidates them: a re-registered course changes what a
+    // prepare of the same text must produce.
+    prepared_cache: Vec<CachedPrepared>,
+    geom_epoch: u64,
     pub open_ms: OpenTimings,
 }
 
@@ -1544,7 +1872,7 @@ impl RaceContext {
         let started = std::time::Instant::now();
         let default_emax = crate::skills_compile::SK_EMAX_BUCKETS[0];
         let default_tmax = crate::skills_compile::SK_TMAX;
-        let program = spike.build_race_program(default_emax, default_tmax, SK_RMAX, false)?;
+        let program = spike.build_race_program_cached(default_emax, default_tmax, SK_RMAX, RaceShape::Sampling)?;
         let race_program_ms = started.elapsed().as_secs_f64() * 1e3;
         let started = std::time::Instant::now();
         let init_program = spike.build_program(crate::gpu::INITIALIZATION_KERNEL_SOURCE)?;
@@ -1564,12 +1892,17 @@ impl RaceContext {
             courses,
             spike,
             init_program,
-            programs: vec![(default_emax, default_tmax, SK_RMAX, false, program)],
+            programs: vec![(default_emax, default_tmax, SK_RMAX, RaceShape::Sampling, program)],
             registry: GeometryRegistry::default(),
             lanes: Vec::new(),
             table_cache: Vec::new(),
             slice_override: None,
             tick_cap_limit,
+            plan_enabled: true,
+            local_size_override: None,
+            stats_cache: Vec::new(),
+            prepared_cache: Vec::new(),
+            geom_epoch: 0,
             open_ms: OpenTimings {
                 spike_ms,
                 race_program_ms,
@@ -1582,17 +1915,35 @@ impl RaceContext {
 
     /// Index of the race program for one define set, built once per variant
     /// on first use.
-    fn race_program(&mut self, emax: usize, tmax: usize, rcap: usize, diag: bool) -> Result<usize, String> {
+    fn race_program(
+        &mut self, emax: usize, tmax: usize, rcap: usize, shape: RaceShape,
+    ) -> Result<usize, String> {
         if let Some(k) = self
             .programs
             .iter()
-            .position(|(e, t, r, d, _)| *e == emax && *t == tmax && *r == rcap && *d == diag)
+            .position(|(e, t, r, s, _)| *e == emax && *t == tmax && *r == rcap && *s == shape)
         {
             return Ok(k);
         }
-        let built = self.spike.build_race_program(emax, tmax, rcap, diag)?;
-        self.programs.push((emax, tmax, rcap, diag, built));
+        let started = std::time::Instant::now();
+        let built = self.spike.build_race_program_cached(emax, tmax, rcap, shape)?;
+        if std::env::var_os("GSIM_GPU_PROGRAM_LOG").is_some() {
+            eprintln!(
+                "program ready: emax {emax} tmax {tmax} rcap {rcap} {shape:?} {:.1} ms",
+                started.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        self.programs.push((emax, tmax, rcap, shape, built));
         Ok(self.programs.len() - 1)
+    }
+
+    /// The (effect bucket, tag bucket, record bucket, shape) keys of the
+    /// programs this context has built, in build order (the gate tests' hook).
+    pub fn program_keys(&self) -> Vec<(usize, usize, usize, RaceShape)> {
+        self.programs
+            .iter()
+            .map(|(e, t, r, s, _)| (*e, *t, *r, *s))
+            .collect()
     }
 
     /// The gated device the batches run on.
@@ -1604,6 +1955,19 @@ impl RaceContext {
     /// gate tests' hook). None keeps the environment-resolved default.
     pub fn set_slice_policy(&mut self, policy: Option<SlicePolicy>) {
         self.slice_override = policy;
+    }
+
+    /// Switch the SK_FLAG_PLAN marking of prepared retail tables (the gate
+    /// tests' hook). Off prepares every record for the general stack walk.
+    pub fn set_plan_enabled(&mut self, on: bool) {
+        self.plan_enabled = on;
+    }
+
+    /// Force the race kernel's local (work-group) size on this context (the
+    /// C2 gate test's hook). `None` takes the environment and pinned default.
+    /// `0` leaves the work-group size to the driver.
+    pub fn set_local_work_size(&mut self, size: Option<usize>) {
+        self.local_size_override = size;
     }
 
     /// Prepare every request and launch once under `policy` (None keeps the
@@ -1624,8 +1988,7 @@ impl RaceContext {
 
     /// The device's global memory and its largest single allocation, in
     /// bytes, for sizing launches (bin saturate).
-    pub fn device_memory(&self) -> Result<(u64, u64), String> {
-        use ocl::enums::{DeviceInfo, DeviceInfoResult};
+    pub fn device_memory(&self) -> Result<(u64, u64), String> {        use ocl::enums::{DeviceInfo, DeviceInfoResult};
         let device = self.spike.queue().device();
         let read = |info| match device.info(info) {
             Ok(DeviceInfoResult::GlobalMemSize(v)) | Ok(DeviceInfoResult::MaxMemAllocSize(v)) => Ok(v),
@@ -1639,15 +2002,63 @@ impl RaceContext {
     /// the course, ahead of the file fallback (see `GeometryRegistry`).
     pub fn register_geometry(&mut self, course_id: i32, json_text: &str) -> Result<(), String> {
         self.registry.register(course_id, json_text)?;
-        // Cached uploads stale out with the registry content they came from.
+        // Cached uploads and prepared hosts stale out with the registry
+        // content they came from.
         self.table_cache.clear();
+        self.prepared_cache.clear();
+        self.geom_epoch += 1;
         Ok(())
     }
 
+    /// The derived stats row for one request text, if this context derived it
+    /// before (F2). The hash indexes the scan and the text comparison decides.
+    fn cached_row(&self, key: u64, text: &str) -> Option<Arc<DerivedRow>> {
+        self.stats_cache
+            .iter()
+            .find(|c| c.key == key && &*c.request == text)
+            .map(|c| c.row.clone())
+    }
+
     /// One request into kernel inputs. The Err arm is a parse failure the
-    /// batch caller reports per race instead of failing the batch.
+    /// batch caller reports per race instead of failing the batch. A text the
+    /// context prepared before answers from the prepared cache (F3): the
+    /// stored template cloned and reseeded, byte-identical to a fresh parse.
     pub fn prepare(&mut self, request: &str, seed: i64) -> Result<Prepared, String> {
-        prepare(request, seed, &self.globals, &self.grids, &self.courses, &mut self.registry)
+        let seed_i32 = i32::try_from(seed).map_err(|_| "seed does not fit an i32".to_string())?;
+        let key = crate::gpu::fnv1a64(request.as_bytes());
+        let hit = self.prepared_cache.iter().find(|e| {
+            e.key == key
+                && e.plan == self.plan_enabled
+                && e.epoch == self.geom_epoch
+                && e.request == request
+        });
+        if let Some(entry) = hit {
+            let mut out = entry.template.with_seed(seed_i32);
+            out.reseed_solver_rows();
+            out.derived = self.cached_row(key, request);
+            return Ok(out);
+        }
+        let mut prepared = prepare(request, seed, &self.globals, &self.grids, &self.courses,
+            &mut self.registry, self.plan_enabled)?;
+        if prepared.host_fallback.is_none() {
+            prepared.derived = self.cached_row(prepared.req_hash, &prepared.req_text);
+            if self.prepared_cache.len() >= REQUEST_CACHE_MAX {
+                self.prepared_cache.remove(0);
+            }
+            self.prepared_cache.push(CachedPrepared {
+                key,
+                request: request.to_string(),
+                plan: self.plan_enabled,
+                epoch: self.geom_epoch,
+                template: prepared.clone(),
+            });
+        }
+        Ok(prepared)
+    }
+
+    /// Cache occupancy for the gate tests: (prepared entries, derived rows).
+    pub fn cache_probe(&self) -> (usize, usize) {
+        (self.prepared_cache.len(), self.stats_cache.len())
     }
 
     /// Grows lane `k`'s buffer set to serve a launch of `mc` races, `n`
@@ -1660,21 +2071,26 @@ impl RaceContext {
         &mut self, k: usize, mc: usize, reqs: usize, n: usize, skw: usize, rows: usize,
         words: usize, srl: usize, ticks: usize, rc_blocks: usize,
     ) -> Result<(), String> {
-        if let Some(set) = self.lanes.get(k) {
-            if set.cap >= mc && set.reqs >= reqs && set.n >= n && set.skw >= skw && set.rows >= rows
-                && set.words >= words && set.srl >= srl && set.ticks >= ticks
-                && set.rc_blocks >= rc_blocks
-            {
-                return Ok(());
-            }
-            let queue = set.queue.clone();
-            self.lanes[k] = LaneSet::new(
-                &queue, mc, reqs.max(set.reqs), n, skw.max(set.skw), rows, words, srl, ticks, rc_blocks,
-            )?;
-        } else {
+        // Fill upward, so a compact first launch still leaves lane 0 holding
+        // a full-frame set. The grow-only maxima keep every earlier launch
+        // answerable without a rebuild.
+        for _ in self.lanes.len()..=k {
             let queue = self.spike.queue();
             self.lanes.push(LaneSet::new(&queue, mc, reqs, n, skw, rows, words, srl, ticks, rc_blocks)?);
         }
+        if self.lanes[k].cap >= mc && self.lanes[k].reqs >= reqs && self.lanes[k].n >= n
+            && self.lanes[k].skw >= skw && self.lanes[k].rows >= rows
+            && self.lanes[k].words >= words && self.lanes[k].srl >= srl && self.lanes[k].ticks >= ticks
+            && self.lanes[k].rc_blocks >= rc_blocks
+        {
+            return Ok(());
+        }
+        let set = &self.lanes[k];
+        let queue = set.queue.clone();
+        self.lanes[k] = LaneSet::new(
+            &queue, mc, reqs.max(set.reqs), n, skw.max(set.skw),
+            rows, words, srl, ticks, rc_blocks,
+        )?;
         Ok(())
     }
 
@@ -1713,120 +2129,79 @@ impl RaceContext {
         return Err("one launch needs one uniform frame row count".into());
     }
 
-    // The stats chain runs once per race as an initialization-kernel
-    // pre-pass so the host can supply the exact f32 powf (the kernel
-    // re-runs the chain itself, from the same inputs, for the rest).
+    // The stats chain runs once per distinct request as an initialization-kernel
+    // pre-pass so the host can supply the exact f32 powf. Clones share a request
+    // id, and a text the context derived before applies the stored row (F2).
     let t_stage = std::time::Instant::now();
-    let mut cases: Vec<Case> = Vec::new();
+    // Group the launched races by request id: a group is one request row of
+    // the launch, so its races share one derived row.
+    let mut group_of = vec![usize::MAX; prepared.len()];
+    let mut groups: Vec<usize> = Vec::new();
     for &i in &launched {
-        for stats in &prepared[i].stats {
+        let g = match groups.iter().position(|&f| prepared[f].req == prepared[i].req) {
+            Some(g) => g,
+            None => {
+                groups.push(i);
+                groups.len() - 1
+            }
+        };
+        group_of[i] = g;
+    }
+    let mut rows: Vec<Option<Arc<DerivedRow>>> =
+        groups.iter().map(|&f| prepared[f].derived.clone()).collect();
+    for g in 0..groups.len() {
+        if rows[g].is_none() {
+            let first = groups[g];
+            rows[g] = self.cached_row(prepared[first].req_hash, &prepared[first].req_text);
+        }
+    }
+    let stale: Vec<usize> = (0..groups.len()).filter(|&g| rows[g].is_none()).collect();
+    let mut cases: Vec<Case> = Vec::new();
+    for &g in &stale {
+        for stats in &prepared[groups[g]].stats {
             cases.push(Case::Stats(stats.clone()));
         }
     }
     let prepass = if cases.is_empty() { None } else { Some(initialization::run_with_program(&cases, &self.spike, &self.init_program)?) };
     let mut offset = 0usize;
-    for &i in &launched {
-        let count = prepared[i].stats.len();
-        prepared[i].pd[PD_LIVE_GUTS] = if prepared[i].live_guts { 1.0 } else { 0.0 };
-        let spurt_coef = prepared[i].pd[PT_SPURT + 2] as f32;
-        let spurt_pow = prepared[i].pd[PT_SPURT + 3] as f32;
-        let duel_speed = [
-            prepared[i].pd[PD_CF_SPEED] as f32,
-            prepared[i].pd[PD_CF_SPEED + 1] as f32,
-            prepared[i].pd[PD_CF_SPEED + 2] as f32,
-        ];
-        let duel_accel = [
-            prepared[i].pd[PD_CF_ACCEL] as f32,
-            prepared[i].pd[PD_CF_ACCEL + 1] as f32,
-            prepared[i].pd[PD_CF_ACCEL + 2] as f32,
-        ];
-        let proficiency = [1.1f64, 1.0, 0.85, 0.75, 0.6, 0.4, 0.2, 0.1];
-        for r in 0..count {
-            let adjusted = match &prepass {
-                Some(out) => match &out.outs[offset + r] {
-                    Out::Stats(s) => s.adjusted_f64(),
-                    _ => return Err("stats pre-pass decode".into()),
-                },
-                None => [0.; 5],
-            };
-            let raw_guts = adjusted[3];
-            // The engine's constructor pass chains the static SpeedUp, GutsUp
-            // and WisdomUp bumps as an f32 accumulator and clamps the field on
-            // every read, and the kakari bonus runs in f64.
-            let mut acc_speed = adjusted[0] as f32;
-            let mut acc_guts = raw_guts as f32;
-            let mut acc_wis = adjusted[4] as f32;
-            let mut bonus = 0.0f64;
-            let mut bump_speed = false;
-            let mut bump_guts = false;
-            let mut bump_wis = false;
-            for (_runner, kind, modifier) in prepared[i].bumps.iter().filter(|(b, _, _)| *b == r) {
-                match *kind {
-                    1 => {
-                        acc_speed += *modifier as f32;
-                        bump_speed = true;
-                    }
-                    4 => {
-                        acc_guts += *modifier as f32;
-                        bump_guts = true;
-                    }
-                    5 => {
-                        acc_wis += *modifier as f32;
-                        bump_wis = true;
-                    }
-                    _ => bonus += *modifier / 100.0,
-                }
-            }
-            let guts_eff = if bump_guts { acc_guts.clamp(1.0, 2000.0) as f64 } else { raw_guts };
-            let base = PD_RUN0 + PD_RUN_STRIDE * r;
-            let bounded = (guts_eff as f32).clamp(1., 2000.);
-            prepared[i].pd[base + PRD_POWF] =
-                f64::from((bounded * spurt_coef).powf(spurt_pow).to_bits());
-            let guts = guts_eff.max(1.0);
-            let duel = |c: [f32; 3]| {
-                let argument = (guts as f32) * c[0];
-                let power = (argument as f64).powf(c[1] as f64) as f32;
-                (power * c[2]) as f64
-            };
-            prepared[i].pd[base + PRD_DUEL_T] = duel(duel_speed);
-            prepared[i].pd[base + PRD_DUEL_A] = duel(duel_accel);
-            let argument = (guts as f32) * 500.0_f32;
-            let power = (argument as f64).powf(0.6_f32 as f64) as f32;
-            prepared[i].pd[base + PRD_SPOT_M] = (power * 0.0001_f32) as f64;
-            let stapt = prepared[i].ri[RI_RUN0 + RI_RUN_STRIDE * r + RR_STAPT] as usize;
-            prepared[i].pd[base + PRD_SPOT_D] =
-                (700.0 * guts).powf(0.5) * 0.012 * proficiency[stapt];
-            prepared[i].pd[base + PRD_SPOT_PROF] = proficiency[stapt];
-            if bump_guts {
-                prepared[i].pd[base + PRD_BOOST_GUTS] = acc_guts.clamp(1.0, 2000.0) as f64;
-            }
-            if bump_wis {
-                prepared[i].pd[base + PRD_BOOST_WIS] = acc_wis.clamp(1.0, 2000.0) as f64;
-            }
-            if bump_speed {
-                prepared[i].pd[base + PRD_BOOST_SPEED] = acc_speed.clamp(1.0, 2000.0) as f64;
-            }
-            // The kernel seeds the wisdom accumulator from the unclamped f32
-            // chain; NaN marks the field seed for runners with no bump.
-            prepared[i].pd[base + PRD_WIS_ACC] =
-                if bump_wis { f64::from(acc_wis) } else { f64::NAN };
-            prepared[i].pd[base + PRD_GUTS_ACC] =
-                if bump_guts { f64::from(acc_guts) } else { f64::NAN };
-            prepared[i].pd[base + PRD_SPEED_ACC] =
-                if bump_speed { f64::from(acc_speed) } else { f64::NAN };
-            prepared[i].pd[base + PRD_RUSH_BONUS] =
-                f64::from(((bonus * 100.0) as f32).to_bits());
-        }
+    for &g in &stale {
+        let first = groups[g];
+        let count = prepared[first].stats.len();
+        let row = Arc::new(derive_row(&prepared[first], prepass.as_ref(), offset)?);
         offset += count;
+        // Two stale groups of one text (a batch of same-text requests
+        // prepared separately) share the row the first of them stores.
+        rows[g] = Some(match self.stats_cache.iter().find(|c| {
+            c.key == prepared[first].req_hash && &*c.request == &*prepared[first].req_text
+        }) {
+            Some(hit) => hit.row.clone(),
+            None => {
+                if self.stats_cache.len() >= REQUEST_CACHE_MAX {
+                    self.stats_cache.remove(0);
+                }
+                self.stats_cache.push(CachedDerived {
+                    key: prepared[first].req_hash,
+                    request: prepared[first].req_text.clone(),
+                    row: row.clone(),
+                });
+                row
+            }
+        });
+    }
+    for &i in &launched {
+        let row = rows[group_of[i]].as_ref().ok_or("missing stats pre-pass row")?;
+        apply_derived(&mut prepared[i], row);
     }
     let prepass_ms = t_stage.elapsed().as_secs_f64() * 1e3;
 
-    // One geometry table set shared by every launched race.
+    // One geometry table set shared by every launched race. The Arc clone
+    // keeps the Prepared's geometry attached, so a prepared race can be
+    // launched again (the prepared cache relaunches a template's clones).
     let t_stage = std::time::Instant::now();
     let mut table_courses: Vec<i32> = Vec::new();
-    let mut table_sets: Vec<retail_geometry::FlatCourse> = Vec::new();
+    let mut table_sets: Vec<Arc<retail_geometry::FlatCourse>> = Vec::new();
     for &i in &launched {
-        if let Some(course) = prepared[i].geometry.take() {
+        if let Some(course) = prepared[i].geometry.clone() {
             let id = course.course_id;
             if !table_courses.contains(&id) {
                 table_courses.push(id);
@@ -1841,7 +2216,7 @@ impl RaceContext {
         // OpenCL rejects zero-length buffers, so a geometry-off launch never
         // reads these.
         let zeros = |k: usize| vec![0f64; k];
-        table_sets.push(retail_geometry::FlatCourse {
+        table_sets.push(Arc::new(retail_geometry::FlatCourse {
             course_id: 0,
             distance: 0.,
             distance_to_world: 0.,
@@ -1864,13 +2239,13 @@ impl RaceContext {
             ce_id: vec![0i32],
             ce_flags: vec![0u32],
             final_corner_half: None,
-        });
+        }));
     }
     let table_ids: Vec<i32> = table_sets.iter().map(|c| c.course_id).collect();
     let ti = match self.table_cache.iter().position(|t| t.ids == table_ids) {
         Some(pos) => pos,
         None => {
-            let tables = crate::geometry::course_tables(&table_sets);
+            let tables = crate::geometry::course_tables(table_sets.iter().map(Arc::as_ref));
             let q = self.spike.queue();
             self.table_cache.push(TableSet {
                 ids: table_ids,
@@ -1980,21 +2355,26 @@ impl RaceContext {
             for (row, &i) in req_row.iter().enumerate() {
                 pd_all[row * RIL_STRIDE..][..RIL_STRIDE].copy_from_slice(&prepared[i].pd);
             }
-            // Full requests own one rc block each, blocks 1..n. The rest point
-            // at block 0, the zero-filled sink they only ever read off.
-            let mut rc_blocks = 1usize;
-            let mut rc_id = vec![0u32; mc];
-            for (slot, &i) in chunk.iter().enumerate() {
-                if prepared[i].full {
-                    rc_id[slot] = rc_blocks as u32;
-                    ri_all[slot * RI_STRIDE + RI_RC] = rc_blocks as u32;
-                    rc_blocks += 1;
-                }
-            }
             // A debug-scratch race reads the journal, so its chunk runs the
             // diag program: journal writes plus the wider scratch stride. Debug
             // stays at the top bucket so the scratch dump keeps the full width.
             let diag = chunk.iter().any(|&i| prepared[i].debug_scratch);
+            let full = chunk.iter().any(|&i| prepared[i].full);
+            let shape = RaceShape::from_flags(full, diag);
+            // Full requests own one rc block each, blocks 1..n. The rest point
+            // at block 0, the zero-filled sink they only ever read off. A
+            // no-reply launch never touches the block at all.
+            let mut rc_blocks = 1usize;
+            let mut rc_id = vec![0u32; mc];
+            if full {
+                for (slot, &i) in chunk.iter().enumerate() {
+                    if prepared[i].full {
+                        rc_id[slot] = rc_blocks as u32;
+                        ri_all[slot * RI_STRIDE + RI_RC] = rc_blocks as u32;
+                        rc_blocks += 1;
+                    }
+                }
+            }
             let rcap = if diag {
                 SK_RMAX
             } else {
@@ -2021,7 +2401,7 @@ impl RaceContext {
             // not rebuild the full-frame lane's buffers.
             let lane_k = if frows == n { 0 } else { 1 };
             self.lane(lane_k, mc, reqs, n, skw, frows, words, srl, tick_cap, rc_blocks)?;
-            let pk = self.race_program(bucket.0, bucket.1, rcap, diag)?;
+            let pk = self.race_program(bucket.0, bucket.1, rcap, shape)?;
             let program = &self.programs[pk].4;
             let lane = &self.lanes[lane_k];
             let tabs = &self.table_cache[ti];
@@ -2066,7 +2446,11 @@ impl RaceContext {
                 }
             }
             b_scr_u.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
-            b_rc.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
+            if full {
+                // The sink block only serves non-full slots of a full launch.
+                // A no-reply program never reads rc, so its launch skips the fill.
+                b_rc.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
+            }
             b_scr_d.cmd().fill(0.0f64, None).enq().map_err(|e| e.to_string())?;
             b_status.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
             b_events.cmd().fill(0u32, None).enq().map_err(|e| e.to_string())?;
@@ -2076,13 +2460,20 @@ impl RaceContext {
             upload_ms += t_stage.elapsed().as_secs_f64() * 1e3;
 
             let t_stage = std::time::Instant::now();
+            // The C2 local work size: a forced value pads the 1-D launch to a
+            // work-group multiple and passes the real race count as `n_lanes`,
+            // so the kernel returns the idle tail lanes unchanged. `0` keeps the
+            // pre-C2 launch, global size to race count, driver picks the group.
+            let lws = self.local_size_override.unwrap_or_else(race_local_work_size);
+            let n_lanes = mc as u32;
+            let gws = if lws > 0 { mc.div_ceil(lws) * lws } else { mc };
             let mk_kernel = |resume: u32, slice_end: u32| -> Result<ocl::Kernel, String> {
-                ocl::Kernel::builder()
-                    .program(program)
-                    .name("race")
-                    .queue(queue.clone())
-                    .global_work_size(mc)
-                    .arg(b_ri)
+                let mut kb = ocl::Kernel::builder();
+                kb.program(program).name("race").queue(queue.clone()).global_work_size(gws);
+                if lws > 0 {
+                    kb.local_work_size(lws);
+                }
+                kb.arg(b_ri)
                     .arg(b_pd)
                     .arg(b_scr_u)
                     .arg(b_rc)
@@ -2107,6 +2498,7 @@ impl RaceContext {
                     .arg(tick_cap as u32)
                     .arg(slice_end)
                     .arg(resume)
+                    .arg(n_lanes)
                     .build()
                     .map_err(|e| e.to_string())
             };

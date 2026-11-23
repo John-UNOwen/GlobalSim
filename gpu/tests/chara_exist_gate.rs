@@ -3,15 +3,16 @@
 //! is_exist_chara_id is a request-constant fold: the engine keeps the region
 //! set when the argument lands in the roster's charaId set and drops it
 //! otherwise, and missing charaId defaults to 0 (activation_conditions.rs:
-//! 1584-1588, lib.rs:336). A false fold empties the alternative, and the
-//! builder skips it before touching its effects
-//! (race_solver_builder.rs:556-571), which is why the 3000xx wire skills'
-//! target-22 fan installs nothing even though the kernel has no reader.
+//! 1584-1588, lib.rs:336). Target 22 fans to every runner whose chara id
+//! equals the effect's targetValue, owner included, uncapped, behind the
+//! debuff filter (race_field.rs:441), so the wire 300101 and a crafted live
+//! arm race here instead of refusing.
 //!
 //! The gate folds both ways on both wire fields. The v77 roster carries no
 //! charaId at all, so the set is {0}: ==0 fires and 9999 stays inert there.
 //! The CM roster carries real ids, so ==1010 fires and 1002, the wire
-//! argument, stays inert. A live target-22 arm must still refuse by name.
+//! argument, stays inert. The crafted fan arm heals the 1010 runner, and a
+//! fan arm aimed at the absent 1002 selects nobody on either field.
 
 #![cfg(feature = "race")]
 
@@ -196,12 +197,15 @@ fn retail_chara_existence_folds_both_ways() {
     let mut problems: Vec<String> = Vec::new();
     let mut fired = 0usize;
     let mut inert = 0usize;
+    let mut fan_fired = 0usize;
+    let mut fan_empty = 0usize;
 
     for &seed in &SEEDS {
         // The v77 field: no charaId on any horse, so the set is {0}.
         for id in WIRES {
             let req = request_text(&field_value("examples/v77-race.jsonl", Some(V77_COURSE), seed, id));
-            let _ = run_kernel(&format!("v77 {id} seed {seed}"), &mut problems, &req, seed, true, None);
+            let full = id == "300101";
+            let _ = run_kernel(&format!("v77 {id} seed {seed}"), &mut problems, &req, seed, full, None);
         }
         let plain = match run_kernel(
             &format!("v77 plain seed {seed}"),
@@ -264,7 +268,8 @@ fn retail_chara_existence_folds_both_ways() {
         // The CM field: real charaIds, 1010 on a horse and 1002 on none.
         for id in WIRES {
             let req = request_text(&field_value("examples/cm-10701-race.jsonl", None, seed, id));
-            let _ = run_kernel(&format!("cm {id} seed {seed}"), &mut problems, &req, seed, false, None);
+            let full = id == "300101";
+            let _ = run_kernel(&format!("cm {id} seed {seed}"), &mut problems, &req, seed, full, None);
         }
         let cm_plain = match run_kernel(
             &format!("cm plain seed {seed}"),
@@ -310,33 +315,75 @@ fn retail_chara_existence_folds_both_ways() {
             inert += 1;
         }
 
-        // A live arm with the chara fan must refuse, the kernel has no
-        // reader for target 22.
+        // A live arm with the chara fan races: the fan walks the roster for
+        // the targetValue id, so it heals the 1010 runner (type 9 Recovery).
+        // The window lands mid-race, where hp is drained and the heal shows.
         let fan = crafted_field(
             "examples/cm-10701-race.jsonl",
             None,
             seed,
-            "is_exist_chara_id==1010",
-            r#"{"type":1,"target":22,"targetValue":1010,"additionalActivate":0,
-"valueUsage":1,"modifier":400000.0,"levelModifiers":[1.0,1.02,1.04,1.06,1.08,1.1,1.12,1.14,1.16,1.18]}"#,
+            "is_exist_chara_id==1010&remain_distance>=400&remain_distance<=450",
+            r#"{"type":9,"target":22,"targetValue":1010,"additionalActivate":0,
+"valueUsage":1,"modifier":550.0,"levelModifiers":[1.0,1.02,1.04,1.06,1.08,1.1,1.12,1.14,1.16,1.18]}"#,
         );
-        let _ = run_kernel(
+        match run_kernel(
             &format!("cm fan seed {seed}"),
             &mut problems,
             &fan,
             seed,
-            false,
-            Some("target 22"),
+            true,
+            None,
+        ) {
+            Some(race) => {
+                if frames_equal(&race, &cm_plain) {
+                    problems.push(format!("cm seed {seed}: the chara fan healed nobody"));
+                } else {
+                    fan_fired += 1;
+                }
+            }
+            None => {}
+        }
+        // The same fan aimed at the absent 1002 selects nobody on this field.
+        let fan_none = crafted_field(
+            "examples/cm-10701-race.jsonl",
+            None,
+            seed,
+            "is_exist_chara_id==1010&remain_distance>=400&remain_distance<=450",
+            r#"{"type":9,"target":22,"targetValue":1002,"additionalActivate":0,
+"valueUsage":1,"modifier":550.0,"levelModifiers":[1.0,1.02,1.04,1.06,1.08,1.1,1.12,1.14,1.16,1.18]}"#,
         );
+        match run_kernel(
+            &format!("cm fan1002 seed {seed}"),
+            &mut problems,
+            &fan_none,
+            seed,
+            false,
+            None,
+        ) {
+            Some(race) => {
+                if !frames_equal(&race, &cm_plain) {
+                    problems.push(format!("cm seed {seed}: the 1002 fan healed someone"));
+                } else {
+                    fan_empty += 1;
+                }
+            }
+            None => {}
+        }
     }
     println!(
-        "chara_id pins: fired {fired}, held inert {inert}, absent-id refusal pinned on every seed"
+        "chara_id pins: fired {fired}, held inert {inert}, fan healed {fan_fired}, fan empty {fan_empty}"
     );
     if fired < 2 * SEEDS.len() as usize {
         problems.push("each field's carried id must fold true on every seed".into());
     }
     if inert < 2 * SEEDS.len() as usize {
         problems.push("each field's absent id must fold false on every seed".into());
+    }
+    if fan_fired < SEEDS.len() as usize {
+        problems.push("the chara fan must heal the carried id on every seed".into());
+    }
+    if fan_empty < SEEDS.len() as usize {
+        problems.push("the fan of an absent id must select nobody on every seed".into());
     }
     if !problems.is_empty() {
         panic!("{} mismatching races:\n{}", problems.len(), problems.join("\n"));
