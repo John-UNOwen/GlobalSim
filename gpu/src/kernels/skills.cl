@@ -34,7 +34,12 @@
 #define SK_REGIONS (SK_ARMS + SK_ASTRIDE * 256)
 #define SK_TERMS (SK_REGIONS + SK_GSTRIDE * 2048)
 #define SK_TAGS (SK_TERMS + SK_MSTRIDE * 160)
+// The retail lane builds this program with `-D SK_TMAX=<bucket>` to match a
+// tag pool the host compiler packed at that bucket. The tag pool is the last
+// region, so only the stride tail moves with it.
+#ifndef SK_TMAX
 #define SK_TMAX 4096
+#endif
 #define SK_STRIDE (SK_TAGS + SK_TMAX + 16)
 // The runner row remain_distance_viewer_id reads (playerHorseIndex).
 #define SK_VIDX 9
@@ -61,6 +66,9 @@
 #define SK_WINMAX 16
 #define SK_MWINMAX 64
 #define SK_ARMMAX 4
+// One runner's random-activation pool, sized by the host's refusal guard
+// (skills_compile::SK_PICKMAX).
+#define SK_PICKMAX 64
 
 #define SK_FLAG_RETAIN 1
 #define SK_FLAG_WISDOM 2
@@ -78,6 +86,7 @@
 #define SK_FLAG_BUMPED 8192
 #define SK_FLAG_INIT_BUMP 16384
 #define SK_FLAG_SYOUBU 262144
+#define SK_FLAG_AFTEREND 524288
 
 #define SK_TERM_ALL_CORNER 0
 #define SK_TERM_STRAIGHT 1
@@ -184,6 +193,12 @@
 // with the engine's is_opponent team filter (race_field.rs:913-915).
 #define FEAT_TEMPT_B_O 69
 #define FEAT_TEMPT_F_O 70
+// is_other_character_activate_advantage_skill: the queried kind sits in the
+// code, FEAT_ADVA0 + kind. The value is 1.0 when a previous-tick advantage
+// mark for that kind exists on another runner outside the owner's team
+// (race_field.rs:387-392). Only kinds 0 to 42 are emitted; the compiler
+// folds a larger kind to false.
+#define FEAT_ADVA0 96
 
 // The (skill, effect) dispatch kinds the port covers.
 #define SK_EFF_SPEEDUP 1
@@ -632,6 +647,14 @@ static void sk_init_triggers(__global const uint* sk, __global uint* sks,
                     }
                 }
                 for (int i = 0; i < 2 * mcount; i++) wd[SKD_WINDOWS + i] = merged[i];
+            }
+            if (mcount == 0 && (rd[2] & SK_FLAG_AFTEREND) != 0u) {
+                // The builder's detail-zero placeholder for a collapsed first
+                // alternative: one window past the course end, so only a
+                // reservation can reach it (race_solver_builder.rs:594-625).
+                wd[SKD_WINDOWS] = 9999.0;
+                wd[SKD_WINDOWS + 1] = 9999.0;
+                mcount = 1;
             }
             sks[SKR_STRIDE * rec + SKR_NWIN] = (uint)mcount;
             double t0 = 0.0;

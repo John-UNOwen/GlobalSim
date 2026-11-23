@@ -72,22 +72,30 @@ pub const SK_CORMAX: usize = 12;
 pub const SK_SLOPEMAX: usize = 16;
 pub const SK_REGMAX: usize = 16;
 pub const SK_ARMMAX: usize = 4;
+/// One runner's random-activation pool bound. The reservation pass keeps the
+/// pool in per-race arrays this wide, so a wider pool is refused rather than
+/// truncated (race_solver.rs:2698-2717 walks an unbounded pending list).
+pub const SK_PICKMAX: usize = 64;
 
-// The retail compiler packs the table at the first effect-cap bucket that
-// fits the field, and the race program builds with `-D SK_EMAX=<bucket>`
-// matching it. The regions after the effect pool move with the bucket.
+// The compiler packs the table at the first (effect, tag) bucket pair that
+// fits and the race program builds with matching `-D SK_EMAX`/`SK_TMAX`.
+// Regions follow the effect bucket and the stride tail follows the tag pool.
 pub const SK_EMAX_BUCKETS: [usize; 4] = [256, 512, 1024, 2048];
+// The measured CM fields ask for 3938 to 4656 tag bytes, so one doubling past
+// the default covers every field on record.
+pub const SK_TMAX_BUCKETS: [usize; 2] = [4096, 8192];
 pub const fn sk_programs_at(emax: usize) -> usize { SK_EFFECTS + SK_ESTRIDE * emax }
 pub const fn sk_arms_at(emax: usize) -> usize { sk_programs_at(emax) + SK_PSTRIDE * SK_PMAX }
 pub const fn sk_regions_at(emax: usize) -> usize { sk_arms_at(emax) + SK_ASTRIDE * SK_AMAX }
 pub const fn sk_terms_at(emax: usize) -> usize { sk_regions_at(emax) + SK_GSTRIDE * SK_GMAX }
 pub const fn sk_tags_at(emax: usize) -> usize { sk_terms_at(emax) + SK_MSTRIDE * SK_MMAX }
-pub const fn sk_stride_at(emax: usize) -> usize { sk_tags_at(emax) + SK_TMAX + 16 }
+pub const fn sk_stride_at(emax: usize, tmax: usize) -> usize { sk_tags_at(emax) + tmax + 16 }
 
-/// Region offsets for one bucket, the compiler side of the skills.cl defines.
+/// Region offsets for one bucket pair, the compiler side of the skills.cl defines.
 #[derive(Clone, Copy)]
 pub struct SkLayout {
     pub emax: usize,
+    pub tmax: usize,
     pub programs: usize,
     pub arms: usize,
     pub regions: usize,
@@ -96,15 +104,16 @@ pub struct SkLayout {
     pub stride: usize,
 }
 
-pub const fn sk_layout(emax: usize) -> SkLayout {
+pub const fn sk_layout(emax: usize, tmax: usize) -> SkLayout {
     SkLayout {
         emax,
+        tmax,
         programs: sk_programs_at(emax),
         arms: sk_arms_at(emax),
         regions: sk_regions_at(emax),
         terms: sk_terms_at(emax),
         tags: sk_tags_at(emax),
-        stride: sk_stride_at(emax),
+        stride: sk_stride_at(emax, tmax),
     }
 }
 
@@ -113,7 +122,7 @@ pub const SK_ARMS: usize = sk_arms_at(SK_EMAX);
 pub const SK_REGIONS: usize = sk_regions_at(SK_EMAX);
 pub const SK_TERMS: usize = sk_terms_at(SK_EMAX);
 pub const SK_TAGS: usize = sk_tags_at(SK_EMAX);
-pub const SK_STRIDE: usize = sk_stride_at(SK_EMAX);
+pub const SK_STRIDE: usize = sk_stride_at(SK_EMAX, SK_TMAX);
 
 pub const SK_FLAG_RETAIN: u32 = 1;
 pub const SK_FLAG_WISDOM: u32 = 2;
@@ -147,6 +156,10 @@ pub const SK_FLAG_DYN: u32 = 131072;
 /// wire modifier 0 with the live formula at activation
 /// (race_solver_builder.rs:817-848, race_solver.rs:2496-2498).
 pub const SK_FLAG_SYOUBU: u32 = 262144;
+/// The engine keeps a detail-zero placeholder when the first alternative
+/// collapses: one window past the course end, and the placeholder's cooldown is
+/// zero, not the wire's (race_solver_builder.rs:594-625).
+pub const SK_FLAG_AFTEREND: u32 = 524288;
 
 pub const SK_TERM_ALL_CORNER: u32 = 0;
 pub const SK_TERM_STRAIGHT: u32 = 1;
@@ -254,6 +267,11 @@ pub const FEAT_LSCALC: u32 = 68;
 // is_opponent team filter (race_field.rs:913-915).
 pub const FEAT_TEMPT_B_O: u32 = 69;
 pub const FEAT_TEMPT_F_O: u32 = 70;
+// is_other_character_activate_advantage_skill: FEAT_ADVA0 + the queried kind
+// (0..42), the kind in the id because the argument word carries the
+// comparison. The kernel reads the previous-tick advantage marks
+// (race_field.rs:387-392).
+pub const FEAT_ADVA0: u32 = 96;
 
 /// One race's compiled table. `reason` is Some when the race must run on the
 /// CPU, naming the first construct the kernel cannot evaluate. `bumps` are
@@ -274,9 +292,16 @@ pub struct SkillsPlan {
     /// The effect-cap bucket `words` was packed at, so the launch picks the
     /// program built with the matching `-D SK_EMAX`.
     pub emax: usize,
+    /// The tag-cap bucket `words` was packed at, the `-D SK_TMAX` twin.
+    pub tmax: usize,
     /// True when the effect pool cap refused the plan, so a wider bucket may
     /// still fit the field.
     pub effects_overflow: bool,
+    /// True when the tag pool cap refused the plan, so a wider bucket may
+    /// still fit the field.
+    pub tags_overflow: bool,
+    /// Tag pool bytes the field asked for, past the cap when it overflowed.
+    pub tags_used: usize,
     /// Compiled condition-arm count, for coverage reports on SK_AMAX.
     pub arms: usize,
 }
@@ -325,14 +350,14 @@ pub fn apply_classic_sampled(
 }
 
 pub fn plan(root: &Value, course: &Value) -> SkillsPlan {
-    plan_lane(root, course, Lane::Retail, None, SK_EMAX)
+    plan_lane(root, course, Lane::Retail, None, SK_EMAX, SK_TMAX)
 }
 
 /// Compile against the classic (non-retail) runtime profile: the classic
 /// effect-value chain and durations, the classic condition leaves, and
 /// sampled leaves carried as host sampler jobs.
 pub fn plan_classic(root: &Value, course: &Value) -> SkillsPlan {
-    plan_lane(root, course, Lane::Classic, None, SK_EMAX)
+    plan_lane(root, course, Lane::Classic, None, SK_EMAX, SK_TMAX)
 }
 
 /// The classic host inputs the classic profile cannot re-derive from the
@@ -349,31 +374,43 @@ pub struct ClassicExtras {
 }
 
 pub fn plan_classic_with(root: &Value, course: &Value, extras: &ClassicExtras) -> SkillsPlan {
-    plan_lane(root, course, Lane::Classic, Some(extras), SK_EMAX)
+    plan_lane(root, course, Lane::Classic, Some(extras), SK_EMAX, SK_TMAX)
 }
 
 /// Compile against the retail profile with the host inputs the retail lane
 /// reads: only the later-stamina request flag drives the injected
 /// staminasyoubu records (lib.rs:547, race_solver_builder.rs:817-848).
-/// A field whose effects pass the first bucket keeps escalating through
-/// SK_EMAX_BUCKETS, so one program usually serves every retail field.
+/// A field whose effects or tags pass the first bucket keeps escalating that
+/// cap's ladder, so one program usually serves every retail field.
 pub fn plan_retail_with(root: &Value, course: &Value, extras: &ClassicExtras) -> SkillsPlan {
-    let mut plan = plan_lane(root, course, Lane::Retail, Some(extras), SK_EMAX_BUCKETS[0]);
-    for &bucket in &SK_EMAX_BUCKETS[1..] {
-        if !plan.effects_overflow {
+    let (mut e, mut t) = (0usize, 0usize);
+    let mut plan = plan_lane(root, course, Lane::Retail, Some(extras), SK_EMAX_BUCKETS[e], SK_TMAX_BUCKETS[t]);
+    loop {
+        if plan.effects_overflow && e + 1 < SK_EMAX_BUCKETS.len() {
+            e += 1;
+        } else if plan.tags_overflow && t + 1 < SK_TMAX_BUCKETS.len() {
+            t += 1;
+        } else {
             return plan;
         }
-        plan = plan_lane(root, course, Lane::Retail, Some(extras), bucket);
+        plan = plan_lane(root, course, Lane::Retail, Some(extras), SK_EMAX_BUCKETS[e], SK_TMAX_BUCKETS[t]);
     }
-    plan
 }
 
-fn plan_lane(root: &Value, course: &Value, lane: Lane, extras: Option<&ClassicExtras>, emax: usize) -> SkillsPlan {
-    let layout = sk_layout(emax);
+fn plan_lane(
+    root: &Value,
+    course: &Value,
+    lane: Lane,
+    extras: Option<&ClassicExtras>,
+    emax: usize,
+    tmax: usize,
+) -> SkillsPlan {
+    let layout = sk_layout(emax, tmax);
     let mut c = Compiler {
         words: vec![0; layout.stride],
         layout,
         effects_overflow: false,
+        tags_overflow: false,
         tags: Vec::new(),
         reason: None,
         bumps: Vec::new(),
@@ -558,6 +595,7 @@ struct Compiler {
     words: Vec<u32>,
     layout: SkLayout,
     effects_overflow: bool,
+    tags_overflow: bool,
     tags: Vec<u8>,
     reason: Option<String>,
     bumps: Vec<(usize, i32, f64)>,
@@ -1245,9 +1283,9 @@ impl Compiler {
         self.words[SK_NPROG] = self.nprog as u32;
         self.words[SK_NREG] = self.nreg as u32;
         self.words[SK_NEFF] = self.neff as u32;
-        self.words[SK_NTAG] = self.tags.len().min(SK_TMAX) as u32;
+        self.words[SK_NTAG] = self.tags.len().min(self.layout.tmax) as u32;
         self.words[SK_NTERM] = self.nterm as u32;
-        if self.tags.len() > SK_TMAX
+        if self.tags.len() > self.layout.tmax
             || self.nprog > SK_PMAX
             || self.nreg > SK_GMAX
             || self.nterm > SK_MMAX
@@ -1256,9 +1294,42 @@ impl Compiler {
             self.unsupported("skill table overflow");
             self.words[SK_NREC] = 0;
         }
+        if self.reason.is_none() {
+            // The reservation pass keeps one runner's pool in SK_PICKMAX-wide
+            // arrays, and the kernel's pool excludes a folded-dead record
+            // unless the builder's placeholder replaced it.
+            let mut pool: std::collections::BTreeSet<(u32, u32)> =
+                std::collections::BTreeSet::new();
+            for rec in 0..self.nrec {
+                let at = SK_RECORDS + SK_RSTRIDE * rec;
+                let flags = self.words[at + 2];
+                let core = SK_FLAG_PRIMARY | SK_FLAG_GENERAL | SK_FLAG_RSELIG;
+                if flags & core == core
+                    && flags & (SK_FLAG_RANGOLD | SK_FLAG_RANWHITE) != 0
+                    && (flags & SK_FLAG_DEAD == 0 || flags & SK_FLAG_AFTEREND != 0)
+                {
+                    pool.insert((self.words[at + 1], self.words[at]));
+                }
+            }
+            let mut best = (u32::MAX, 0usize);
+            let mut cnt = 0usize;
+            for (r, _) in &pool {
+                cnt = if *r == best.0 { cnt + 1 } else { best.0 = *r; 1 };
+                if cnt > best.1 {
+                    best = (*r, cnt);
+                }
+            }
+            if best.1 > SK_PICKMAX {
+                self.unsupported(format!(
+                    "runner {} offers {} random-activation candidates, over the kernel's {SK_PICKMAX} pool slots",
+                    best.0, best.1
+                ));
+                self.words[SK_NREC] = 0;
+            }
+        }
         // Four tag bytes per word, little endian, so the kernel can view the
         // pool as a byte array for r128_substream_hash.
-        for (i, chunk) in self.tags.chunks(4).take(SK_TMAX / 4).enumerate() {
+        for (i, chunk) in self.tags.chunks(4).take(self.layout.tmax / 4).enumerate() {
             let mut word = 0u32;
             for (j, byte) in chunk.iter().enumerate() {
                 word |= (*byte as u32) << (8 * j);
@@ -1268,12 +1339,25 @@ impl Compiler {
         let bumps = if self.reason.is_some() { Vec::new() } else { std::mem::take(&mut self.bumps) };
         let live_guts = self.reason.is_none() && self.live_guts;
         let classic_jobs = if self.reason.is_some() { Vec::new() } else { std::mem::take(&mut self.classic_jobs) };
-        SkillsPlan { words: self.words, reason: self.reason, bumps, live_guts, classic_jobs, emax: self.layout.emax, effects_overflow: self.effects_overflow, arms: self.narm }
+        SkillsPlan {
+            words: self.words,
+            reason: self.reason,
+            bumps,
+            live_guts,
+            classic_jobs,
+            emax: self.layout.emax,
+            tmax: self.layout.tmax,
+            effects_overflow: self.effects_overflow,
+            tags_overflow: self.tags_overflow,
+            tags_used: self.tags.len(),
+            arms: self.narm,
+        }
     }
 
     fn tag(&mut self, text: &str) -> (usize, usize) {
         let at = self.tags.len();
         self.tags.extend(text.bytes());
+        self.tags_overflow |= self.tags.len() > self.layout.tmax;
         (at, text.len())
     }
 
@@ -1360,7 +1444,16 @@ impl Compiler {
         let alts = match def.get("alternatives").and_then(Value::as_array) {
             Some(a) if !a.is_empty() => a,
             _ => {
-                self.unsupported(format!("skill {sid} has no alternatives"));
+                // The engine installs nothing for a race-inactive skill
+                // (race_solver_builder.rs:497-500), the Carnival Bonus pair
+                // (1000011, 1000012) among them. Any other empty table is a
+                // request error the kernel must not answer instead.
+                if def.get("raceInactive").and_then(Value::as_bool) == Some(true) {
+                    return;
+                }
+                self.unsupported(format!(
+                    "skill {sid} has no installed activation alternatives"
+                ));
                 return;
             }
         };
@@ -2066,7 +2159,7 @@ impl Compiler {
                     let k = ef.get("type").and_then(Value::as_i64).unwrap_or(-1) as i32;
                     let t = ef.get("target").and_then(Value::as_i64).unwrap_or(1) as i32;
                     let vu = ef.get("valueUsage").and_then(Value::as_f64).unwrap_or(1.0) as i32;
-                    matches!(k, 2 | 3 | 4 | 5) && t == 1 && vu == 1
+                    matches!(k, 1..=5) && t == 1 && vu == 1
                 });
             // The random-activation candidate filter keeps a record only when
             // every effect has a non-negative duration and a type past
@@ -2135,12 +2228,21 @@ impl Compiler {
                 // except the owner, uncapped, with the debuff filters
                 // (race_field.rs:439-461). The classic fan has no style branch.
                 let style_fan = target == 18 && self.lane != Lane::Classic;
+                // Codes 19/20: the kakari-filtered rank walk, targetValue picks
+                // drawn from the caster's r128 stream (race_field.rs:429-438).
+                // The Noop/Runaway selection shape stays refused (:2479).
+                let kakari_fan = matches!(target, 19 | 20) && self.lane == Lane::Retail
+                    && !matches!(kind, 0 | 6);
+                // Code 23 walks the field's heal history newest first, capped
+                // at targetValue (race_field.rs:442-453). The classic queue
+                // path delivers through the end-of-tick flush and stays refused.
+                let heal_fan = target == 23 && self.lane == Lane::Retail;
                 // The engine skips a dead alternative's effects before it even
                 // builds them (race_solver_builder.rs:556-571), so a folded-dead
                 // arm installs nothing and target 22 never runs. A live arm
                 // still refuses, keeping the fan off the kernel.
                 if !(dead || matches!(target, 1 | 4 | 9 | 10) || style_fan
-                    || (target == 21 && kind == 13)) {
+                    || (target == 21 && kind == 13) || kakari_fan || heal_fan) {
                     self.unsupported(format!(
                         "skill {sid} effect target {target} is not ported"
                     ));
@@ -2252,7 +2354,7 @@ impl Compiler {
                 if self.lane != Lane::Classic
                     && static_fire
                     && target == 1
-                    && matches!(kind, 4 | 5 | 29)
+                    && matches!(kind, 1 | 4 | 5 | 29)
                 {
                     self.bumps.push((runner, kind, modifier));
                     bumped = true;
@@ -2327,6 +2429,11 @@ impl Compiler {
                     })
                 })
                 .unwrap_or(false);
+            // A collapsed first alternative still leaves the engine's detail-zero
+            // placeholder in the pending list when it has effects, so it stays a
+            // random-activation candidate (race_solver_builder.rs:594-625).
+            let afterend =
+                dead && alt_index == 0 && self.lane != Lane::Classic && self.neff > eff_base;
             let at = SK_RECORDS + SK_RSTRIDE * self.nrec;
             self.words[at] = sid_num;
             self.words[at + 1] = runner as u32;
@@ -2346,7 +2453,8 @@ impl Compiler {
                 | (if bumped { SK_FLAG_BUMPED } else { 0 })
                 | (if gated_static { SK_FLAG_INIT_BUMP | SK_FLAG_BUMPED } else { 0 })
                 | (if unique { SK_FLAG_UNIQUE } else { 0 })
-                | (if dyn_gate { SK_FLAG_DYN } else { 0 });
+                | (if dyn_gate { SK_FLAG_DYN } else { 0 })
+                | (if afterend { SK_FLAG_AFTEREND } else { 0 });
             self.words[at + 3] = priority as u32;
             self.words[at + 4] = rarity;
             self.words[at + 5] = (self.neff - eff_base) as u32;
@@ -2357,7 +2465,7 @@ impl Compiler {
             self.words[at + 10] = term_word;
             self.words[at + 11] = arm0_pre.0 as u32;
             self.words[at + 12] = arm0_pre.1 as u32;
-            let w = f64_words(cooldown);
+            let w = f64_words(if afterend { 0.0 } else { cooldown });
             self.words[at + 13] = w[0];
             self.words[at + 14] = w[1];
             self.words[at + 15] = wis_off as u32;
@@ -2812,12 +2920,14 @@ impl Compiler {
             ),
         };
         let tier = bounds.iter().filter(|b| **b <= value).count();
+        // The engine multiplies by f32-rounded factors (race_solver_builder.rs:923),
+        // and f64 1.2 differs from the engine's 1.2000000476837158 near the fold.
         let mut factor = match tier {
-            0 => 0.8,
-            1 => 0.9,
+            0 => 0.800000011920929,
+            1 => 0.8999999761581421,
             2 => 1.0,
-            3 => 1.1,
-            _ => 1.2,
+            3 => 1.100000023841858,
+            _ => 1.2000000476837158,
         };
         if (matches!(value_usage, 3..=7) && value >= 99999.0)
             || (value_usage == 12 && value >= 99999999.0)
@@ -3121,8 +3231,13 @@ struct Statics {
     // v_motivation reads the per-runner mood clamped to [-2,2] (lib.rs:505).
     motivation: f64,
     // The runtime_phase trigger base stats are ranked stats truncated to i32
-    // (race_solver_builder.rs:872-881), so v_base_power folds per runner.
+    // (race_solver_builder.rs:872-881), so v_base_* folds per runner. All five
+    // share the builder's ranked_base_stat transform.
     base_power: f64,
+    base_speed: f64,
+    base_stamina: f64,
+    base_guts: f64,
+    base_wiz: f64,
     // post_number compares the client gate block for the wire gateIndex
     // (default roster index, lib.rs:311) over the roster size.
     post_number: f64,
@@ -3246,6 +3361,26 @@ impl Statics {
             // result to i32 (race_solver_builder.rs:872-881).
             base_power: ref_ranked_base_stat(
                 horse_raw_stat(horse, 2),
+                horse.get("mood").and_then(Value::as_f64).map(|n| n as i32).unwrap_or(0),
+                horse_team_rank(horse),
+            ) as i32 as f64,
+            base_speed: ref_ranked_base_stat(
+                horse_raw_stat(horse, 0),
+                horse.get("mood").and_then(Value::as_f64).map(|n| n as i32).unwrap_or(0),
+                horse_team_rank(horse),
+            ) as i32 as f64,
+            base_stamina: ref_ranked_base_stat(
+                horse_raw_stat(horse, 1),
+                horse.get("mood").and_then(Value::as_f64).map(|n| n as i32).unwrap_or(0),
+                horse_team_rank(horse),
+            ) as i32 as f64,
+            base_guts: ref_ranked_base_stat(
+                horse_raw_stat(horse, 3),
+                horse.get("mood").and_then(Value::as_f64).map(|n| n as i32).unwrap_or(0),
+                horse_team_rank(horse),
+            ) as i32 as f64,
+            base_wiz: ref_ranked_base_stat(
+                horse_raw_stat(horse, 4),
                 horse.get("mood").and_then(Value::as_f64).map(|n| n as i32).unwrap_or(0),
                 horse_team_rank(horse),
             ) as i32 as f64,
@@ -3554,10 +3689,14 @@ fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, Str
         "activate_count_all" if matches!(t.op, 3 | 5) => Ok(dyn_leaf(FEAT_ACTALL, t)),
         "activate_count_end_after" if t.op == 5 => Ok(dyn_leaf(FEAT_ACT2, t)),
         "activate_count_later_half" if t.op == 5 => Ok(dyn_leaf(FEAT_ACTLH, t)),
-        // The runtime_phase builder ranks the wire power and truncates to i32,
-        // so v_base_power is a per-runner constant (activation_conditions.rs:1233
-        // reading the trigger horse built at race_solver_builder.rs:872-881).
+        // The runtime_phase builder ranks each wire base stat and truncates to
+        // i32, so v_base_* is a per-runner constant (activation_conditions.rs
+        // :1233-1237 reading the trigger horse at race_solver_builder.rs:876-881).
         "base_power" => Ok(fold(s.base_power, t)),
+        "base_speed" => Ok(fold(s.base_speed, t)),
+        "base_stamina" => Ok(fold(s.base_stamina, t)),
+        "base_guts" => Ok(fold(s.base_guts, t)),
+        "base_wiz" => Ok(fold(s.base_wiz, t)),
         "bashin_diff_behind" => Ok(dyn_leaf(FEAT_BASH_BEHIND, t)),
         "bashin_diff_infront" => Ok(dyn_leaf(FEAT_BASH_INFRONT, t)),
         "behind_near_lane_time" => Ok(dyn_leaf(FEAT_BHNEAR, t)),
@@ -3572,6 +3711,11 @@ fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, Str
         "change_order_up_middle" => Ok(dyn_leaf(FEAT_CHGUP_MID, t)),
         "compete_fight_count" if t.op == 4 => Ok(dyn_leaf(FEAT_FIGHT, t)),
         "corner" => Ok(dyn_leaf(FEAT_CORNER, t)),
+        // v_corner_count is the course corner count (activation_conditions.rs
+        // :1238), a course constant, and v_course_distance is its distance
+        // (:1239); both fold at compile.
+        "corner_count" => Ok(fold(g.corners.len() as f64, t)),
+        "course_distance" => Ok(fold(d, t)),
         // The retail sampler resolves the request argument to one corner row
         // at init (retail_initialization.rs:135-166) and draws one distance
         // window there, so the leaf is a sampled term like the other randoms.
@@ -3685,7 +3829,19 @@ fn classify(t: &Term, g: &Geometry, s: &Statics, lane: Lane) -> Result<Leaf, Str
         "is_move_lane" => Ok(dyn_leaf(FEAT_MOVELANE, t)),
         // The engine swaps a field-wide set of previous-tick (runner, kind)
         // advantage pairs with same-team exclusion at every field update
-        // (race_field.rs:373-398), which no per-runner kernel flag mirrors.
+        // (race_field.rs:373-398). Only the eq filter is registered
+        // (activation_conditions.rs:1589-1591), and the kernel carries the
+        // marks in per-runner kind masks retired at each tick end. A kind no
+        // effect type can produce (outside 0..42) never marks: fold false.
+        "is_other_character_activate_advantage_skill"
+            if lane != Lane::Classic && t.op == 0 =>
+        {
+            if (0..=42).contains(&t.arg) {
+                Ok(Leaf::Dynamic { feat: FEAT_ADVA0 + t.arg as u32, cmp: 0, arg: Some(1.0) })
+            } else {
+                Ok(Leaf::False)
+            }
+        }
         "is_other_character_activate_advantage_skill" => Err(
             "'is_other_character_activate_advantage_skill' needs the field's team-filtered \
              previous-tick advantage pair set".into(),

@@ -322,16 +322,14 @@ fn app_traffic_answers_full_replies_byte_equal() {
 
 /// Skill ids the retail compiler refuses, normalized to the family the
 /// refusal names: the skill id is dropped, and a condition refusal keeps
-/// only the missing leaf behind the colon. 741 of the 751 ids compile, the
-/// target-18, is_badstart, straight_front_type, lastspurt,
-/// last_straight_random, random_lot and is_exist_chara_id families having
-/// left the list with the E1a port.
-const RETAIL_REFUSALS: [&str; 5] = [
-    "'is_other_character_activate_advantage_skill' needs the field's team-filtered previous-tick advantage pair set",
+/// only the missing leaf behind the colon. Of the 751 ids, all but the
+/// over-four-arms shapes compile: the target-18, is_badstart,
+/// straight_front_type, lastspurt, last_straight_random, random_lot and
+/// is_exist_chara_id families left with the E1a port, the kakari fan and
+/// heal fan with X5, the advantage marks with X5's condition port, and the
+/// raceInactive carnival entries compile as installed no-ops.
+const RETAIL_REFUSALS: [&str; 1] = [
     "condition has more than 4 arms",
-    "effect target 19 is not ported",
-    "effect target 20 is not ported",
-    "has no alternatives",
 ];
 
 /// Drop the per-id prefix and the condition text so a refusal maps to its
@@ -398,9 +396,10 @@ fn every_merged_skill_compiles_or_refuses_by_name_retail() {
     assert!(unexpected.is_empty(), "undocumented retail refusals:\n{}", unexpected.join("\n"));
 }
 
-/// Classic counterparts of RETAIL_REFUSALS, same normalization. 451 of the
-/// 751 ids compile.
-const CLASSIC_REFUSALS: [&str; 52] = [
+/// Classic counterparts of RETAIL_REFUSALS, same normalization. 453 of the
+/// 751 ids compile; the raceInactive carnival entries compile as installed
+/// no-ops on this lane too.
+const CLASSIC_REFUSALS: [&str; 51] = [
     "'is_badstart'==0 is not ported",
     "'is_exist_chara_id'==1002 is not ported",
     "'is_other_character_activate_advantage_skill' needs the field's team-filtered previous-tick advantage pair set",
@@ -449,7 +448,6 @@ const CLASSIC_REFUSALS: [&str; 52] = [
     "condition term 'temptation_opponent_count_behind' reads live runtime state with no reader in the classic kernel",
     "condition term 'temptation_opponent_count_infront' reads live runtime state with no reader in the classic kernel",
     "effect target 18 is not ported",
-    "has no alternatives",
     "type 37 is not ported to the classic runtime",
     "value_usage 14 draws live state at activation, which the classic runtime does not model",
     "value_usage 8 draws live state at activation, which the classic runtime does not model",

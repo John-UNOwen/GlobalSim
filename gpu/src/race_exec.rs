@@ -43,7 +43,7 @@ pub fn course_tick_bound(distance: f64) -> usize {
 pub const RACE_MAX_SLOPES: usize = 16;
 pub const RI_STRIDE: usize = RI_DEBUG_TICK + 24;
 pub const RIL_STRIDE: usize = PD_RUN0 + PD_RUN_STRIDE * RACE_MAXR;
-pub const ST_STRIDE: usize = ST_LATER_SYB + 1;
+pub const ST_STRIDE: usize = ST_HEALC + 1;
 // Skill scratch mirrors of retail_core.cl and skills.cl.
 pub const SK_STRIDE: usize = crate::skills_compile::SK_STRIDE;
 // The compiled table always keeps the SK_RMAX layout. Only the scratch
@@ -170,7 +170,7 @@ pub const PD_FC_HALF1: usize = PD_CF_DIST + 12;
 // then recomputes the guts-derived powf words from the live field.
 pub const PD_LIVE_GUTS: usize = PD_CF_DIST + 13;
 pub const PD_RUN0: usize = PL_FRONT_LANE + 32;
-pub const PD_RUN_STRIDE: usize = 14;
+pub const PD_RUN_STRIDE: usize = 16;
 pub const PRD_POWF: usize = 0;
 pub const PRD_DUEL_T: usize = 1;
 pub const PRD_DUEL_A: usize = 2;
@@ -194,6 +194,10 @@ pub const PRD_SPOT_PROF: usize = 10;
 pub const PRD_LATER: usize = 11;
 pub const PRD_R30_HI: usize = 12;
 pub const PRD_R30_LO: usize = 13;
+// The construction SpeedUp bump pair: the clamped speed field the plan words
+// freeze from, and the unclamped accumulator, NaN when no bump chained.
+pub const PRD_BOOST_SPEED: usize = 14;
+pub const PRD_SPEED_ACC: usize = 15;
 pub const PC_LAST_STRAIGHT_START: usize = 184;
 pub const PC_LAST_CORNER_START: usize = 186;
 pub const PC_FIRST_MOVE_POINT: usize = 187;
@@ -236,6 +240,9 @@ pub const ST_LATER_CMP: usize = ST_LATER_KEEP + 1;
 pub const ST_LATER_SEC: usize = ST_LATER_CMP + 1;
 pub const ST_LATER_GATE: usize = ST_LATER_SEC + 1;
 pub const ST_LATER_SYB: usize = ST_LATER_GATE + 1;
+// The field heal ordinal and its tick-end snapshot, mirror of retail_core.cl.
+pub const ST_HEALN: usize = ST_LATER_SYB + 1;
+pub const ST_HEALC: usize = ST_HEALN + 1;
 // skillEvents log, mirror of retail_core.cl: word 0 is the entry count,
 // then (runner, id) pairs, id EV_KAKARI for a completed rush episode.
 pub const EV_MAX: usize = 512;
@@ -258,7 +265,7 @@ const SCR_HP_IN: usize = SCR_INIT_OUT + OOU;
 const SCR_HP_OUT: usize = SCR_HP_IN + RACE_MAXR * IIU;
 const SCR_STATE: usize = SCR_HP_OUT + RACE_MAXR * 180;
 // SI_STRIDE mirror: retail_core.cl sizes the scalar block by SI_SLOTS.
-const SCR_SF: usize = SCR_STATE + 90 * RACE_MAXR;
+const SCR_SF: usize = SCR_STATE + 95 * RACE_MAXR;
 const SCR_LISTS: usize = SCR_SF + SF_STRIDE * RACE_MAXR;
 const SCR_CAND: usize = SCR_LISTS + LIST_STRIDE * RACE_MAXR;
 const SCR_CACHED: usize = (SCR_CAND + 3 * CAND_MAX + 63) & !63;
@@ -705,6 +712,8 @@ pub struct Prepared {
     /// never reaches a launch). The launch picks the program built with the
     /// matching `-D SK_EMAX`.
     sk_emax: usize,
+    /// The tag-cap bucket `sk` was packed at, the `-D SK_TMAX` twin.
+    sk_tmax: usize,
     // Compact launch row mask: the kept runner indices, empty for the full
     // launch that writes every runner's frame row.
     frame_rows: Vec<usize>,
@@ -719,6 +728,11 @@ impl Prepared {
     /// The effect-cap bucket of the compiled skill table.
     pub fn sk_emax(&self) -> usize {
         self.sk_emax
+    }
+
+    /// The tag-cap bucket of the compiled skill table.
+    pub fn sk_tmax(&self) -> usize {
+        self.sk_tmax
     }
 
     /// The race's runner count (one launch needs one uniform count).
@@ -803,6 +817,7 @@ impl Prepared {
             grid: false,
             full: false,
             sk_emax: 0,
+            sk_tmax: 0,
             frame_rows: Vec::new(),
         }
     }
@@ -853,6 +868,7 @@ fn prepare(
         grid: false,
         full: false,
         sk_emax: 0,
+        sk_tmax: 0,
         frame_rows: Vec::new(),
     });
     // One validity test mirrors experimental_grid_enabled (src/lib.rs:262-272),
@@ -1104,7 +1120,7 @@ fn prepare(
             single_mode,
         });
     }
-    Ok(Prepared { ri, pd, req: next_req(), n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, live_guts: sk_plan.live_guts, debug_scratch: false, grid, full: false, sk_emax: sk_plan.emax, frame_rows: Vec::new() })
+    Ok(Prepared { ri, pd, req: next_req(), n: horses.len(), stats: stats_cases, host_fallback: None, geometry, seed: seed_i32, sk: sk_plan.words, bumps: sk_plan.bumps, live_guts: sk_plan.live_guts, debug_scratch: false, grid, full: false, sk_emax: sk_plan.emax, sk_tmax: sk_plan.tmax, frame_rows: Vec::new() })
 }
 
 /// Engine rule: an installed skill whose definition carries a type 6 effect
@@ -1503,10 +1519,10 @@ pub struct RaceContext {
     courses: Value,
     spike: crate::gpu::Spike,
     init_program: ocl::Program,
-    // Race programs by (effect bucket, record bucket, journal), built on
-    // first use of a variant. The top record bucket without the journal is
-    // built in open().
-    programs: Vec<(usize, usize, bool, ocl::Program)>,
+    // Race programs by (effect bucket, tag bucket, record bucket, journal),
+    // built on first use. The top record bucket without the journal is built
+    // in open().
+    programs: Vec<(usize, usize, usize, bool, ocl::Program)>,
     registry: GeometryRegistry,
     lanes: Vec<LaneSet>,
     table_cache: Vec<TableSet>,
@@ -1527,7 +1543,8 @@ impl RaceContext {
         let spike_ms = started.elapsed().as_secs_f64() * 1e3;
         let started = std::time::Instant::now();
         let default_emax = crate::skills_compile::SK_EMAX_BUCKETS[0];
-        let program = spike.build_race_program(default_emax, SK_RMAX, false)?;
+        let default_tmax = crate::skills_compile::SK_TMAX;
+        let program = spike.build_race_program(default_emax, default_tmax, SK_RMAX, false)?;
         let race_program_ms = started.elapsed().as_secs_f64() * 1e3;
         let started = std::time::Instant::now();
         let init_program = spike.build_program(crate::gpu::INITIALIZATION_KERNEL_SOURCE)?;
@@ -1547,7 +1564,7 @@ impl RaceContext {
             courses,
             spike,
             init_program,
-            programs: vec![(default_emax, SK_RMAX, false, program)],
+            programs: vec![(default_emax, default_tmax, SK_RMAX, false, program)],
             registry: GeometryRegistry::default(),
             lanes: Vec::new(),
             table_cache: Vec::new(),
@@ -1565,12 +1582,16 @@ impl RaceContext {
 
     /// Index of the race program for one define set, built once per variant
     /// on first use.
-    fn race_program(&mut self, emax: usize, rcap: usize, diag: bool) -> Result<usize, String> {
-        if let Some(k) = self.programs.iter().position(|(e, r, d, _)| *e == emax && *r == rcap && *d == diag) {
+    fn race_program(&mut self, emax: usize, tmax: usize, rcap: usize, diag: bool) -> Result<usize, String> {
+        if let Some(k) = self
+            .programs
+            .iter()
+            .position(|(e, t, r, d, _)| *e == emax && *t == tmax && *r == rcap && *d == diag)
+        {
             return Ok(k);
         }
-        let built = self.spike.build_race_program(emax, rcap, diag)?;
-        self.programs.push((emax, rcap, diag, built));
+        let built = self.spike.build_race_program(emax, tmax, rcap, diag)?;
+        self.programs.push((emax, tmax, rcap, diag, built));
         Ok(self.programs.len() - 1)
     }
 
@@ -1729,16 +1750,22 @@ impl RaceContext {
                 None => [0.; 5],
             };
             let raw_guts = adjusted[3];
-            // The engine's constructor pass chains the static GutsUp and
-            // WisdomUp bumps as an f32 accumulator and clamps the field on
+            // The engine's constructor pass chains the static SpeedUp, GutsUp
+            // and WisdomUp bumps as an f32 accumulator and clamps the field on
             // every read, and the kakari bonus runs in f64.
+            let mut acc_speed = adjusted[0] as f32;
             let mut acc_guts = raw_guts as f32;
             let mut acc_wis = adjusted[4] as f32;
             let mut bonus = 0.0f64;
+            let mut bump_speed = false;
             let mut bump_guts = false;
             let mut bump_wis = false;
             for (_runner, kind, modifier) in prepared[i].bumps.iter().filter(|(b, _, _)| *b == r) {
                 match *kind {
+                    1 => {
+                        acc_speed += *modifier as f32;
+                        bump_speed = true;
+                    }
                     4 => {
                         acc_guts += *modifier as f32;
                         bump_guts = true;
@@ -1776,12 +1803,17 @@ impl RaceContext {
             if bump_wis {
                 prepared[i].pd[base + PRD_BOOST_WIS] = acc_wis.clamp(1.0, 2000.0) as f64;
             }
+            if bump_speed {
+                prepared[i].pd[base + PRD_BOOST_SPEED] = acc_speed.clamp(1.0, 2000.0) as f64;
+            }
             // The kernel seeds the wisdom accumulator from the unclamped f32
             // chain; NaN marks the field seed for runners with no bump.
             prepared[i].pd[base + PRD_WIS_ACC] =
                 if bump_wis { f64::from(acc_wis) } else { f64::NAN };
             prepared[i].pd[base + PRD_GUTS_ACC] =
                 if bump_guts { f64::from(acc_guts) } else { f64::NAN };
+            prepared[i].pd[base + PRD_SPEED_ACC] =
+                if bump_speed { f64::from(acc_speed) } else { f64::NAN };
             prepared[i].pd[base + PRD_RUSH_BONUS] =
                 f64::from(((bonus * 100.0) as f32).to_bits());
         }
@@ -1908,21 +1940,20 @@ impl RaceContext {
     let mut slice_launches = 0usize;
     let mut slice_max_ms = 0f64;
     let prepared: &[Prepared] = prepared;
-    // Races at one effect-cap bucket share their program's table layout, so
-    // consecutive same-bucket races launch as one group of chunks.
-    let mut runs: Vec<(usize, Vec<usize>)> = Vec::new();
+    // Races at one (effect, tag) bucket pair share their program's table
+    // layout, so every same-pair race launches together. Runs of equal pairs
+    // left a heterogeneous batch launching near one race per chunk.
+    let mut runs: std::collections::BTreeMap<(usize, usize), Vec<usize>> =
+        std::collections::BTreeMap::new();
     for (pos, &i) in launched.iter().enumerate() {
-        let bucket = prepared[i].sk_emax;
-        if runs.last().is_some_and(|(b, _)| *b == bucket) {
-            runs.last_mut().unwrap().1.push(pos);
-        } else {
-            runs.push((bucket, vec![pos]));
-        }
+        runs.entry((prepared[i].sk_emax, prepared[i].sk_tmax))
+            .or_default()
+            .push(pos);
     }
     for (bucket, group) in &runs {
-        // The effect bucket picks the program's table layout, so the lane's
+        // The bucket pair picks the program's table layout, so the lane's
         // skill buffer and the kernel's sk_all stride both follow it.
-        let skw = crate::skills_compile::sk_stride_at(*bucket);
+        let skw = crate::skills_compile::sk_stride_at(bucket.0, bucket.1);
         for chunk_start in (0..group.len()).step_by(chunk_len) {
             let mc = chunk_len.min(group.len() - chunk_start);
             let chunk: Vec<usize> = group[chunk_start..chunk_start + mc].iter().map(|&p| launched[p]).collect();
@@ -1990,8 +2021,8 @@ impl RaceContext {
             // not rebuild the full-frame lane's buffers.
             let lane_k = if frows == n { 0 } else { 1 };
             self.lane(lane_k, mc, reqs, n, skw, frows, words, srl, tick_cap, rc_blocks)?;
-            let pk = self.race_program(*bucket, rcap, diag)?;
-            let program = &self.programs[pk].3;
+            let pk = self.race_program(bucket.0, bucket.1, rcap, diag)?;
+            let program = &self.programs[pk].4;
             let lane = &self.lanes[lane_k];
             let tabs = &self.table_cache[ti];
             let queue = &lane.queue;
@@ -2151,6 +2182,15 @@ impl RaceContext {
                             .any(|s| s[ST_FALLBACK] == 0 && s[ST_DONE] == 0);
                         if !unfinished {
                             break;
+                        }
+                        // The slice end has saturated and lanes still report
+                        // unfinished: advancing is impossible, so fail loudly
+                        // instead of relaunching empty slices forever. A common
+                        // cause is a host/kernel ST_STRIDE disagreement.
+                        if slice_end == u32::MAX {
+                            return Err(
+                                "gpu slice loop saturated at u32::MAX with unfinished races".into(),
+                            );
                         }
                         let next = match policy {
                             SlicePolicy::Fixed(t) => t,

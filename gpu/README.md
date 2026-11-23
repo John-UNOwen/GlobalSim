@@ -277,7 +277,11 @@ Full-field table usage, the two fields that arrive intact:
 | CM (159 skills) | 162 | 199 | 708 / 3,072 | 262 / 2,048 | 83 / 160 | 3,938 / 4,096 | 174 / 256 |
 | app mob (122) | 122 | 134 | 500 / 3,072 | 150 / 2,048 | 66 / 160 | 3,100 / 4,096 | 132 / 256 |
 
-The tag pool is the tight one: the CM field fills 96% of `SK_TMAX`.
+The tag pool is the tight one: the CM field fills 96% of `SK_TMAX`. The five
+CM fields measured 3,938 to 4,656 tag bytes, so `SK_TMAX_BUCKETS` (4,096 then
+8,192) raises it the way `SK_EMAX_BUCKETS` raises the effect pool: the plan
+escalates, the layout derives from the define, and a field past 4,096 bytes
+runs on its own program.
 
 Solo audits: 720 of the 730 template ids compile (10 refused); the JP count
 (1,370 of the 1,530 ids, 160 refused) predates the E1a port. After the three
@@ -1515,10 +1519,20 @@ overrides a failed wisdom lottery: a retained primary that lost the roll stays
 pending exactly for this path (`race_solver_builder.rs:1002-1005`), so the scan
 keeps DISABLED retained primaries as candidates and the record returns to
 DISABLED, not READY, after such a fire (`SKR_WISFAIL`, `skills.cl:198`).
+A skill whose first alternative collapsed is a candidate too: the builder
+installs a detail-zero placeholder for it, with the alternative's effects, one
+window past the course end and cooldown 0
+(`race_solver_builder.rs:598-623`). `skills_compile` marks such a record
+`SK_FLAG_AFTEREND` and `sk_init_triggers` gives it that window instead of the
+dead state, so the scan still never fires it and the pool finds it. One runner's
+pool is at most `SK_PICKMAX` (64) wide; a field whose candidate ceiling passes
+that is refused by name rather than truncated.
 Gates: real 910071 (kind 37, gold request at the half-distance point, gold
 generals 200331/200361 as the pool); battery 667020 (kind 36) with the
 never-fires whites 667021/667022 as the pool, so their appearance in the
-activation events is the reserved path's own proof.
+activation events is the reserved path's own proof;
+`tests/sk_afterend_gate.rs` replays cm-10903 runner 7, where 910071 forces the
+collapsed gold 201151 Dominator.
 
 Three real bugs the gates caught:
 

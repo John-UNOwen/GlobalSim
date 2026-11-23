@@ -770,9 +770,9 @@ static int race_tick(__global uint* scr, __global uint* rcb, __global uint* si, 
         skills_advance(skt, sks, skd, scr, rcb, si, rs, sd, st, dt, n, dist_f, course_distance,
             bank, paired);
         skills_scan(skt, sks, skd, scr, rcb, si, sd, shl, rs, pd, sf,
-            course_distance, 1, n, dist_f, 0, ev, st, bank, paired);
+            course_distance, 1, n, dist_f, 0, ev, st, bank, paired, 0);
         skills_scan(skt, sks, skd, scr, rcb, si, sd, shl, rs, pd, sf,
-            course_distance, 0, n, dist_f, 0, ev, st, bank, paired);
+            course_distance, 0, n, dist_f, 0, ev, st, bank, paired, 0);
         sk_columns(skt, scr, sd, n);
     }
     // blocking_sample over the post-skill rows, which skills left alone.
@@ -941,22 +941,37 @@ static int race_tick(__global uint* scr, __global uint* rcb, __global uint* si, 
     // update(): ranks, order and the pacemaker, read next tick.
     field_update(scr, si, sd, n, dist_f, pace_end_f, course_distance,
         pm_range, pm_notfwd);
+    // cache_skill_activations (race_field_retail.rs:344): the tick's own
+    // advantage marks retire, the heal ordinal is snapshotted for next tick's
+    // fan, and next tick's query reads only the retired set.
+    st[ST_HEALC] = st[ST_HEALN];
+    for (int r = 0; r < n; r++) {
+        si[SI_ADVA0 + r] = si[SI_ADVC0 + r];
+        si[SI_ADVA1 + r] = si[SI_ADVC1 + r];
+        si[SI_ADVC0 + r] = 0u;
+        si[SI_ADVC1 + r] = 0u;
+    }
     return 0;
 }
 
 /// The engine's constructor moves an enabled wisdom-gated record's self stat
-/// bumps into horse.stats before the hill, hp and seed reads (the field is
-/// the clamped f32 accumulator). Replay that onto the stats output columns
-/// the whole race setup reads, once the lottery has enabled the record.
+/// bumps into horse.stats before the hill, hp and seed reads. The engine
+/// chains every bump into the f32 accumulator (race_solver.rs:702) and the
+/// field is its clamp, so a later live fire reading the accumulator must not
+/// lose this bump: both the accumulator and the clamped field move here, the
+/// accumulator pre-seeded before the lottery. Replay that onto the stats
+/// output columns the whole race setup reads, once the lottery enabled the
+/// record.
 static void sk_init_stat_bump(__global const uint* sk, __global const uint* sks,
-    __global uint* scr) {
+    __global uint* scr, __global double* sd) {
     const int nrec = (int)sk[SK_NREC];
     for (int rec = 0; rec < nrec; rec++) {
         __global const uint* rd = sk + SK_RECORDS + SK_RSTRIDE * rec;
         if ((rd[2] & SK_FLAG_INIT_BUMP) == 0) continue;
         if (!sk_gate_enabled(sk, sks, rec)) continue;
+        const int run = (int)rd[1];
         __global ulong* scol =
-            (__global ulong*)(scr + SCR_STATS_OUT + (int)rd[1] * 160 + 128);
+            (__global ulong*)(scr + SCR_STATS_OUT + run * 160 + 128);
         for (int e = 0; e < (int)rd[5]; e++) {
             const __global const uint* ef = sk + SK_EFFECTS + SK_ESTRIDE * ((int)rd[6] + e);
             const int kind = (int)ef[0];
@@ -967,10 +982,18 @@ static void sk_init_stat_bump(__global const uint* sk, __global const uint* sks,
                 scol[raw] = as_ulong(fmax(as_double(scol[raw])
                     + as_double((ulong)ef[6] | ((ulong)ef[7] << 32)), 1.0));
             }
-            const int slot = kind == 2 ? 8 : kind == 3 ? 9 : kind == 4 ? 10 : kind == 5 ? 11 : -1;
+            const int slot = kind == 1 ? 7 : kind == 2 ? 8 : kind == 3 ? 9 : kind == 4 ? 10 : kind == 5 ? 11 : -1;
             if (slot < 0) continue;
-            const float value = convert_float_rte(as_double(scol[slot]))
+            // Engine add_stat_modifier: the accumulator chains in f32 from its
+            // seed (the unwritten field is the unwrap_or seed), the field then
+            // reads as the clamp of the accumulator.
+            const int acc = kind == 1 ? SD_HPS : kind == 2 ? SD_STAM_A : kind == 3 ? SD_HPP_A
+                : kind == 4 ? SD_HPG_A : SD_HPW_A;
+            double chain = sd[acc + run];
+            if (chain != chain) chain = (double)convert_float_rte(as_double(scol[slot]));
+            const float value = (float)chain
                 + convert_float_rte(as_double((ulong)ef[6] | ((ulong)ef[7] << 32)));
+            sd[acc + run] = (double)value;
             scol[slot] = as_ulong((double)clamp_1_2000_f32(value));
         }
     }
@@ -1124,18 +1147,34 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             }
         }
 
-        // Construction-time GutsUp and WisdomUp bumps replace the adjusted fields
-        // before the init lottery, the HP init and the solver bases read them,
-        // matching the engine's constructor applying the stat bumps first.
+        // Construction-time SpeedUp, GutsUp and WisdomUp bumps replace the
+        // adjusted fields before the init lottery, the HP init and the solver
+        // bases read them, matching the engine's constructor applying the stat
+        // bumps first.
         for (int r = 0; r < n; r++) {
             const uint base = (uint)(PD_RUN0 + PD_RUN_STRIDE * r);
             __global ulong* scol = (__global ulong*)(scr + SCR_STATS_OUT + r * 160 + 128);
+            if (pd[base + PRD_BOOST_SPEED] > 0.0) {
+                scol[7] = as_ulong(pd[base + PRD_BOOST_SPEED]);
+            }
             if (pd[base + PRD_BOOST_GUTS] > 0.0) {
                 scol[10] = as_ulong(pd[base + PRD_BOOST_GUTS]);
             }
             if (pd[base + PRD_BOOST_WIS] > 0.0) {
                 scol[11] = as_ulong(pd[base + PRD_BOOST_WIS]);
             }
+            // Seed the stat accumulators before the lottery-baked bumps move
+            // the fields. The engine's add_stat_modifier chains every
+            // construction fire into the f32 accumulator and a later live
+            // fire recomputes the field from it, so a construction bump that
+            // only reached the field would vanish at that fire. Guts and
+            // wisdom carry the host's ungated chain, NaN when there is none;
+            // stamina and power start at the field, the unwrap_or seed.
+            sd[SD_HPS + r] = pd[base + PRD_SPEED_ACC];
+            sd[SD_HPG_A + r] = pd[base + PRD_GUTS_ACC];
+            sd[SD_HPW_A + r] = pd[base + PRD_WIS_ACC];
+            sd[SD_STAM_A + r] = (double)convert_float_rte(as_double(scol[8]));
+            sd[SD_HPP_A + r] = (double)convert_float_rte(as_double(scol[9]));
         }
 
         // One shared initialization block drives force offsets, delays, section
@@ -1187,7 +1226,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             }
             // The init lottery has run, so enabled wisdom-gated constructor bumps
             // can now move the stat columns that every later seed reads.
-            if (sk_on) sk_init_stat_bump(skt, sks, scr);
+            if (sk_on) sk_init_stat_bump(skt, sks, scr, sd);
             // Unpaired: the race rng is the clone the runtime takes at the
             // after_delays point, so later initialization draws never touch the
             // race stream. Paired: lib.rs:794 replaces that clone per runner with
@@ -1325,6 +1364,11 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             si[SI_DUEL_TOKEN + r] = 0u;
             si[SI_CPFLAGS + r] = 0u;
             si[SI_PPHASE + r] = 0u;
+            si[SI_ADVA0 + r] = 0u;
+            si[SI_ADVA1 + r] = 0u;
+            si[SI_ADVC0 + r] = 0u;
+            si[SI_ADVC1 + r] = 0u;
+            si[SI_HEALSEQ + r] = 0u;
             // The ordered additional-activation walk, its pending overtake queue,
             // the late-corner and green tallies, and the random-skill requests.
             si[SI_LCO + r] = 0u;
@@ -1432,12 +1476,13 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             sf[SF_MIN + r] = 3.f;
 
             const float speed = convert_float_rte(as_double(scol[7]));
-            // The guts field and accumulator mirror the wisdom pair. A live
-            // GutsUp reads the field from here, so the setup seeds run first.
+            // The guts field and accumulator mirror the wisdom pair. The
+            // accumulator was seeded before the lottery and the gated bumps
+            // chained onto it there. NaN still means no construction bump,
+            // the seed is then the field this line reads.
             sd[SD_HPG + r] = as_double(scol[10]);
-            const double ga = pd[PD_RUN0 + PD_RUN_STRIDE * r + PRD_GUTS_ACC];
-            sd[SD_HPG_A + r] = ga != ga
-                ? (double)convert_float_rte(as_double(scol[10])) : ga;
+            const double ga = sd[SD_HPG_A + r];
+            if (ga != ga) sd[SD_HPG_A + r] = (double)convert_float_rte(as_double(scol[10]));
             const float guts = convert_float_rte(as_double(scol[10]));
             const float lane_f = convert_float_rte(pd[PI_RUNNER0 + PI_RUN_STRIDE * r + PI_RUN_LANE]);
             sf[SF_MV_LANE + r] = lane_f;
@@ -1485,32 +1530,30 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
                     : pd[PD_RUN0 + r * PD_RUN_STRIDE + PRD_POWF]);
             sf[SF_SPURT_MAX + r] = convert_float_rte(sd[SD_LSS + r]);
             // The stat-modifier accumulator starts at the initialized speed,
-            // matching the engine's unwrap_or(horse.speed as f32).
-            sd[SD_HPS + r] = (double)speed;
-            // The stamina field and accumulator both start at the adjusted
-            // stamina; a StaminaUp fire moves them and rebuilds max hp, matching
-            // the engine's stat writes and refresh around race_solver.rs:2646.
+            // matching the engine's unwrap_or(horse.speed as f32), unless the
+            // constructor SpeedUp chain already seeded it.
+            if (sd[SD_HPS + r] != sd[SD_HPS + r]) sd[SD_HPS + r] = (double)speed;
+            // The stamina field starts at the adjusted stamina (its
+            // accumulator was seeded before the lottery); a StaminaUp fire
+            // moves both and rebuilds max hp, matching the engine's stat
+            // writes and refresh around race_solver.rs:2646.
             sd[SD_STAM + r] = as_double(scol[8]);
-            sd[SD_STAM_A + r] = (double)convert_float_rte(as_double(scol[8]));
             // The raw stamina field is the wire stat times the mood coefficient
             // (race_solver_builder.rs:290), the initialization output 5 column.
             sd[SD_RAWST + r] = as_double(scol[5]);
-            // The power field and accumulator seed from output 9, the accumulator
-            // at the f32 field value like the engine's unwrap_or(horse.power as
-            // f32) at the first fire; output 6 is the engine's raw_power field.
+            // The power field reads output 9 (its accumulator was seeded
+            // before the lottery); output 6 is the engine's raw_power field.
             sd[SD_HPP + r] = as_double(scol[9]);
-            sd[SD_HPP_A + r] = (double)convert_float_rte(as_double(scol[9]));
             // The host replays the construction seed chain into the pd row; the
             // live solver pair then advances in sd (PRD_R30_HI/LO seed it).
             sd[SD_R30H + r] = pd[PD_RUN0 + PD_RUN_STRIDE * r + PRD_R30_HI];
             sd[SD_R30L + r] = pd[PD_RUN0 + PD_RUN_STRIDE * r + PRD_R30_LO];
-            // The wisdom field and accumulator mirror the speed pair. The NaN
-            // accumulator word means no construction bump: the seed is then the
-            // unwrap_or seed. A bump carries the unclamped chain instead.
+            // The wisdom field and accumulator mirror the guts pair. The NaN
+            // accumulator word still means no construction bump after the
+            // gated chain: the seed is then the field this line reads.
             sd[SD_HPW + r] = as_double(scol[11]);
-            const double wa = pd[PD_RUN0 + PD_RUN_STRIDE * r + PRD_WIS_ACC];
-            sd[SD_HPW_A + r] = wa != wa
-                ? (double)convert_float_rte(as_double(scol[11])) : wa;
+            const double wa = sd[SD_HPW_A + r];
+            if (wa != wa) sd[SD_HPW_A + r] = (double)convert_float_rte(as_double(scol[11]));
             for (int s = 0; s < 24; s++) {
                 sd[SD_SECMOD + s * RACE_MAXR + r] =
                     (double)as_float(scr[runb + OR_SECTIONS + s]);
@@ -1541,25 +1584,55 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
         rs[RS_PM_COUNT] = 0u;
         rs[RS_PM_HANDED] = 0u;
         rs[RS_PM_HAS] = 0u;
+        // RaceField::new seeds order with 0..n, which the first update's
+        // stale-order pacemaker selection reads at the zero positions.
+        for (int i = 0; i < n; i++) {
+            rs[RS_ORDER + i] = (uint)i;
+        }
         field_update(scr, si, sd, n, dist_f, pace_end_f, course_distance,
             pm_range, pm_notfwd);
 
         // The engine activates immediate records in the solver constructor, so
         // their duration timers take the tick-0 step. Records armed in the loop's
-        // first pass run every effect duration one tick long.
+        // first pass run every effect duration one tick long. The two passes are
+        // the engine's process_skill_priority(None, None) sweep and its v24
+        // repeat, both mixed priority, so an activate_count gate that reads
+        // short in the first sweep can fire in the repeat (race_solver.rs:1008-1022).
         if (sk_on) {
             scr[SK_JRN_T] = 0u;
             skills_scan(skt, sks, skd, scr, rcb, si, sd, shl, rs, pd, sf,
-                course_distance, 1, n, dist_f, 1, ev, st, bank, paired);
+                course_distance, -1, n, dist_f, 1, ev, st, bank, paired, 0);
             // The engine's constructor repeat pass runs with the startup flag on,
             // and its hook marks the ordinals those fires consume.
             if (ri[RI_FULL] != 0u) {
                 rcb[SCR_RC_RPT] = 1u;
             }
             skills_scan(skt, sks, skd, scr, rcb, si, sd, shl, rs, pd, sf,
-                course_distance, 0, n, dist_f, 1, ev, st, bank, paired);
+                course_distance, -1, n, dist_f, 1, ev, st, bank, paired, 1);
             if (ri[RI_FULL] != 0u) {
                 rcb[SCR_RC_RPT] = 0u;
+            }
+            // The engine's constructor fires precede enable_retail_runtime, so
+            // a lottery-gated SpeedUp or GutsUp is already in the frozen plan
+            // words. The kernel froze them from the pre-fire fields above, so
+            // recompute the speed-derived ones from the bumped accumulators.
+            for (int r = 0; r < n; r++) {
+                const float speed = convert_float_rte(
+                    fmin(fmax(sd[SD_HPS + r], 1.0), 2000.0));
+                const float aptitude = race_apt_spurt((int)si[SI_DISTAPT + r]);
+                for (int ph = 0; ph < 3; ph++) {
+                    sd[SD_BTS + ph * RACE_MAXR + r] = (double)phys_base_target_speed(pd,
+                        speed, (int)si[SI_STRATEGY + r], ph, aptitude, dist_f);
+                }
+                sd[SD_LSS + r] = (double)sf[SF_SPURT_MAX + r];
+                const float minimum_speed = phys_minimum_speed(pd,
+                    convert_float_rte(sd[SD_HPG + r]), dist_f);
+                sd[SD_MS + r] = (double)minimum_speed;
+                sf[SF_BMIN_VAL + r] = minimum_speed;
+                const uint runb = SCR_INIT_OUT + OS_RUN0 + IRS_STRIDE * r;
+                sd[SD_TS + r] = (double)convert_float_rte(
+                    convert_float_rte(sd[SD_BTS + r])
+                    + convert_float_rte(as_float(scr[runb + OR_SECTIONS + 0])));
             }
             sk_columns(skt, scr, sd, n);
         }

@@ -20,13 +20,19 @@ DISTANCE = {"Short": "short", "Mile": "mile", "Middle": "middle", "Long": "long"
 # game's Good, firm going; see docs/JP-GLOBAL-TERMINOLOGY.md in the app).
 GROUND = {"Good": "Good", "Soft": "Yielding", "Heavy": "Soft", "Bad": "Heavy"}
 TIME = {"Morning": "Morning", "Daytime": "Midday", "Evening": "Evening", "Night": "Night"}
+# The game writes Fall; the engine parses Autumn (race_parameters.rs parse_season).
+SEASON = {"Spring": "Spring", "Summer": "Summer", "Fall": "Autumn", "Autumn": "Autumn", "Winter": "Winter", "Sakura": "Sakura"}
 
 
 def horse(entry, distance_key, surface_key):
     r = entry["responseHorseData"]
     style, style_key = STYLES[r["running_style"]]
-    if entry.get("runningStyleEx") not in (None, "None"):
-        sys.exit(f"horse {entry['horseIndex']}: runningStyleEx {entry['runningStyleEx']} is not mapped")
+    style_ex = entry.get("runningStyleEx")
+    if style_ex == "Oonige" and style == "Nige":
+        # Runaway is its own engine strategy, graded on the front-runner aptitude.
+        style = "Oonige"
+    elif style_ex not in (None, "None"):
+        sys.exit(f"horse {entry['horseIndex']}: runningStyleEx {style_ex} is not mapped")
     distance = GRADES[r[f"proper_distance_{distance_key}"]]
     surface = GRADES[r[f"proper_ground_{surface_key}"]]
     # The dump states the aptitudes the game applied; the mapping must agree.
@@ -81,7 +87,7 @@ def main():
         "courseId": course["id"],
         "groundCondition": GROUND[dump["groundCondition"]],
         "weather": dump["weather"],
-        "season": dump["season"],
+        "season": SEASON[dump["season"]],
         "time": TIME[dump["time"]],
         "playerHorseIndex": dump["playerHorseIndex"],
         "horses": [horse(e, distance_key, surface_key) for e in entries],

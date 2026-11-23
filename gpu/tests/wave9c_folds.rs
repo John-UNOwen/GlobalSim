@@ -460,11 +460,11 @@ fn wisdom_gated_static_fires_bake_after_the_lottery() {
 }
 
 #[test]
-fn advantage_skill_machine_still_refuses() {
-    // The engine swaps a field-wide previous-tick (runner, kind) advantage
-    // set with team exclusion (race_field.rs:373-398), not a per-runner flag
-    // the kernel could mirror.
-    refused(
+fn advantage_skill_machine_lowers_live() {
+    // The engine swaps a field-wide previous-tick (runner, kind) advantage set
+    // with team exclusion (race_field.rs:373-398). The kernel mirrors it with
+    // the cached previous set, so the condition lowers live (family 2).
+    is_live(
         &one("is_other_character_activate_advantage_skill==1"),
         "is_other_character_activate_advantage_skill",
     );

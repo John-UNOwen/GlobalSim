@@ -159,7 +159,7 @@ fn main() -> Result<(), String> {
     let frames = race_exec::course_tick_bound(template.course_distance()) * n * 6 * 8;
     let scr_u = race_exec::scr_u_words(rcap, false) * 4;
     let scr_d = race_exec::srl_words(rcap) * 8;
-    let skw = globalsim_gpu::skills_compile::sk_stride_at(template.sk_emax());
+    let skw = globalsim_gpu::skills_compile::sk_stride_at(template.sk_emax(), template.sk_tmax());
     let req_table = race_exec::RIL_STRIDE * 8 + skw * 4;
     let per_race = frames + scr_u + scr_d
         + race_exec::RI_STRIDE * 4

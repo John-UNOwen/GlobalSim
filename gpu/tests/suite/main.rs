@@ -10,20 +10,30 @@ mod par;
 
 #[path = "../app_preset_gate.rs"]
 mod app_preset_gate;
+#[path = "../advantage_fan_gate.rs"]
+mod advantage_fan_gate;
 #[path = "../badstart_gate.rs"]
 mod badstart_gate;
 #[path = "../basis_distance_gate.rs"]
 mod basis_distance_gate;
+#[path = "../carnival_noop_gate.rs"]
+mod carnival_noop_gate;
 #[path = "../classic_folds.rs"]
 mod classic_folds;
 #[path = "../compact_gate.rs"]
 mod compact_gate;
 #[path = "../comparator.rs"]
 mod comparator;
+#[path = "../constructor_repeat_gate.rs"]
+mod constructor_repeat_gate;
+#[path = "../dirt_pacemaker_gate.rs"]
+mod dirt_pacemaker_gate;
 #[path = "../equivalence_gate.rs"]
 mod equivalence_gate;
 #[path = "../facade_gate.rs"]
 mod facade_gate;
+#[path = "../fold_gate.rs"]
+mod fold_gate;
 #[path = "../geometry_gate.rs"]
 mod geometry_gate;
 #[path = "../gpu_gate.rs"]
@@ -38,8 +48,12 @@ mod lastspurt_gate;
 mod laststraight_gate;
 #[path = "../random_lot_gate.rs"]
 mod random_lot_gate;
+#[path = "../sampled_long_gate.rs"]
+mod sampled_long_gate;
 #[path = "../chara_exist_gate.rs"]
 mod chara_exist_gate;
+#[path = "../coalesce_gate.rs"]
+mod coalesce_gate;
 #[path = "../layout.rs"]
 mod layout;
 #[path = "../paired_race_gate.rs"]
@@ -58,6 +72,10 @@ mod reference_trace;
 mod rng_gate;
 #[path = "../sk_emax_gate.rs"]
 mod sk_emax_gate;
+#[path = "../sk_tmax_gate.rs"]
+mod sk_tmax_gate;
+#[path = "../sk_afterend_gate.rs"]
+mod sk_afterend_gate;
 #[path = "../skills_gate.rs"]
 mod skills_gate;
 #[path = "../slice_gate.rs"]
@@ -66,6 +84,8 @@ mod slice_gate;
 mod solo_race_gate;
 #[path = "../stall_probe.rs"]
 mod stall_probe;
+#[path = "../spurt_plan_gate.rs"]
+mod spurt_plan_gate;
 #[path = "../straightfront_gate.rs"]
 mod straightfront_gate;
 #[path = "../startup_gate.rs"]
@@ -74,6 +94,8 @@ mod startup_gate;
 mod target18_gate;
 #[path = "../temptation_opp_gate.rs"]
 mod temptation_opp_gate;
+#[path = "../trick_fan_gate.rs"]
+mod trick_fan_gate;
 #[path = "../wave10_folds.rs"]
 mod wave10_folds;
 #[path = "../wave10_gate.rs"]
@@ -146,6 +168,8 @@ mod wave9_gate;
 mod wave9c_folds;
 #[path = "../wave9c_gate.rs"]
 mod wave9c_gate;
+#[path = "../x11_sampled_gate.rs"]
+mod x11_sampled_gate;
 #[path = "../zero_skill_dump.rs"]
 mod zero_skill_dump;
 #[path = "../zero_skill_gate.rs"]

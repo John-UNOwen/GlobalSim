@@ -80,9 +80,13 @@ fn kakari_group_target_compiles_and_strays_refuse() {
         &one_runner("order>=2", 500000, &[r#"{"type":13,"target":1,"modifier":50000}"#]),
         "kakari self target",
     );
-    refused(
+    is_live(
+        &one_runner("order>=2", 500000, &[r#"{"type":13,"target":19,"targetValue":2,"modifier":50000}"#]),
+        "kakari fan target 19",
+    );
+    is_live(
         &one_runner("order>=2", 500000, &[r#"{"type":13,"target":20,"targetValue":2,"modifier":50000}"#]),
-        "effect target 20",
+        "kakari fan target 20",
     );
     refused(
         &one_runner("order>=2", 500000, &[r#"{"type":27,"target":21,"targetValue":2,"modifier":1000}"#]),

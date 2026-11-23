@@ -20,8 +20,8 @@ fn default_layout_sizes_to_the_eighteen_horse_field() {
     // The default race program compiles the journal out, the diag variant
     // carries its 16,384-word window. The reply channels live in their own
     // rc buffer, outside the scratch stride, sized only for full requests.
-    assert_eq!(re::SCR_U_WORDS, 265537);
-    assert_eq!(re::SCR_U_WORDS_DIAG, 281921);
+    assert_eq!(re::SCR_U_WORDS, 265601);
+    assert_eq!(re::SCR_U_WORDS_DIAG, 281985);
     assert_eq!(re::RC_WORDS, 100892);
     // Scratch follows the record bucket, 244 u32 words and 276 doubles per
     // record slot. A launch takes the smallest bucket that holds the batch.
@@ -30,9 +30,9 @@ fn default_layout_sizes_to_the_eighteen_horse_field() {
     assert_eq!(re::sk_rcap(65), 128);
     assert_eq!(re::sk_rcap(960), 960);
     assert_eq!(re::sk_rcap(961), 960);
-    assert_eq!(re::scr_u_words(64, false), 46913);
-    assert_eq!(re::scr_u_words(128, false), 62529);
-    assert_eq!(re::scr_u_words(256, false), 93761);
+    assert_eq!(re::scr_u_words(64, false), 46977);
+    assert_eq!(re::scr_u_words(128, false), 62593);
+    assert_eq!(re::scr_u_words(256, false), 93825);
     // The start-delay column the is_badstart port adds widens the sd stride,
     // so every record bucket's d64 scratch grows by RACE_MAXR words again.
     assert_eq!(re::srl_words(64), 28244);
@@ -50,6 +50,87 @@ fn default_layout_sizes_to_the_eighteen_horse_field() {
     assert_eq!(ce::CLS_ST_STRIDE, 16 + 20 * ce::CLS_MAXR);
     assert_eq!(ce::CLS_RI_STRIDE, ce::CLS_RI_RUN0 + 48 * ce::CLS_MAXR);
     assert!(re::RI_REQ < re::RI_STRIDE);
+}
+
+/// The per-race ST block stride the host relaunch loop walks must equal the
+/// stride the kernel writes with, or multi-race launches read the next race's
+/// status and the slice loop spins. Check the host constant against the stride
+/// resolved from the kernel's own ST_* defines.
+#[cfg(feature = "race")]
+#[test]
+fn host_st_stride_matches_the_opencl_kernel() {
+    use globalsim_gpu::race_exec as re;
+    let source = include_str!("../src/kernels/retail_core.cl");
+    let maxr = globalsim_gpu::race_exec::RACE_MAXR;
+    let mut defs: Vec<(String, String)> = Vec::new();
+    for line in source.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("#define ST_") else { continue };
+        let rest = rest.split("//").next().unwrap_or(rest).trim();
+        let mut it = rest.splitn(2, |c: char| c.is_whitespace());
+        let name = it.next().unwrap_or("");
+        let expr = it.next().unwrap_or("").trim().to_string();
+        if name.is_empty() || expr.is_empty() {
+            continue;
+        }
+        defs.push((format!("ST_{name}"), expr));
+    }
+    let mut val: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for _ in 0..defs.len() + 2 {
+        let mut progressed = false;
+        for (name, expr) in &defs {
+            if val.contains_key(name) {
+                continue;
+            }
+            if let Some(n) = eval_st_define(expr, &val, maxr) {
+                val.insert(name.clone(), n);
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    let stride = *val.get("ST_STRIDE").expect("kernel ST_STRIDE resolves");
+    let max_word = val
+        .iter()
+        .filter(|(k, _)| k.as_str() != "ST_STRIDE")
+        .map(|(_, v)| *v)
+        .max()
+        .expect("ST words present");
+    assert!(
+        stride > max_word,
+        "kernel ST_STRIDE {stride} does not cover the last ST word {max_word}"
+    );
+    assert_eq!(
+        stride, re::ST_STRIDE,
+        "host ST_STRIDE {} differs from the kernel stride {}",
+        re::ST_STRIDE, stride
+    );
+}
+
+/// Resolve one ST_* #define body of names, RACE_MAXR, + and * to a word index.
+/// None when a referenced name is not resolved yet.
+fn eval_st_define(expr: &str, val: &std::collections::HashMap<String, usize>, maxr: usize) -> Option<usize> {
+    let inner = expr.trim();
+    let inner = inner.strip_prefix('(').and_then(|s| s.strip_suffix(')')).unwrap_or(inner);
+    let mut total = 0usize;
+    for term in inner.split('+') {
+        let mut prod = 1usize;
+        for factor in term.split('*') {
+            let f = factor.trim();
+            if f == "RACE_MAXR" {
+                prod = prod.checked_mul(maxr)?;
+            } else if let Ok(n) = f.parse::<usize>() {
+                prod = prod.checked_mul(n)?;
+            } else if let Some(&n) = val.get(f) {
+                prod = prod.checked_mul(n)?;
+            } else {
+                return None;
+            }
+        }
+        total += prod;
+    }
+    Some(total)
 }
 
 #[test]
@@ -182,9 +263,9 @@ fn effect_cap_buckets_derive_the_table_layout() {
     use globalsim_gpu::skills_compile as sk;
     assert_eq!(sk::SK_EMAX_BUCKETS, [256, 512, 1024, 2048]);
     assert_eq!(sk::sk_programs_at(sk::SK_EMAX), sk::SK_PROGRAMS);
-    assert_eq!(sk::sk_stride_at(sk::SK_EMAX), sk::SK_STRIDE);
+    assert_eq!(sk::sk_stride_at(sk::SK_EMAX, sk::SK_TMAX), sk::SK_STRIDE);
     for bucket in sk::SK_EMAX_BUCKETS.iter().copied().chain([sk::SK_EMAX]) {
-        let l = sk::sk_layout(bucket);
+        let l = sk::sk_layout(bucket, sk::SK_TMAX);
         assert_eq!(l.emax, bucket);
         assert_eq!(l.programs, sk::SK_EFFECTS + sk::SK_ESTRIDE * bucket);
         assert_eq!(l.programs, sk::sk_programs_at(bucket));
@@ -193,9 +274,31 @@ fn effect_cap_buckets_derive_the_table_layout() {
         assert_eq!(l.terms, l.regions + sk::SK_GSTRIDE * sk::SK_GMAX);
         assert_eq!(l.tags, l.terms + sk::SK_MSTRIDE * sk::SK_MMAX);
         assert_eq!(l.stride, l.tags + sk::SK_TMAX + 16);
-        assert_eq!(l.stride, sk::sk_stride_at(bucket));
+        assert_eq!(l.stride, sk::sk_stride_at(bucket, sk::SK_TMAX));
         assert!(l.programs <= l.arms, "regions stack at bucket {bucket}");
     }
-    assert_eq!(sk::sk_stride_at(256), sk::SK_STRIDE + 640);
-    assert_eq!(sk::sk_stride_at(2048), sk::SK_STRIDE + 18560);
+    assert_eq!(sk::sk_stride_at(256, 4096), sk::SK_STRIDE + 640);
+    assert_eq!(sk::sk_stride_at(2048, 4096), sk::SK_STRIDE + 18560);
+}
+
+/// The tag-cap buckets move only the stride tail after the tag pool, so every
+/// region offset before it stays put across the ladder.
+#[cfg(feature = "race")]
+#[test]
+fn tag_cap_buckets_move_only_the_stride_tail() {
+    use globalsim_gpu::skills_compile as sk;
+    assert_eq!(sk::SK_TMAX_BUCKETS, [4096, 8192]);
+    assert_eq!(sk::SK_TMAX_BUCKETS[0], sk::SK_TMAX, "the first bucket is the define default");
+    for bucket in sk::SK_TMAX_BUCKETS {
+        let l = sk::sk_layout(sk::SK_EMAX_BUCKETS[0], bucket);
+        assert_eq!(l.tmax, bucket);
+        assert_eq!(l.tags, sk::sk_tags_at(sk::SK_EMAX_BUCKETS[0]));
+        assert_eq!(l.stride, l.tags + bucket + 16);
+        assert_eq!(l.stride, sk::sk_stride_at(sk::SK_EMAX_BUCKETS[0], bucket));
+    }
+    assert_eq!(sk::sk_stride_at(256, 8192), sk::sk_stride_at(256, 4096) + 4096);
+    // A tag bucket past the default is the only thing the define set adds.
+    let opts = globalsim_gpu::gpu::race_bucket_build_options;
+    assert!(!opts(256, 4096, 960, false).contains("SK_TMAX"));
+    assert!(opts(256, 8192, 960, false).ends_with("-D SK_TMAX=8192"));
 }

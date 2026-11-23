@@ -80,17 +80,21 @@ pub fn diag_bucket_build_options(rcap: usize) -> String {
     }
 }
 
-/// The race program for one full define set: the effect-cap bucket the skill
-/// table was packed at, the record bucket the scratch sizes to, and the
-/// journal in or out. The buckets move regions and resize scratch only, so the
-/// arithmetic stays identical across variants.
-pub fn race_bucket_build_options(emax: usize, rcap: usize, diag: bool) -> String {
+/// The race program for one full define set: the effect-cap bucket, the tag-cap
+/// bucket, the record bucket the scratch sizes to, and the journal in or out.
+/// The first tag bucket keeps the plain define set and its warm program.
+pub fn race_bucket_build_options(emax: usize, tmax: usize, rcap: usize, diag: bool) -> String {
     let base = if diag {
         diag_bucket_build_options(rcap)
     } else {
         bucket_build_options(rcap)
     };
-    format!("{base} -D SK_EMAX={emax}")
+    let base = format!("{base} -D SK_EMAX={emax}");
+    if tmax == crate::skills_compile::SK_TMAX {
+        base
+    } else {
+        format!("{base} -D SK_TMAX={tmax}")
+    }
 }
 // The classic lane carries the bit-exact powf table for the mid-race stat
 // refresh (race_solver.rs:1330-1340 recomputes the guts and power derived
@@ -254,12 +258,12 @@ impl Spike {
             .map_err(|e| e.to_string())
     }
 
-    /// The race program for one (effect-cap bucket, record bucket, journal)
-    /// define set, so the kernel's table offsets and scratch regions match a
-    /// table the compiler packed and sized for that pair.
-    pub fn build_race_program(&self, emax: usize, rcap: usize, diag: bool) -> Result<Program, String> {
+    /// The race program for one (effect-cap bucket, tag-cap bucket, record
+    /// bucket, journal) define set, so the kernel's table offsets and scratch
+    /// regions match a table the compiler packed and sized for those buckets.
+    pub fn build_race_program(&self, emax: usize, tmax: usize, rcap: usize, diag: bool) -> Result<Program, String> {
         Program::builder()
-            .cmplr_opt(race_bucket_build_options(emax, rcap, diag))
+            .cmplr_opt(race_bucket_build_options(emax, tmax, rcap, diag))
             .source(RACE_KERNEL_SOURCE)
             .build(&self.context)
             .map_err(|e| e.to_string())

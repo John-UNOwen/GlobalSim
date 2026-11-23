@@ -270,9 +270,9 @@ fn roster_reads_fold() {
 #[test]
 fn still_refused_constructs_by_name() {
     // The advantage-skill machine caches the field's previous-tick
-    // (runner, kind) advantage pairs with team exclusion, which no per-runner
-    // kernel flag mirrors. remain_distance_viewer_id ported in wave 9c.
-    refused(
+    // (runner, kind) advantage pairs with team exclusion (family 2), so the
+    // condition now lowers live. remain_distance_viewer_id ported in wave 9c.
+    is_live(
         &one_runner("is_other_character_activate_advantage_skill==1"),
         "is_other_character_activate_advantage_skill",
     );

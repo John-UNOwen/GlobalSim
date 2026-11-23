@@ -276,6 +276,10 @@ fn dump_columns_around_first_divergence() {
         }
     }
     let (ftick, frunner, _) = first;
+    if ftick == usize::MAX {
+        println!("no divergence: the scene is bit-exact");
+        return;
+    }
     println!("first divergence tick {ftick} runner {frunner} column {}", COLUMNS[first.2]);
     println!("styles: Nige Nige Senkou uma-Senkou Senkou Sasi Sasi Oikomi Oikomi (uma at gate 3)");
     for tick in ftick.saturating_sub(4)..=(ftick + 2).min(cpu.frames.len() - 1) {

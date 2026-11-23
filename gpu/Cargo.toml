@@ -78,3 +78,8 @@ required-features = ["race"]
 name = "skill_coverage"
 path = "src/bin/skill_coverage.rs"
 required-features = ["race"]
+
+[[bin]]
+name = "skill_parity"
+path = "src/bin/skill_parity.rs"
+required-features = ["race"]
