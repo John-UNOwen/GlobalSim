@@ -151,7 +151,9 @@ pub const RI_RC: usize = RI_DEBUG_TICK + 18;
 // every seed of one request. Mirror of retail_core.cl.
 pub const RI_REQ: usize = RI_DEBUG_TICK + 19;
 pub const RI_RUN0: usize = 16;
-pub const RI_RUN_STRIDE: usize = 14;
+// The solver pair rides the per-race row: a launch shares one pd row across
+// the seeds of a request (F1), so seed-dependent words cannot live there.
+pub const RI_RUN_STRIDE: usize = 16;
 pub const RR_STYLE: usize = 0;
 pub const RR_STRATEGY: usize = 1;
 pub const RR_DISTAPT: usize = 2;
@@ -163,6 +165,8 @@ pub const RR_STAPT: usize = 10;
 pub const RR_SUAPT: usize = 11;
 pub const RR_TEAM: usize = 12;
 pub const RR_CHARA: usize = 13;
+pub const RR_R30_HI: usize = 14;
+pub const RR_R30_LO: usize = 15;
 pub const PT_SPURT: usize = 51;
 pub const PI_DISTANCE: usize = 106;
 pub const PD_CF_DIST: usize = PL_FRONT_LANE + 16;
@@ -197,11 +201,10 @@ pub const PRD_WIS_ACC: usize = 8;
 // the live spot duration scales by.
 pub const PRD_GUTS_ACC: usize = 9;
 pub const PRD_SPOT_PROF: usize = 10;
-// The later-stamina request flag and the shared solver stream pair left by
-// the engine's construction draws, one row per runner (Job B, wave 18).
+// The later-stamina request flag, one word per runner (Job B, wave 18). Its
+// solver pair rides the per-race ri row (RR_R30_HI/LO) so the shared request
+// row stays seed-independent. Slots 12 and 13 are retired.
 pub const PRD_LATER: usize = 11;
-pub const PRD_R30_HI: usize = 12;
-pub const PRD_R30_LO: usize = 13;
 // The construction SpeedUp bump pair: the clamped speed field the plan words
 // freeze from, and the unclamped accumulator, NaN when no bump chained.
 pub const PRD_BOOST_SPEED: usize = 14;
@@ -753,10 +756,11 @@ const REQUEST_CACHE_MAX: usize = 8;
 
 /// Everything the launch needs about one race before the powf slot (it
 /// waits for the adjusted-guts pre-pass) and before the geometry tables.
-/// The seed enters this data only through the `ri[RI_SEED]` word: the stats
-/// cases, the skill table, the parameter rows and the geometry are all
-/// seed-independent, and the kernel reseeds every stream from that word.
-/// A clone with `with_seed` is therefore an exact prepare for another seed.
+/// The stats cases, the skill table, the parameter rows and the geometry are
+/// seed-independent. The seed enters only through this race's own `ri` row,
+/// which carries `RI_SEED` and every runner's solver pair, so the kernel
+/// reseeds every stream from that row. A clone with `with_seed` is therefore
+/// an exact prepare for another seed.
 #[derive(Clone)]
 pub struct Prepared {
     ri: Vec<u32>,
@@ -821,6 +825,25 @@ impl Prepared {
     /// prepared-cache clone carries exactly what a fresh parse produces.
     pub fn host_input_bits(&self) -> (Vec<u32>, Vec<u64>, Vec<u32>) {
         (self.ri.clone(), self.pd.iter().map(|v| v.to_bits()).collect(), self.sk.clone())
+    }
+
+    /// The construction-time stat bumps this prepared race bakes in: runner
+    /// index, effect kind and the engine modifier value. The pow gate builds
+    /// its real-input base set from these and the stats cases.
+    pub fn stat_bumps(&self) -> &[(usize, i32, f64)] {
+        &self.bumps
+    }
+
+    /// The per-runner stats cases the initialization pre-pass reads, the
+    /// source of the adjusted stats the engine starts from.
+    pub fn stats_cases(&self) -> &[StatsCase] {
+        &self.stats
+    }
+
+    /// Whether a stat effect can land mid-race, so the kernel recomputes the
+    /// derived words from the live guts instead of the prepare-baked ones.
+    pub fn live_guts(&self) -> bool {
+        self.live_guts
     }
 
     /// Compiled skill records, the number that picks the scratch bucket.
@@ -920,27 +943,29 @@ impl Prepared {
         }
     }
 
-    /// The clone of this prepared race for another seed: one `ri` copy with
-    /// `RI_SEED` rewritten. The per-runner solver pair keeps the template's,
-    /// `reseed_solver_rows` rewrites it where a seed-exact clone needs that.
-    /// Only valid for a parsed prepare (a stub has no `ri`).
+    /// The clone of this prepared race for another seed: the per-race row copy
+    /// with `RI_SEED` and every runner's solver pair rewritten from that seed,
+    /// the same words a fresh parse writes. Only valid for a parsed prepare (a
+    /// stub has no `ri`).
     pub fn with_seed(&self, seed: i32) -> Prepared {
         let mut clone = self.clone();
         clone.ri[RI_SEED] = seed as u32;
         clone.seed = seed;
+        clone.reseed_solver_rows();
         clone
     }
 
-    /// Rewrite the pd solver pair per runner for this race's own seed, the
-    /// same draws a fresh parse writes. The pair is the only seed-dependent
-    /// pd word, and the kernel spends it only when `PRD_LATER` is set.
+    /// Rewrite the per-runner solver pair in the ri row for this race's own
+    /// seed, the same draws a fresh parse writes. The pair is the only
+    /// seed-dependent word in the row besides `RI_SEED`, and the kernel spends
+    /// it only when `PRD_LATER` is set.
     fn reseed_solver_rows(&mut self) {
         let nslopes = self.ri[RI_NSLOPES] as usize;
         for r in 0..self.n {
             let (hi, lo) = construction_solver_pair(self.seed, r, nslopes);
-            let base = PD_RUN0 + PD_RUN_STRIDE * r;
-            self.pd[base + PRD_R30_HI] = hi as f64;
-            self.pd[base + PRD_R30_LO] = lo as f64;
+            let base = RI_RUN0 + RI_RUN_STRIDE * r;
+            self.ri[base + RR_R30_HI] = hi;
+            self.ri[base + RR_R30_LO] = lo;
         }
     }
 }
@@ -1320,15 +1345,15 @@ fn prepare(
         geometry = Some(flat);
     }
 
-    // The solver stream state after the engine's construction draws, one
-    // pair per runner (RaceSolver::new, race_solver.rs:975-1067). Runtime
-    // retail spends no other draw on this stream.
+    // The solver pair after the engine's construction draws, one per runner
+    // (RaceSolver::new, race_solver.rs:975-1067). It rides the per-race row so
+    // a launch can share one pd row across the seeds of a request (F1).
     for r in 0..horses.len() {
         let (hi, lo) = construction_solver_pair(seed_i32, r, nslopes);
-        let base = PD_RUN0 + PD_RUN_STRIDE * r;
-        pd[base + PRD_LATER] = later_stamina as u8 as f64;
-        pd[base + PRD_R30_HI] = hi as f64;
-        pd[base + PRD_R30_LO] = lo as f64;
+        let base = RI_RUN0 + RI_RUN_STRIDE * r;
+        ri[base + RR_R30_HI] = hi;
+        ri[base + RR_R30_LO] = lo;
+        pd[PD_RUN0 + PD_RUN_STRIDE * r + PRD_LATER] = later_stamina as u8 as f64;
     }
 
     // Dense gate rank drives the retail starting lane.
@@ -2034,7 +2059,6 @@ impl RaceContext {
         });
         if let Some(entry) = hit {
             let mut out = entry.template.with_seed(seed_i32);
-            out.reseed_solver_rows();
             out.derived = self.cached_row(key, request);
             return Ok(out);
         }
@@ -2337,7 +2361,8 @@ impl RaceContext {
             let mut ri_all = vec![0u32; mc * RI_STRIDE];
             // F1: the pd row and the skill table belong to the request, so a
             // chunk uploads one row per distinct request and each slot names
-            // its row in RI_REQ. The seed clones of one prepare share a row.
+            // its row in RI_REQ. The seed clones of one prepare share a row,
+            // and their seed's solver pair rides each race's own ri row.
             let mut req_row: Vec<usize> = Vec::new();
             for (slot, &i) in chunk.iter().enumerate() {
                 ri_all[slot * RI_STRIDE..][..RI_STRIDE].copy_from_slice(&prepared[i].ri);
@@ -3151,6 +3176,21 @@ pub fn loop_end(ticks: usize) -> f64 {
         t = ((t as f32) + DT) as f64;
     }
     t
+}
+
+/// The frame clocks `loop_end(0..n)` in one walk. Element k is exactly
+/// `loop_end(k)`: the same f32 sum, carried forward instead of restarted, so a
+/// record fold's time vector costs O(n) instead of O(n²) f32 steps. The compact
+/// lane builds one per race, and a 1,155-tick race made the restarted form
+/// dominate the fold.
+pub fn loop_times(n: usize) -> Vec<f64> {
+    let mut out = Vec::with_capacity(n);
+    let mut t = 0f64;
+    for _ in 0..n {
+        out.push(t);
+        t = ((t as f32) + DT) as f64;
+    }
+    out
 }
 
 fn read_only<T: ocl::OclPrm>(queue: &Queue, data: &[T]) -> Result<Buffer<T>, String> {

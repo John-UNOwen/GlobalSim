@@ -44,6 +44,19 @@ pub struct CompactOutcome {
     pub fallback: Option<String>,
 }
 
+/// One group of a multi-request compact launch: the seeds that run one request
+/// text, plus the record fold options for every seed. `request_index` names the
+/// text in the launch's request list, so groups of one text cost one prepare.
+pub struct CompactGroup {
+    pub request_index: usize,
+    pub seeds: Vec<i32>,
+    pub track_skill_id: String,
+    pub second_player_index: i32,
+    /// The spurt-plan boundary base the record fold gets, as the addon's
+    /// per-seed lane passes it (0 skips the plan fields).
+    pub distance: f64,
+}
+
 pub struct GpuRaces {
     ctx: race_exec::RaceContext,
     classic: Option<classic_exec::ClassicContext>,
@@ -176,7 +189,7 @@ impl GpuRaces {
         }
         let mut outcomes: Vec<Option<CompactOutcome>> =
             (0..requests.len()).map(|_| None).collect();
-        let mut launch: Vec<(usize, race_exec::Prepared)> = Vec::new();
+        let mut launch: Vec<(usize, race_exec::Prepared, f64)> = Vec::new();
         for (index, (request, seed)) in requests.iter().zip(seeds).enumerate() {
             if takes_classic_lane(request) {
                 outcomes[index] = Some(CompactOutcome {
@@ -193,7 +206,8 @@ impl GpuRaces {
                     continue;
                 }
             };
-            let mut rows = vec![player_horse_index(request) as usize];
+            let player = player_horse_index(request);
+            let mut rows = vec![player as usize];
             if opts.second_player_index >= 0 {
                 rows.push(opts.second_player_index as usize);
             }
@@ -208,12 +222,13 @@ impl GpuRaces {
                 });
                 continue;
             }
-            launch.push((index, prepared));
+            launch.push((index, prepared, player));
         }
         if !launch.is_empty() {
-            let slots: Vec<usize> = launch.iter().map(|&(index, _)| index).collect();
+            let slots: Vec<usize> = launch.iter().map(|&(index, _, _)| index).collect();
+            let players: Vec<f64> = launch.iter().map(|&(_, _, player)| player).collect();
             let mut prepared: Vec<race_exec::Prepared> =
-                launch.drain(..).map(|(_, prepared)| prepared).collect();
+                launch.drain(..).map(|(_, prepared, _)| prepared).collect();
             let (run, _) = self.ctx.run_prepared(&mut prepared, None)?;
             for (slot, &index) in slots.iter().enumerate() {
                 let race = &run.races[slot];
@@ -224,14 +239,141 @@ impl GpuRaces {
                     None => compact_outcome(
                         race,
                         &prepared[slot],
-                        &requests[index],
+                        players[slot],
                         seeds[index],
-                        opts,
+                        &opts.track_skill_id,
+                        opts.second_player_index,
+                        prepared[slot].course_distance(),
                     ),
                 });
             }
         }
         Ok(outcomes.into_iter().map(|outcome| outcome.unwrap()).collect())
+    }
+
+    /// Runs several request/seed groups as one compact launch. Every distinct
+    /// request text prepares once, however many groups name it. Groups that
+    /// agree on a runner count and on a kept frame-row count launch together,
+    /// and a group that disagrees launches on its own, so a mixed call stays
+    /// correct and only loses launch width. Records come back in group order,
+    /// seeds in their group's order, each byte-identical to `run_compact_batch`'s
+    /// record for the same request text and seed. A group whose request fails
+    /// to prepare, sits on the classic lane, or whose kept rows sit outside its
+    /// roster answers `fallback` for its own seeds only.
+    pub fn run_compact_groups(
+        &mut self,
+        requests: &[String],
+        groups: &[CompactGroup],
+    ) -> Result<Vec<CompactOutcome>, String> {
+        let total: usize = groups.iter().map(|group| group.seeds.len()).sum();
+        let mut outcomes: Vec<Option<CompactOutcome>> = (0..total).map(|_| None).collect();
+        // A text prepares once for the whole call: templates and player indices
+        // answer every group that names the text (F3 would cache at most 8).
+        let mut templates: Vec<Option<Result<race_exec::Prepared, String>>> =
+            (0..requests.len()).map(|_| None).collect();
+        let mut players: Vec<f64> = vec![0.; requests.len()];
+        // Launchable races by (runner count, frame-row count). One launch needs
+        // one of each, so a call that mixes them launches per class.
+        type Member = (usize, usize, i32, race_exec::Prepared);
+        let mut classes: Vec<((usize, usize), Vec<Member>)> = Vec::new();
+        let mut flat = 0usize;
+        for (group_index, group) in groups.iter().enumerate() {
+            if group.request_index >= requests.len() {
+                return Err(format!(
+                    "compact group {group_index} names request {} of {}",
+                    group.request_index,
+                    requests.len()
+                ));
+            }
+            if templates[group.request_index].is_none() {
+                let request = &requests[group.request_index];
+                // Classic-lane requests keep the full path, the same refusal
+                // run_compact_batch answers for them.
+                if takes_classic_lane(request) {
+                    templates[group.request_index] =
+                        Some(Err("the compact launch runs the retail kernel only".into()));
+                } else {
+                    players[group.request_index] = player_horse_index(request);
+                    let seed = group.seeds.first().copied().unwrap_or(0) as i64;
+                    templates[group.request_index] = Some(self.ctx.prepare(request, seed));
+                }
+            }
+            let template = templates[group.request_index].as_ref().expect("template prepared above");
+            let player = players[group.request_index];
+            for &seed in &group.seeds {
+                let index = flat;
+                flat += 1;
+                let mut prepared = match template {
+                    Ok(template) => template.with_seed(seed),
+                    Err(reason) => {
+                        outcomes[index] = Some(CompactOutcome {
+                            record: None,
+                            fallback: Some(reason.clone()),
+                        });
+                        continue;
+                    }
+                };
+                let mut rows = vec![player as usize];
+                if group.second_player_index >= 0 {
+                    rows.push(group.second_player_index as usize);
+                }
+                if !prepared.set_frame_rows(&rows) {
+                    outcomes[index] = Some(CompactOutcome {
+                        record: None,
+                        fallback: Some(format!(
+                            "compact frame rows {:?} sit outside the {}-runner roster",
+                            rows,
+                            prepared.runners()
+                        )),
+                    });
+                    continue;
+                }
+                let key = (prepared.runners(), prepared.frame_row_count());
+                let class = match classes.iter().position(|(k, _)| *k == key) {
+                    Some(at) => at,
+                    None => {
+                        classes.push((key, Vec::new()));
+                        classes.len() - 1
+                    }
+                };
+                classes[class].1.push((index, group_index, seed, prepared));
+            }
+        }
+        for (_, members) in classes {
+            let mut indices: Vec<usize> = Vec::with_capacity(members.len());
+            let mut group_of: Vec<usize> = Vec::with_capacity(members.len());
+            let mut seeds: Vec<i32> = Vec::with_capacity(members.len());
+            let mut prepared: Vec<race_exec::Prepared> = Vec::with_capacity(members.len());
+            for (index, group_index, seed, race) in members {
+                indices.push(index);
+                group_of.push(group_index);
+                seeds.push(seed);
+                prepared.push(race);
+            }
+            let (run, _) = self.ctx.run_prepared(&mut prepared, None)?;
+            for (slot, ((&index, &group_index), &seed)) in
+                indices.iter().zip(group_of.iter()).zip(seeds.iter()).enumerate()
+            {
+                let race = &run.races[slot];
+                let outcome = match &race.fallback {
+                    Some(reason) => CompactOutcome { record: None, fallback: Some(reason.clone()) },
+                    None => {
+                        let group = &groups[group_index];
+                        compact_outcome(
+                            race,
+                            &prepared[slot],
+                            players[group.request_index],
+                            seed,
+                            &group.track_skill_id,
+                            group.second_player_index,
+                            group.distance,
+                        )
+                    }
+                };
+                outcomes[index] = Some(outcome);
+            }
+        }
+        Ok(outcomes.into_iter().map(|outcome| outcome.expect("every seed answered")).collect())
     }
 
     /// Runs one batch in a single launch and answers each launchable race
@@ -407,27 +549,30 @@ fn build_outcomes(
 }
 
 /// One launch's compact record: the fold over the race's meta and kept rows,
-/// with the frame clocks the packet would have carried (`loop_end(tick)`) and
-/// the course length the kernel ran against.
+/// with the frame clocks the packet would have carried (`loop_end(tick)`, built
+/// by `loop_times` in one walk) and the spurt-plan boundary base the caller
+/// passed.
 fn compact_outcome(
     race: &race_exec::RaceGpu,
     prepared: &race_exec::Prepared,
-    request: &str,
+    player: f64,
     seed: i32,
-    opts: &CompactOptions,
+    track_skill_id: &str,
+    second_player_index: i32,
+    distance: f64,
 ) -> CompactOutcome {
-    let meta = compact_meta(race, player_horse_index(request));
+    let meta = compact_meta(race, player);
     let meta_text = json::to_string(&meta);
-    let times: Vec<f64> = (0..race.frames.len()).map(race_exec::loop_end).collect();
+    let times: Vec<f64> = race_exec::loop_times(race.frames.len());
     match crate::compact::record(
         &meta_text,
         prepared.kept_frame_rows(),
         &times,
         &race.frames,
         seed as f64,
-        &opts.track_skill_id,
-        opts.second_player_index,
-        prepared.course_distance(),
+        track_skill_id,
+        second_player_index,
+        distance,
     ) {
         Ok(record) => CompactOutcome { record: Some(record), fallback: None },
         Err(reason) => CompactOutcome { record: None, fallback: Some(reason) },

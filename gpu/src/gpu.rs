@@ -177,7 +177,34 @@ pub fn program_cache_path(dir: &std::path::Path, options: &str) -> std::path::Pa
     ))
 }
 
-const PROGRAM_CACHE_MAGIC: &[u8; 8] = b"GSIMPC01";
+const PROGRAM_CACHE_MAGIC: &[u8; 8] = b"GSIMPC02";
+
+/// A second pass over the kernel source with a different starting basis and a
+/// byte-wise fold, stored in the file header. The file name already keys one
+/// 64-bit hash, this one means a colliding name alone cannot make a foreign
+/// image load.
+fn source_check_digest(bytes: &[u8]) -> u64 {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h: u64 = 0x4222_2325_cbf2_9ce4;
+    for b in bytes {
+        h = (h ^ *b as u64).wrapping_mul(PRIME);
+    }
+    h
+}
+
+/// The prefix every cache file for this device and option set carries: magic,
+/// the three identity texts, the kernel source length and its check digest.
+fn program_cache_prologue(device: &DeviceReport, options: &str) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    out.extend_from_slice(PROGRAM_CACHE_MAGIC);
+    for text in [&device.name, &device.driver_version, options] {
+        out.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        out.extend_from_slice(text.as_bytes());
+    }
+    out.extend_from_slice(&(RACE_KERNEL_SOURCE.len() as u64).to_le_bytes());
+    out.extend_from_slice(&source_check_digest(RACE_KERNEL_SOURCE.as_bytes()).to_le_bytes());
+    out
+}
 
 /// Write the program's device binaries plus everything that had to match to
 /// compile them. The file lands via a temp rename, so a killed process
@@ -191,13 +218,7 @@ fn write_program_binary(
     else {
         return Err("driver gave no program binaries".into());
     };
-    let mut out: Vec<u8> = Vec::new();
-    out.extend_from_slice(PROGRAM_CACHE_MAGIC);
-    for text in [&device.name, &device.driver_version, options] {
-        out.extend_from_slice(&(text.len() as u32).to_le_bytes());
-        out.extend_from_slice(text.as_bytes());
-    }
-    out.extend_from_slice(&(RACE_KERNEL_SOURCE.len() as u64).to_le_bytes());
+    let mut out = program_cache_prologue(device, options);
     out.extend_from_slice(&(bins.len() as u32).to_le_bytes());
     for bin in &bins {
         out.extend_from_slice(&(bin.len() as u64).to_le_bytes());
@@ -259,6 +280,9 @@ fn parse_program_binary(
     let src_len = cache_u64(bytes, &mut p)? as usize;
     if src_len != RACE_KERNEL_SOURCE.len() {
         return Err("kernel source length differs from the saved image".into());
+    }
+    if cache_u64(bytes, &mut p)? != source_check_digest(RACE_KERNEL_SOURCE.as_bytes()) {
+        return Err("kernel source digest differs from the saved image".into());
     }
     let n_bins = cache_u32(bytes, &mut p)? as usize;
     let mut bins = Vec::with_capacity(n_bins.min(8));
@@ -651,4 +675,102 @@ fn rows_from_bytes(bytes: &[u8]) -> Vec<KernelRow> {
         .chunks_exact(std::mem::size_of::<KernelRow>())
         .map(|chunk| unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const KernelRow) })
         .collect()
+}
+
+#[cfg(test)]
+mod program_cache_tests {
+    use super::*;
+
+    fn device() -> DeviceReport {
+        DeviceReport {
+            platform: "test platform".into(),
+            name: "test device".into(),
+            driver_version: "0.0.0.0".into(),
+            compute_units: 0,
+            max_work_group_size: 0,
+            single_fp_config: 0,
+            double_fp_config: 0,
+        }
+    }
+
+    fn options() -> &'static str {
+        "-D RACE_MAXR=18"
+    }
+
+    fn image(device: &DeviceReport, options: &str, bins: &[&[u8]]) -> Vec<u8> {
+        let mut out = program_cache_prologue(device, options);
+        out.extend_from_slice(&(bins.len() as u32).to_le_bytes());
+        for bin in bins {
+            out.extend_from_slice(&(bin.len() as u64).to_le_bytes());
+            out.extend_from_slice(bin);
+        }
+        out
+    }
+
+    /// Offset of the u64 source digest, right after the u64 source length.
+    fn source_digest_at(device: &DeviceReport, options: &str) -> usize {
+        program_cache_prologue(device, options).len() - 8
+    }
+
+    #[test]
+    fn a_saved_image_round_trips_for_its_own_identity() {
+        let bytes = image(&device(), options(), &[&[1, 2, 3], &[4, 5]]);
+        let bins = parse_program_binary(&bytes, &device(), options()).unwrap();
+        assert_eq!(bins, vec![vec![1, 2, 3], vec![4, 5]]);
+    }
+
+    #[test]
+    fn a_foreign_source_digest_is_rejected() {
+        let bytes = image(&device(), options(), &[&[9, 9]]);
+        let at = source_digest_at(&device(), options());
+        for bit in [1u64, 1 << 32, 1 << 63] {
+            let mut bad = bytes.clone();
+            let digest = u64::from_le_bytes(bad[at..at + 8].try_into().unwrap()) ^ bit;
+            bad[at..at + 8].copy_from_slice(&digest.to_le_bytes());
+            let err = parse_program_binary(&bad, &device(), options()).unwrap_err();
+            assert!(err.contains("digest"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_pre_fix_cache_file_is_not_loaded() {
+        let mut bytes = image(&device(), options(), &[&[7]]);
+        bytes[..8].copy_from_slice(b"GSIMPC01");
+        assert!(parse_program_binary(&bytes, &device(), options()).is_err());
+    }
+
+    #[test]
+    fn a_different_source_length_is_rejected() {
+        let mut bytes = image(&device(), options(), &[&[7]]);
+        let at = source_digest_at(&device(), options()) - 8;
+        let longer = (RACE_KERNEL_SOURCE.len() as u64 + 1).to_le_bytes();
+        bytes[at..at + 8].copy_from_slice(&longer);
+        assert!(parse_program_binary(&bytes, &device(), options()).is_err());
+    }
+
+    #[test]
+    fn device_driver_and_options_still_have_to_match() {
+        let bytes = image(&device(), options(), &[&[1]]);
+        assert!(parse_program_binary(&bytes, &device(), "-D OTHER").is_err());
+        let mut other = device();
+        other.driver_version = "1.0".into();
+        assert!(parse_program_binary(&bytes, &other, options()).is_err());
+        let mut renamed = device();
+        renamed.name = "other device".into();
+        assert!(parse_program_binary(&bytes, &renamed, options()).is_err());
+    }
+
+    #[test]
+    fn the_file_name_keys_the_source_bytes_and_the_options() {
+        let dir = std::path::Path::new("cache");
+        let a = program_cache_path(dir, "-D A");
+        let b = program_cache_path(dir, "-D B");
+        assert_ne!(a, b);
+        let want = format!(
+            "race-{:016x}-{:016x}.bin",
+            fnv1a64(RACE_KERNEL_SOURCE.as_bytes()),
+            fnv1a64(b"-D A"),
+        );
+        assert_eq!(a.file_name().unwrap().to_str().unwrap(), want);
+    }
 }

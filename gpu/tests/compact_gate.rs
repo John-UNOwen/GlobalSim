@@ -10,7 +10,7 @@
 
 #![cfg(feature = "race")]
 
-use globalsim_gpu::facade::{CompactOptions, GpuRaces};
+use globalsim_gpu::facade::{CompactGroup, CompactOptions, GpuRaces};
 
 fn repo_file(rel: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(rel)
@@ -345,5 +345,113 @@ fn compact_launch_records_match_the_packet_fold() {
     }
     // The fold walked real frames: plan points and tails must show up.
     assert!(rich > 0, "no record carried a plan point and a tail, the fold ran vacuously");
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// A multi-request compact launch: several request texts in one call, one group
+/// per (text, seed list, fold options). Every record must equal the packet fold
+/// of the same request and seed, group order must survive, a group with a
+/// different kept row count must still answer (the launch splits by class), and
+/// a text that fails to prepare or belongs to the classic lane flags only its
+/// own seeds.
+#[test]
+fn multi_group_compact_launch_matches_the_packet_fold() {
+    let request_a = v77_line();
+    let root: serde_json::Value = serde_json::from_str(&request_a).expect("request parses");
+    let course_id = root.get("courseId").and_then(|c| c.as_i64()).expect("courseId");
+    let distance = course_distance(course_id);
+    // A second text, same roster, different stats: a distinct prepare.
+    let mut changed = root.clone();
+    changed["horses"][0]["speed"] = serde_json::json!(1100);
+    let request_b = serde_json::to_string(&changed).expect("serialize");
+    // A text the compact lane refuses at prepare.
+    let request_refused = "{\"nope\":true}".to_string();
+    // A classic-lane text (no retail flag): the compact launch answers it with
+    // the same refusal run_compact_batch gives.
+    let mut classic = root.clone();
+    for flag in ["experimentalRetailRuntime", "experimentalRetailInitialization", "experimentalRetailSections", "experimentalRetailGeometry"] {
+        classic[flag] = serde_json::json!(false);
+    }
+    let request_classic = serde_json::to_string(&classic).expect("serialize classic");
+
+    let seeds_a: Vec<i32> = (1..=3).collect();
+    let seeds_b: Vec<i32> = (4..=6).collect();
+    let seeds_c: Vec<i32> = (7..=8).collect();
+    let seeds_refused: Vec<i32> = (9..=10).collect();
+    let seeds_classic: Vec<i32> = (11..=12).collect();
+
+    let mut gpu = GpuRaces::new().expect("gated device opens");
+    let full_a = gpu.run_batch(&vec![request_a.clone(); seeds_a.len()], &seeds_a).expect("full batch a");
+    let full_b = gpu.run_batch(&vec![request_b.clone(); seeds_b.len()], &seeds_b).expect("full batch b");
+    let full_c = gpu.run_batch(&vec![request_a.clone(); seeds_c.len()], &seeds_c).expect("full batch a again");
+    let meta_packet = |outcome: globalsim_gpu::facade::BatchOutcome| match (outcome.meta, outcome.packet, outcome.fallback) {
+        (Some(meta), Some(packet), None) => (meta, packet),
+        (_, _, Some(reason)) => panic!("full path fell back: {reason}"),
+        _ => panic!("full path answered without meta and packet"),
+    };
+    let full_a: Vec<(String, Vec<u8>)> = full_a.into_iter().map(meta_packet).collect();
+    let full_b: Vec<(String, Vec<u8>)> = full_b.into_iter().map(meta_packet).collect();
+    let full_c: Vec<(String, Vec<u8>)> = full_c.into_iter().map(meta_packet).collect();
+
+    // Group order: a, b, a again (one prepare for the repeated text), refused.
+    // b keeps a second player row, so it launches in its own class.
+    let groups = vec![
+        CompactGroup { request_index: 0, seeds: seeds_a.clone(), track_skill_id: String::new(), second_player_index: -1, distance },
+        CompactGroup { request_index: 1, seeds: seeds_b.clone(), track_skill_id: String::new(), second_player_index: 4, distance },
+        CompactGroup { request_index: 0, seeds: seeds_c.clone(), track_skill_id: String::new(), second_player_index: -1, distance },
+        CompactGroup { request_index: 2, seeds: seeds_refused.clone(), track_skill_id: String::new(), second_player_index: -1, distance },
+        CompactGroup { request_index: 3, seeds: seeds_classic.clone(), track_skill_id: String::new(), second_player_index: -1, distance },
+    ];
+    let requests = vec![request_a, request_b, request_refused, request_classic];
+    let outcomes = gpu.run_compact_groups(&requests, &groups).expect("multi-group batch");
+    assert_eq!(
+        outcomes.len(),
+        seeds_a.len() + seeds_b.len() + seeds_c.len() + seeds_refused.len() + seeds_classic.len(),
+        "one outcome per seed, group order"
+    );
+
+    let mut problems: Vec<String> = Vec::new();
+    let mut rich = 0usize;
+    let mut at = 0usize;
+    let mut take = |outcomes: &[globalsim_gpu::facade::CompactOutcome], n: usize| -> Vec<Option<String>> {
+        let slice = &outcomes[at..at + n];
+        at += n;
+        slice
+            .iter()
+            .map(|outcome| match (&outcome.record, &outcome.fallback) {
+                (Some(record), None) => Some(record.clone()),
+                (_, Some(reason)) => panic!("multi-group record fell back: {reason}"),
+                _ => panic!("multi-group record answered with neither record nor reason"),
+            })
+            .collect()
+    };
+    // a's records: solo config. a's repeat: its own seeds against the same
+    // packet fold. b's records: second-player config.
+    let a_records = take(&outcomes, seeds_a.len());
+    let b_records = take(&outcomes, seeds_b.len());
+    let c_records = take(&outcomes, seeds_c.len());
+    {
+        let refused = &outcomes[at..at + seeds_refused.len()];
+        for (slot, seed) in seeds_refused.iter().enumerate() {
+            match &refused[slot].fallback {
+                Some(reason) => assert!(!reason.is_empty(), "refused group names its reason"),
+                None => problems.push(format!("refused text seed {seed} answered a record")),
+            }
+        }
+        at += seeds_refused.len();
+    }
+    {
+        let classic = &outcomes[at..at + seeds_classic.len()];
+        for (slot, seed) in seeds_classic.iter().enumerate() {
+            match &classic[slot].fallback {
+                Some(reason) => assert!(reason.contains("retail kernel only"), "classic text refusal names its reason"),
+                None => problems.push(format!("classic text seed {seed} answered a record")),
+            }
+        }
+    }
+    check("multi a", "", &seeds_a, &full_a, &a_records, -1, distance, &mut problems, &mut rich);
+    check("multi b", "", &seeds_b, &full_b, &b_records, 4, distance, &mut problems, &mut rich);
+    check("multi a again", "", &seeds_c, &full_c, &c_records, -1, distance, &mut problems, &mut rich);
+    assert!(rich > 0, "no multi-group record carried a plan point and a tail, the fold ran vacuously");
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }

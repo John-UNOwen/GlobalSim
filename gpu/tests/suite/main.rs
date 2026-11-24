@@ -10,6 +10,8 @@ mod par;
 
 #[path = "../app_preset_gate.rs"]
 mod app_preset_gate;
+#[path = "../app_compare_gate.rs"]
+mod app_compare_gate;
 #[path = "../allstat_gate.rs"]
 mod allstat_gate;
 #[path = "../engine_text_refusals_gate.rs"]
@@ -84,6 +86,8 @@ mod powerup_gate;
 mod preset_dump;
 #[path = "../request_cache_gate.rs"]
 mod request_cache_gate;
+#[path = "../with_seed_gate.rs"]
+mod with_seed_gate;
 #[path = "../race_diff.rs"]
 mod race_diff;
 #[path = "../reference_trace.rs"]
@@ -148,6 +152,8 @@ mod wave19_overcap;
 mod wave20_cluster_dump;
 #[path = "../wave20_followup_gate.rs"]
 mod wave20_followup_gate;
+#[path = "../wave21_pow_parity_gate.rs"]
+mod wave21_pow_parity_gate;
 #[path = "../wave1_folds.rs"]
 mod wave1_folds;
 #[path = "../wave1_gate.rs"]
@@ -198,6 +204,8 @@ mod wave9c_folds;
 mod wave9c_gate;
 #[path = "../x11_sampled_gate.rs"]
 mod x11_sampled_gate;
+#[path = "../x6_crafted_scenes_gate.rs"]
+mod x6_crafted_scenes_gate;
 #[path = "../zero_skill_dump.rs"]
 mod zero_skill_dump;
 #[path = "../zero_skill_gate.rs"]

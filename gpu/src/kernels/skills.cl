@@ -266,7 +266,7 @@
 #define SKR_WISFAIL (SKR_AA_COUNT + 8)  // the ordinary lottery failed; only reservations fire
 #define SKR_ORD (SKR_WISFAIL + 3)       // reply ordinal while a pending activation is live, 0 none
 #define SKR_PEND (SKR_ORD + 1)          // this record holds the (runner, skill id) pending slot
-#define SKR_EMASK (SKR_PEND + 1)        // effect slots whose timer was written, only those age
+#define SKR_EMASK (SKR_PEND + 1)        // effect slots still aging, cleared once expired
 #define SKR_STRIDE (SKR_EMASK + 1)
 
 // Double layout of one record's dynamic block (SKD_STRIDE doubles). The

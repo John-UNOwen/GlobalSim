@@ -3,11 +3,13 @@
    pow/f64::powf. The dispatch global (image+0x1007D4) is nonzero, so every
    Rust f64::powf on this host runs this body; matching any other variant is
    not the bit-exactness target. Verified pair-for-pair against Rust
-   f64::powf in gpu/tests/wave8_powf_gate.rs.
+   f64::powf in gpu/tests/wave8_powf_gate.rs and over every live consumer
+   domain in gpu/tests/wave21_pow_parity_gate.rs.
 
-   Scope: x >= 1, 0 < y < 1.6 (the guts consumers). The special-case paths of
-   the DLL (y = 0/1, x = 0/1/inf/nan, negative x, subnormal x, overflow and
-   underflow results) are out of the engine domain and not transcribed.
+   Scope: x >= 0, 0 < y < 1.6 (the guts and percent consumers). A base of +0
+   with a positive exponent returns +0 like the DLL. The other special-case
+   paths of the DLL (y = 0/1, x = 1/inf/nan, negative x, subnormal x, overflow
+   and underflow results) are out of the engine domain and not transcribed.
 
    FP_CONTRACT must stay OFF (rng_core.cl carries the pragma) so each explicit
    fma() here remains a single-rounded hardware fused multiply-add. */
@@ -622,6 +624,12 @@ __constant ulong gs_pow_exp_lo[64] = {
 
 static inline double gs_pow(const double x, const double y)
 {
+    // ucrt pow returns +0 for a base of zero with a positive exponent. The
+    // percent chains can reach pct = 100, hence x = 0, which the generic
+    // exponent-bit path below would turn into a tiny non-zero value.
+    if (x == 0.0) {
+        return 0.0;
+    }
     const ulong bx = as_ulong(x);
     const double k = convert_double_rte((double)((long)(bx >> 52) & 0x7FFL) - 1023.0);
     const double X = as_double((bx & 0x000FFFFFFFFFFFFFul) | 0x3FE0000000000000ul);

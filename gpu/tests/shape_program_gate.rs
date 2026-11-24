@@ -78,7 +78,7 @@ fn program_binaries_reload_from_the_disk_cache() {
     };
     let dir = std::path::PathBuf::from(dir);
     let warm = race_bucket_build_options(256, 4096, 960, RaceShape::Sampling);
-    let batch = race_bucket_build_options(256, 4096, 256, RaceShape::Sampling);
+    let batch = race_bucket_build_options(256, 4096, 192, RaceShape::Sampling);
     register_geometry();
     let request = cm_request();
     let cpu = dep_cpu::run_cpu_race(&request, 1).expect("cpu race");

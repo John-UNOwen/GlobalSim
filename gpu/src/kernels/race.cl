@@ -426,7 +426,7 @@ static float race_step(__global uint* si, __global uint* scr, __global uint* rcb
     return advance_distance;
 }
 
-// The shared solver stream pair (PRD_R30_HI/LO seeded into sd at init), a
+// The shared solver stream pair (RR_R30_HI/LO seeded into sd at init), a
 // draw advances the pair in place. Exact u32 values ride the f64 columns.
 static double r_solver_draw(__global double* sd, const int r) {
     uint hi = (uint)sd[SD_R30H + r];
@@ -1529,8 +1529,11 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             if (ga != ga) sd[SD_HPG_A + r] = (double)convert_float_rte(as_double(scol[10]));
             const float guts = convert_float_rte(as_double(scol[10]));
             const float lane_f = convert_float_rte(pd[PI_RUNNER0 + PI_RUN_STRIDE * r + PI_RUN_LANE]);
+            // set_starting_lane seeds lane and lane_target together
+            // (lib.rs:743-746), and a course whose empty-in move is off never
+            // recomputes the target, so the gate lane has to be the target.
             sf[SF_MV_LANE + r] = lane_f;
-            sf[SF_MV_TARGET + r] = 0.f;
+            sf[SF_MV_TARGET + r] = lane_f;
             sf[SF_LANEMAX + r] = geom_on ? geo_lane_max_at(cb, lm_b, lm_l, 0.f)
                 : convert_float_rte(pd[PC_MAX_LANE]);
             if (geom_on) {
@@ -1556,7 +1559,7 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             // negative rows when grid starts are in play (f32-rounded by the host).
             sd[SD_POS + r] = pd[PI_RUNNER0 + PI_RUN_STRIDE * r + PI_RUN_POS];
             sd[SD_LANE + r] = (double)lane_f;
-            sd[SD_LANET + r] = 0.0;
+            sd[SD_LANET + r] = (double)lane_f;
             sd[SD_LCS + r] = 0.0;
             sd[SD_LCT + r] = 0.0;
             sd[SD_CS + r] = 3.0;
@@ -1588,10 +1591,11 @@ __kernel void race(__global const uint* ri_all, __global const double* rd_all,
             // The power field reads output 9 (its accumulator was seeded
             // before the lottery); output 6 is the engine's raw_power field.
             sd[SD_HPP + r] = as_double(scol[9]);
-            // The host replays the construction seed chain into the pd row; the
-            // live solver pair then advances in sd (PRD_R30_HI/LO seed it).
-            sd[SD_R30H + r] = pd[PD_RUN0 + PD_RUN_STRIDE * r + PRD_R30_HI];
-            sd[SD_R30L + r] = pd[PD_RUN0 + PD_RUN_STRIDE * r + PRD_R30_LO];
+            // The host replays the construction seed chain into this race's ri
+            // row; the live solver pair then advances in sd (RR_R30_HI/LO seed
+            // it).
+            sd[SD_R30H + r] = (double)ri[RI_RUN0 + RI_RUN_STRIDE * r + RR_R30_HI];
+            sd[SD_R30L + r] = (double)ri[RI_RUN0 + RI_RUN_STRIDE * r + RR_R30_LO];
             // The wisdom field and accumulator mirror the guts pair. The NaN
             // accumulator word still means no construction bump after the
             // gated chain: the seed is then the field this line reads.

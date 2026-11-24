@@ -208,6 +208,40 @@ port 1 to none. The slot column predates B4 and B5, which is why it reads
 6.32 MiB; `saturate` now runs this request unstripped by default, and the F1
 section carries the current slot and launch numbers.
 
+### App compare field (`examples/app-compare-race.jsonl`)
+
+The app's compare view runs this field. Line 1 is the request text the app's
+worker builds for one setup key: course 10611 (Aquarius Cup, 1,600 m, dirt),
+9 runners (the default mob preset, 15 or 16 skills on each mob, a default
+player panel with none), the merged 751-id skill table as `skillData`,
+1,155 ticks, 122 compiled records, effect bucket 256, tag bucket 4,096,
+360,696 bytes. `saturate --compact` on the B580 (2026-11-23):
+
+| | before the expiry-mask clear | after |
+| --- | --- | --- |
+| kernel-only, 32 races | 3,803 ms, 8.4 races/s | 1,583 ms, 20.2 races/s |
+| kernel-only, 64 races | 3,824 ms, 16.7 races/s | 1,596 ms, 40.1 races/s |
+| kernel-only, 128 races | 3,842 ms, 33.3 races/s | 1,610 ms, 79.5 races/s |
+| kernel-only, 512 races | 4,393 ms, 116.6 races/s | 1,987 ms, 257.7 races/s |
+| kernel-only, 1,024 races | 4,668 ms, 219.4 races/s | 2,206 ms, 464.2 races/s |
+| kernel-only, 2,048 races | 5,213 ms, 392.9 races/s | 2,807 ms, 729.6 races/s |
+| kernel-only, 4,096 races | 6,896 ms, 594.0 races/s | 6,660 ms, 615.0 races/s |
+| kernel-only, 11,540 races | 29,386 ms, 392.7 races/s | 27,954 ms, 412.8 races/s |
+| end to end, best width | 7,188 ms at 4,096, 569.9 races/s | 2,953 ms at 2,048, 693.6 races/s |
+| CPU engine, 1 thread | 5.79 ms/race, 172.7 races/s | 5.82 ms/race, 171.8 races/s |
+| CPU engine, 20 threads | 1,377 races/s | 1,362 races/s |
+| guard | seed 1 exact, 1,155 ticks | same |
+
+The clear is a low-occupancy win. The app splits a 500-sample compare by its
+auto seed gate into 18 setup keys and sends each as one message of 44 to 72
+seeds, where one work item per compute unit leaves every dependent load
+exposed. That is where the 2.4x lands. At 4,096 races the launch is already
+throughput bound and the clock barely moves.
+
+One message of 56 seeds through `run_repeated` runs 1,655 ms against 3,898 ms
+before the clear, with the launch stage at 1,595 ms and readback plus decode
+at 22 ms. At 114 seeds a message runs 1,721 ms against 3,976 ms.
+
 ### Keeping launches under the Windows timeout (F7)
 
 Windows ends OpenCL work that runs past `TdrDelay` (2 s on a stock PC) and

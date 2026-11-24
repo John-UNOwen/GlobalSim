@@ -255,6 +255,11 @@ pub fn course_tables<'a>(courses: impl IntoIterator<Item = &'a FlatCourse>) -> C
     }
     pad(&mut lm_b);
     pad(&mut lm_l);
+    // A course with no corner events (10301 is the only one) leaves these
+    // empty, and OpenCL refuses zero-length buffers. The counts above stay
+    // zero, so the padding row is never read.
+    pad(&mut ce_b);
+    pad(&mut ce_e);
     pad_u(&mut ce_i);
     pad_u(&mut ce_f);
     let mut sg_x: Vec<f64> = Vec::with_capacity(2 * n_courses * NSEG);

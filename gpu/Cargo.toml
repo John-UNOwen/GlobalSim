@@ -93,3 +93,8 @@ required-features = ["race"]
 name = "lws_sweep"
 path = "src/bin/lws_sweep.rs"
 required-features = ["race"]
+
+[[bin]]
+name = "c5_probe"
+path = "src/bin/c5_probe.rs"
+required-features = ["race"]

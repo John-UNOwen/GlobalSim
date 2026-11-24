@@ -132,6 +132,17 @@ fn slice_boundary_at_the_finish_tick() {
 
         let one = run(&mut ctx, &requests, SlicePolicy::Off);
         let ticks = one.races[0].ticks;
+        // The compact lane's frame-clock vector is built by loop_times, the
+        // O(n) form of loop_end. It must reproduce loop_end tick for tick or
+        // every compact record's tail times drift.
+        let times = race_exec::loop_times(ticks);
+        for (tick, &time) in times.iter().enumerate() {
+            assert_eq!(
+                time,
+                race_exec::loop_end(tick),
+                "{file}: loop_times disagrees with loop_end at tick {tick}"
+            );
+        }
         let parts = (2..=ticks).find(|d| ticks % d == 0).expect("a divisor");
         let exact = run(&mut ctx, &requests, SlicePolicy::Fixed((ticks / parts) as u32));
         assert_eq!(exact.stage_ms.slices, parts, "the dividing slice length must need exactly {parts} launches");

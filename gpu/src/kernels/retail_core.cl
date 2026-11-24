@@ -56,7 +56,9 @@
 // those slots zero. The slot follows the per-runner block below.
 // Per-runner block, slot RI_RUN0 + RI_RUN_STRIDE * r.
 #define RI_RUN0 16
-#define RI_RUN_STRIDE 14
+// The solver pair rides this per-race row: the pd row is shared by the seeds
+// of one request (RI_REQ), so seed-dependent words cannot live there.
+#define RI_RUN_STRIDE 16
 #define RR_STYLE 0           // base_running_style (1..5)
 #define RR_STRATEGY 1        // resolved strategy (1..5)
 #define RR_DISTAPT 2         // distance aptitude 0..7
@@ -71,6 +73,8 @@
 #define RR_SUAPT 11          // surface aptitude 0..7
 #define RR_TEAM 12           // fixed team id, 0 no team (race_field.rs:461 drop)
 #define RR_CHARA 13          // fixed chara id (race_field.rs:441 chara fan)
+#define RR_R30_HI 14         // solver stream state after the construction draws
+#define RR_R30_LO 15
 #define RI_DEBUG_TICK (RI_RUN0 + RI_RUN_STRIDE * RACE_MAXR)
 #define RI_FULL (RI_DEBUG_TICK + 14) // 1: write the full-reply channels and exports
 // Compact launch: 1 or 2 kept frame rows instead of every runner's. The
@@ -84,8 +88,9 @@
 // is 0, so they read the channels off and never write them.
 #define RI_RC (RI_DEBUG_TICK + 18)
 // Row of the shared request table this slot reads: the pd row and the skill
-// table, uploaded once per distinct request in the launch. The seed lives in
-// RI_SEED, so the seeds of one request share this row.
+// table, uploaded once per distinct request in the launch. The seed and its
+// solver pair live in this slot's own ri row, so the seeds of one request
+// share the table row exactly.
 #define RI_REQ (RI_DEBUG_TICK + 19)
 #define RI_STRIDE (RI_DEBUG_TICK + 24)
 
@@ -203,11 +208,9 @@
 #define PD_FC_HALF1 (PD_CF_DIST + 12)          // final_corner_half end
 #define PD_RUN0 (PL_FRONT_LANE + 32)           // per runner, stride PD_RUN_STRIDE
 #define PD_RUN_STRIDE 22
-// The later-stamina request flag and the solver stream pair left by the
-// engine's construction draws, per runner (race_exec.rs PRD_LATER).
+// The later-stamina request flag, per runner (race_exec.rs PRD_LATER). Slots
+// 12 and 13 are retired: the solver pair moved to the per-race ri row.
 #define PRD_LATER 11
-#define PRD_R30_HI 12
-#define PRD_R30_LO 13
 #define PRD_POWF 0             // per-runner spurt powf bits as the integer value
 #define PRD_DUEL_T 1           // duel target-speed modifier, f64
 #define PRD_DUEL_A 2           // duel accel modifier, f64
@@ -831,7 +834,8 @@ static float phys_maximum_spurt_speed(__global const double* pd, const float spe
 // the points the engine reads its live horse.guts: the spurt plan closure,
 // the duel and spot entry snapshots. Each mirrors the host bake and the
 // engine term for term, and gs_pow and gs_powf are the bit-exact ucrtbase
-// ports gated in gpu/tests/wave8_powf_gate.rs.
+// ports gated in gpu/tests/wave8_powf_gate.rs and
+// gpu/tests/wave21_pow_parity_gate.rs.
 static double sk_powf_word(__global const double* pd, const double field) {
     const float argument = bounded_stat(convert_float_rte(field)) * phys_f(pd, PT_SPURT + 2);
     return (double)as_uint(gs_powf(argument, phys_f(pd, PT_SPURT + 3)));
@@ -3396,7 +3400,8 @@ static void sk_seq_remove(__global uint* q, const uint tok) {
 }
 
 // A slot timer starts aging where it is written, so the per-tick sweep skips
-// the slots that never held one. The bit stays set once written.
+// the slots that never held one. The expiry walk clears the bit once the
+// timer reached zero, so an expired slot leaves the sweep for good.
 static void sk_age_mark(__global uint* sks, const int rec, const int slot) {
     sks[SKR_STRIDE * rec + SKR_EMASK] |= 1u << slot;
 }
@@ -4702,21 +4707,30 @@ static void skills_advance(__global const uint* sk, __global uint* sks,
         // current-speed kinds drain in their own reverse pass, which owns the
         // natural expiry impulse.
         if (emask != 0u) {
+            uint expired = 0u;
             for (int e = 0; e < n_eff; e++) {
                 if ((emask & (1u << e)) == 0u) {
                     continue;
                 }
+                if (wd[SKD_EFF_T + e] < 0.0) {
+                    continue;
+                }
+                // Every reader past expiry only tests this timer's sign, so a
+                // slot that reached zero leaves the mask once its token is out.
+                // Left in, its removal walk reruns every tick for the race.
+                expired |= 1u << e;
                 const int kind = (int)(sk + SK_EFFECTS)[SK_ESTRIDE * (uint)(eff_base + e)];
                 if (!sk_queued_kind(kind) || kind == SK_EFF_CURRENT
                     || kind == SK_EFF_CURRENT_NAT) {
                     continue;
                 }
-                if (wd[SKD_EFF_T + e] >= 0.0) {
-                    const uint tok = SK_TOK_EFF((uint)rec, (uint)e);
-                    for (int j = 0; j < n; j++) {
-                        sk_seq_remove(sk_seq(scr, kind) + j * SK_SEQN, tok);
-                    }
+                const uint tok = SK_TOK_EFF((uint)rec, (uint)e);
+                for (int j = 0; j < n; j++) {
+                    sk_seq_remove(sk_seq(scr, kind) + j * SK_SEQN, tok);
                 }
+            }
+            if (expired != 0u) {
+                sks[SKR_STRIDE * rec + SKR_EMASK] &= ~expired;
             }
         }
     }

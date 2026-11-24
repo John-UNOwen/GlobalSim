@@ -39,6 +39,16 @@
 //!                       fire it either (bit-exact frames, no fallback)
 //!   --events ID         print the CPU skillDetailEvents of the first race the
 //!                       search tried for ID, to see what the engine reported
+//!   --variants          append 31 derived fields after the given ones, rebuilt
+//!                       in process from examples/cm-*-race.jsonl: the 28 of
+//!                       never-fired/draft/make-variant-fields.js (other
+//!                       seasons, weather and ground, all four styles on every
+//!                       CM course, 11 more tracks) plus a Night field, a
+//!                       course 10301 field and a five-carrier 201631 field,
+//!                       the scenes that fire the conditions no CM field meets
+//!   --variants-out DIR  write those derived fields as JSONL into DIR (the
+//!                       draft's three file names plus variant-scenes.jsonl)
+//!                       and carry on with the run
 //!
 //! Each skill ends as one of: match, diverge (first divergent tick), fallback
 //! (the GPU refused the race), refused (does not compile in any field), cap
@@ -186,6 +196,162 @@ fn prepare_field(label: &str, mut root: Value, course: &Value) -> (Value, Vec<St
     (root, dropped)
 }
 
+/// Resolve one field's course and geometry, merge the --skills table, prepare
+/// it, and append it to the sweep.
+fn push_field(
+    label: String,
+    mut root: Value,
+    courses: &Value,
+    table_override: &Option<Value>,
+    fields: &mut Vec<Field>,
+) -> Result<(), String> {
+    let cid = root.get("courseId").and_then(Value::as_i64).ok_or("field without courseId")?;
+    let seed = root.get("seed").and_then(Value::as_i64).unwrap_or(1);
+    let course = courses.get(&cid.to_string()).ok_or(format!("course {cid} missing"))?.clone();
+    let geometry = std::fs::read_to_string(repo_file(&format!("data/course_geometry/{cid}.json")))
+        .map_err(|e| format!("geometry {cid}: {e}"))?;
+    globalsim::register_course_geometry(cid as i32, geometry);
+    if let (Some(Value::Object(extra)), Value::Object(m)) = (table_override, &mut root) {
+        if let Some(Value::Object(sd)) = m.get_mut("skillData") {
+            for (k, v) in extra {
+                sd.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+    }
+    let (root, dropped) = prepare_field(&label, root, &course);
+    println!("== field {label}: seed {seed}, {} dropped to compile", dropped.len());
+    for d in &dropped {
+        println!("     dropped {d}");
+    }
+    let runners = root.get("horses").and_then(Value::as_array).map_or(0, |h| h.len());
+    fields.push(Field { label, root, course, seed, runners });
+    Ok(())
+}
+
+/// The five CM example requests, the sweep's field donors.
+const CM_COURSES: [&str; 5] = ["10506", "10701", "10808", "10903", "11103"];
+
+fn example_field(course: &str) -> Result<Value, String> {
+    let rel = format!("examples/cm-{course}-race.jsonl");
+    let path = repo_file(&rel);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let line = text.lines().find(|l| !l.trim().is_empty()).ok_or(format!("{rel}: no field line"))?;
+    json::parse(line).map_err(|e| format!("{rel}: {e}"))
+}
+
+fn set_field(root: &mut Value, key: &str, value: Value) {
+    let Value::Object(m) = root else { return };
+    m.insert(key.to_string(), value);
+}
+
+/// The derived fields grouped by the file `--variants-out` writes.
+struct Variants {
+    weather: Vec<Value>,
+    styles: Vec<Value>,
+    tracks: Vec<Value>,
+    scenes: Vec<Value>,
+}
+
+/// Rebuild never-fired/draft/make-variant-fields.js plus the three crafted
+/// scenes, so the sweep needs no generated JSONL on disk.
+fn build_variants(courses: &Value) -> Result<Variants, String> {
+    let mut out = Variants { weather: Vec::new(), styles: Vec::new(), tracks: Vec::new(), scenes: Vec::new() };
+    for (season, weather, ground) in [
+        ("Spring", "Rainy", "Soft"),
+        ("Summer", "Snowy", "Heavy"),
+        ("Sakura", "Rainy", "Heavy"),
+    ] {
+        for course in ["10808", "11103"] {
+            let mut field = example_field(course)?;
+            set_field(&mut field, "season", Value::String(season.into()));
+            set_field(&mut field, "weather", Value::String(weather.into()));
+            set_field(&mut field, "groundCondition", Value::String(ground.into()));
+            out.weather.push(field);
+        }
+    }
+    let styles = ["Nige", "Senkou", "Sasi", "Oikomi"];
+    for course in CM_COURSES {
+        let mut field = example_field(course)?;
+        for (i, horse) in horses_mut(&mut field).iter_mut().enumerate() {
+            set_field(horse, "strategy", Value::String(styles[i % styles.len()].into()));
+        }
+        out.styles.push(field);
+    }
+    // The draft's pick list: 17 courses across 11 tracks.
+    let tracks = [
+        ["10101", "10104"], ["10201", "10204"], ["10304", "10309"], ["10402", "10407"], ["10606", "10611"],
+        ["10602", ""], ["11003", "11007"], ["11302", ""], ["11402", ""], ["11503", ""], ["11203", ""],
+    ];
+    let turf = ["10701", "10903", "10808", "10506"];
+    let dirt = ["11103"];
+    let mut donors: BTreeMap<&str, (Value, f64)> = BTreeMap::new();
+    for course in turf.iter().chain(dirt.iter()).copied() {
+        let entry = courses.get(course).ok_or(format!("course {course} missing"))?;
+        donors.insert(course, (example_field(course)?, entry.get_f64("distance")?));
+    }
+    for course in tracks.iter().flatten().copied().filter(|c| !c.is_empty()) {
+        let Some(entry) = courses.get(course) else {
+            println!("  skip {course}: not in data/course_data.json");
+            continue;
+        };
+        if !repo_file(&format!("data/course_geometry/{course}.json")).exists() {
+            println!("  skip {course}: no geometry");
+            continue;
+        }
+        let distance = entry.get_f64("distance")?;
+        let pool: &[&str] = if entry.get_i64("surface")? == 2 { &dirt } else { &turf };
+        let mut best: Option<&str> = None;
+        let mut best_delta = f64::INFINITY;
+        for candidate in pool {
+            let delta = (donors[candidate].1 - distance).abs();
+            if delta < best_delta {
+                best = Some(candidate);
+                best_delta = delta;
+            }
+        }
+        let donor = best.ok_or("empty donor pool")?;
+        let mut field = donors[donor].0.clone();
+        set_field(&mut field, "courseId", Value::Number(course.parse::<f64>().map_err(|_| format!("course {course} not numeric"))?));
+        out.tracks.push(field);
+    }
+    // The scenes: Night, course 10301 and five carriers of 201631.
+    let mut night = example_field("10701")?;
+    set_field(&mut night, "time", Value::String("Night".into()));
+    out.scenes.push(night);
+    let mut straight = example_field("10701")?;
+    set_field(&mut straight, "courseId", Value::Number(10301.0));
+    out.scenes.push(straight);
+    let mut share = example_field("10701")?;
+    for horse in horses_mut(&mut share).iter_mut().take(5) {
+        skills_mut(horse).push(skill_ref("201631"));
+    }
+    out.scenes.push(share);
+    Ok(out)
+}
+
+fn write_variants(dir: &str, variants: &Variants) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
+    let files: [(&str, &Vec<Value>); 4] = [
+        ("variant-weather.jsonl", &variants.weather),
+        ("variant-styles.jsonl", &variants.styles),
+        ("variant-tracks.jsonl", &variants.tracks),
+        ("variant-scenes.jsonl", &variants.scenes),
+    ];
+    for (name, fields) in files {
+        let mut text = String::new();
+        for field in fields {
+            let mut line = String::new();
+            json::to_string_into(field, &mut line);
+            text.push_str(&line);
+            text.push('\n');
+        }
+        let path = Path::new(dir).join(name);
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        println!("wrote {} ({} field(s))", path.display(), fields.len());
+    }
+    Ok(())
+}
+
 fn frames_diff(cpu: &[dep_cpu::TickFrame], gpu: &[Vec<[f64; 6]>]) -> Option<String> {
     if cpu.len() != gpu.len() {
         return Some(format!("tick count cpu {} gpu {}", cpu.len(), gpu.len()));
@@ -265,6 +431,8 @@ struct Opts {
     trace: bool,
     check_unfired: bool,
     events: Option<String>,
+    variants: bool,
+    variants_out: Option<String>,
 }
 
 fn parse_args() -> Result<Opts, String> {
@@ -284,12 +452,17 @@ fn parse_args() -> Result<Opts, String> {
             "--trace" => o.trace = true,
             "--check-unfired" => o.check_unfired = true,
             "--events" => o.events = Some(val("--events")?),
+            "--variants" => o.variants = true,
+            "--variants-out" => o.variants_out = Some(val("--variants-out")?),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => o.fields.push(x),
         }
     }
     if o.fields.is_empty() {
         return Err("usage: skill_parity [OPTIONS] FIELD.jsonl ...".into());
+    }
+    if o.variants_out.is_some() && !o.variants {
+        return Err("--variants-out needs --variants".into());
     }
     Ok(o)
 }
@@ -332,28 +505,28 @@ fn main() -> Result<(), String> {
     for file in &o.fields {
         let text = std::fs::read_to_string(resolve(file)).map_err(|e| format!("{file}: {e}"))?;
         for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
-            let mut root = json::parse(line).map_err(|e| format!("{file}:{n}: {e}"))?;
+            let root = json::parse(line).map_err(|e| format!("{file}:{n}: {e}"))?;
             let cid = root.get("courseId").and_then(Value::as_i64).ok_or("field without courseId")?;
-            let seed = root.get("seed").and_then(Value::as_i64).unwrap_or(1);
-            let course = courses.get(&cid.to_string()).ok_or(format!("course {cid} missing"))?.clone();
-            let geometry = std::fs::read_to_string(repo_file(&format!("data/course_geometry/{cid}.json")))
-                .map_err(|e| format!("geometry {cid}: {e}"))?;
-            globalsim::register_course_geometry(cid as i32, geometry);
-            if let (Some(Value::Object(extra)), Value::Object(m)) = (&table_override, &mut root) {
-                if let Some(Value::Object(sd)) = m.get_mut("skillData") {
-                    for (k, v) in extra {
-                        sd.entry(k.clone()).or_insert_with(|| v.clone());
-                    }
-                }
-            }
             let label = format!("{}#{} (course {cid})", Path::new(file).file_name().unwrap().to_string_lossy(), n + 1);
-            let (root, dropped) = prepare_field(&label, root, &course);
-            println!("== field {label}: seed {seed}, {} dropped to compile", dropped.len());
-            for d in &dropped {
-                println!("     dropped {d}");
+            push_field(label, root, &courses, &table_override, &mut fields)?;
+        }
+    }
+    if o.variants {
+        let variants = build_variants(&courses)?;
+        if let Some(dir) = &o.variants_out {
+            write_variants(dir, &variants)?;
+        }
+        for (group, items) in [
+            ("weather", &variants.weather),
+            ("styles", &variants.styles),
+            ("tracks", &variants.tracks),
+            ("scenes", &variants.scenes),
+        ] {
+            for (n, root) in items.iter().enumerate() {
+                let cid = root.get("courseId").and_then(Value::as_i64).unwrap_or(-1);
+                let label = format!("variant-{group}#{} (course {cid})", n + 1);
+                push_field(label, root.clone(), &courses, &table_override, &mut fields)?;
             }
-            let runners = root.get("horses").and_then(Value::as_array).map_or(0, |h| h.len());
-            fields.push(Field { label, root, course, seed, runners });
         }
     }
 
