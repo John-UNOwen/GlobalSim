@@ -88,6 +88,18 @@ impl GpuRaces {
         self.ctx.register_geometry(course_id, json_text)
     }
 
+    /// Install the skill table for this session (step 5). Requests that omit
+    /// `skillData` answer from it, so the 357 KB table crosses the wire and
+    /// parses once per session rather than once per request text. Both lanes
+    /// hold it: a compact request can still be refused to the classic lane.
+    pub fn set_skill_table(&mut self, json_text: &str) -> Result<(), String> {
+        self.ctx.set_skill_table(json_text)?;
+        if let Some(classic) = &mut self.classic {
+            classic.set_skill_table(json_text)?;
+        }
+        Ok(())
+    }
+
     /// Runs one batch, retail requests in one retail launch and classic
     /// requests in one classic launch. The retail launchable races must share
     /// one runner count, the same constraint the kernel grid carries, and a

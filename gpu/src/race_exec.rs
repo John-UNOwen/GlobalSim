@@ -1173,10 +1173,19 @@ fn prepare(
     courses: &Value,
     registry: &mut GeometryRegistry,
     plan_enabled: bool,
+    held_skill: Option<&Value>,
 ) -> Result<Prepared, String> {
     let req_hash = crate::gpu::fnv1a64(request.as_bytes());
     let req_text: Arc<str> = Arc::from(request);
-    let root = json::parse(request)?;
+    let mut root = json::parse(request)?;
+    // A session table the request does not name answers it instead, so a
+    // packed part carries its own fields only (step 5). The held value is
+    // shared, so this is one Arc clone per prepare.
+    if let (Some(table), Value::Object(map)) = (held_skill, &mut root) {
+        if !map.contains_key("skillData") {
+            map.insert("skillData".to_string(), table.clone());
+        }
+    }
     let course_id = root.get_i64("courseId")? as i32;
     let seed_i32 = i32::try_from(seed).map_err(|_| "seed does not fit an i32".to_string())?;
     let horses = root.get_array("horses")?;
@@ -1883,6 +1892,10 @@ pub struct RaceContext {
     // geometry epoch invalidates them: a re-registered course changes what a
     // prepare of the same text must produce.
     prepared_cache: Vec<CachedPrepared>,
+    // The skill table this session installed once (step 5). Requests that omit
+    // skillData read it from here instead of repeating 357 KB of JSON per
+    // packed part, which the prepare parse cost is proportional to.
+    held_skill: Option<Value>,
     geom_epoch: u64,
     pub open_ms: OpenTimings,
 }
@@ -1927,6 +1940,7 @@ impl RaceContext {
             local_size_override: None,
             stats_cache: Vec::new(),
             prepared_cache: Vec::new(),
+            held_skill: None,
             geom_epoch: 0,
             open_ms: OpenTimings {
                 spike_ms,
@@ -2035,6 +2049,20 @@ impl RaceContext {
         Ok(())
     }
 
+    /// Installs the skill table this session's requests refer to (step 5).
+    /// Requests that omit `skillData` read it from here, so the table crosses
+    /// the wire and parses once per session instead of once per request text.
+    /// Cached prepares and derived rows stale out with the table they parse.
+    pub fn set_skill_table(&mut self, json_text: &str) -> Result<(), String> {
+        let table = json::parse(json_text).map_err(|e| format!("skill table: {e}"))?;
+        self.held_skill = Some(Value::Shared(Arc::new(table)));
+        self.table_cache.clear();
+        self.prepared_cache.clear();
+        self.stats_cache.clear();
+        self.geom_epoch += 1;
+        Ok(())
+    }
+
     /// The derived stats row for one request text, if this context derived it
     /// before (F2). The hash indexes the scan and the text comparison decides.
     fn cached_row(&self, key: u64, text: &str) -> Option<Arc<DerivedRow>> {
@@ -2063,7 +2091,7 @@ impl RaceContext {
             return Ok(out);
         }
         let mut prepared = prepare(request, seed, &self.globals, &self.grids, &self.courses,
-            &mut self.registry, self.plan_enabled)?;
+            &mut self.registry, self.plan_enabled, self.held_skill.as_ref())?;
         if prepared.host_fallback.is_none() {
             prepared.derived = self.cached_row(prepared.req_hash, &prepared.req_text);
             if self.prepared_cache.len() >= REQUEST_CACHE_MAX {
@@ -2818,6 +2846,23 @@ impl RaceContext {
         slices: slice_launches,
         slice_max_ms,
     };
+    if let Ok(path) = std::env::var("GSIM_STAGE_TIMINGS") {
+        // Where one call's milliseconds went, to size the host/kernel overlap.
+        // "1" prints to stderr, anything else is a file to append to (the app
+        // lane's server pipes its streams, so a file is the only way out).
+        let line = format!(
+            "[gpu-stage] races {} launches {} total {:.0} prepass {:.0} tables {:.0} upload {:.0} launch {:.0} readback {:.0} decode {:.0} slices {} slice_max {:.0}\n",
+            races.len(), slice_launches, stage_ms.total_ms, stage_ms.prepass_ms, stage_ms.tables_ms,
+            stage_ms.upload_ms, stage_ms.launch_ms, stage_ms.readback_ms, stage_ms.decode_ms,
+            stage_ms.slices, stage_ms.slice_max_ms
+        );
+        if path.trim() == "1" {
+            eprint!("{line}");
+        } else if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path.trim()) {
+            use std::io::Write as _;
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
     Ok((RaceRun { device: self.spike.device.clone(), build_ms: self.spike.build_ms, stage_ms, races }, bench))
     }
 }

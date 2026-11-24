@@ -403,14 +403,21 @@ pub(crate) fn stub(reason: String) -> Prepared {
 pub fn classic_gate_reason(request: &str) -> Option<String> {
     let grids = json::parse(&dep_cpu::engine_data("starting_grids.json").ok()?).ok()?;
     let courses = initialization::engine_json("data/course_data.json").ok()?;
-    match prepare(request, 0, &grids, &courses) {
+    match prepare(request, 0, &grids, &courses, None) {
         Ok(prepared) => prepared.host_fallback,
         Err(reason) => Some(reason),
     }
 }
 
-fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value) -> Result<Prepared, String> {
-    let root = json::parse(request)?;
+fn prepare(request: &str, seed: i64, grids: &Value, courses: &Value, held_skill: Option<&Value>) -> Result<Prepared, String> {
+    let mut root = json::parse(request)?;
+    // A session table answers a request that omits skillData (step 5). The
+    // held value is shared, so this is one Arc clone per prepare.
+    if let (Some(table), Value::Object(map)) = (held_skill, &mut root) {
+        if !map.contains_key("skillData") {
+            map.insert("skillData".to_string(), table.clone());
+        }
+    }
     let course_id = root.get_i64("courseId")? as i32;
     let horses = root.get_array("horses")?;
     let n = horses.len();
@@ -874,6 +881,9 @@ pub struct ClassicContext {
     courses: Value,
     spike: crate::gpu::Spike,
     program: ocl::Program,
+    // The skill table the session installed once (step 5), read by requests
+    // that omit skillData.
+    held_skill: Option<Value>,
 }
 
 impl ClassicContext {
@@ -882,11 +892,18 @@ impl ClassicContext {
         let program = spike.build_program(crate::gpu::CLASSIC_KERNEL_SOURCE)?;
         let grids = json::parse(&dep_cpu::engine_data("starting_grids.json")?)?;
         let courses = initialization::engine_json("data/course_data.json")?;
-        Ok(ClassicContext { grids, courses, spike, program })
+        Ok(ClassicContext { grids, courses, spike, program, held_skill: None })
+    }
+
+    /// Installs the skill table this session's requests refer to (step 5).
+    pub fn set_skill_table(&mut self, json_text: &str) -> Result<(), String> {
+        let table = json::parse(json_text).map_err(|e| format!("skill table: {e}"))?;
+        self.held_skill = Some(Value::Shared(std::sync::Arc::new(table)));
+        Ok(())
     }
 
     pub(crate) fn prepare(&self, request: &str, seed: i64) -> Result<Prepared, String> {
-        prepare(request, seed, &self.grids, &self.courses)
+        prepare(request, seed, &self.grids, &self.courses, self.held_skill.as_ref())
     }
 
     pub(crate) fn run_prepared(&self, prepared: &mut [Prepared]) -> Result<ClassicRun, String> {

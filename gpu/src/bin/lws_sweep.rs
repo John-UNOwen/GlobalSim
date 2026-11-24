@@ -146,13 +146,14 @@ fn main() -> Result<(), String> {
     }
 
     // Bit-exact guard at the narrowest width: the seed-1 race of a launched
-    // batch equals the CPU engine frame for frame, so the timed launches below
-    // run a chain the lane is known to answer exactly.
+    // batch equals the CPU engine frame for frame on the kept rows (compact
+    // keeps row 0, the full path every runner).
     let cpu = dep_cpu::run_cpu_race(&request, 1)?;
+    let kept_rows: Vec<usize> = if a.compact { vec![0] } else { (0..cpu.frames[0].len()).collect() };
     let cpu_bits: Vec<u64> = cpu
         .frames
         .iter()
-        .flat_map(|tick| tick.iter().flat_map(|v| v.map(|x| x.to_bits())))
+        .flat_map(|tick| kept_rows.iter().flat_map(|&row| tick[row].map(|x| x.to_bits())))
         .collect();
     {
         let mut prepared: Vec<race_exec::Prepared> = (1..=8i32).map(|s| template.with_seed(s)).collect();

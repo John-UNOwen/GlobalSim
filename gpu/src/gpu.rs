@@ -177,6 +177,21 @@ pub fn program_cache_path(dir: &std::path::Path, options: &str) -> std::path::Pa
     ))
 }
 
+/// Writes one build's source and options into `GSIM_DUMP_KERNEL`, the input
+/// for the offline `ocloc` compile: the driver reports no register or spill
+/// figures, so the offline compiler is where the ISA comes from.
+fn maybe_dump_kernel(stem: &str, options: &str, source: &str) {
+    let Ok(dir) = std::env::var("GSIM_DUMP_KERNEL") else { return };
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return;
+    }
+    let key = fnv1a64(options.as_bytes());
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(format!("{dir}/{stem}-{key:016x}.cl"), source);
+    let _ = std::fs::write(format!("{dir}/{stem}-{key:016x}.opts"), options);
+}
+
 const PROGRAM_CACHE_MAGIC: &[u8; 8] = b"GSIMPC02";
 
 /// A second pass over the kernel source with a different starting basis and a
@@ -460,8 +475,10 @@ impl Spike {
     /// Builds an extra kernel program (for example rng.cl) on the already
     /// gated device, with the same exactness build options.
     pub fn build_program(&self, source: &str) -> Result<Program, String> {
+        let options = build_options();
+        maybe_dump_kernel("program", &options, source);
         Program::builder()
-            .cmplr_opt(build_options())
+            .cmplr_opt(options)
             .source(source)
             .build(&self.context)
             .map_err(|e| e.to_string())
@@ -478,6 +495,7 @@ impl Spike {
     }
 
     fn build_race_program_with(&self, options: String) -> Result<Program, String> {
+        maybe_dump_kernel("race", &options, RACE_KERNEL_SOURCE);
         Program::builder()
             .cmplr_opt(options)
             .source(RACE_KERNEL_SOURCE)
