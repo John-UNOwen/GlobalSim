@@ -29,6 +29,9 @@ pub struct PreparedRace {
     gate_perm: Option<Vec<usize>>,
     signature: Option<Value>,
     roster: Option<PreparedRoster>,
+    /// One roster cache per gate for the gated run path. The field order, and
+    /// so the per-runner roster rows, differ per gate.
+    gate_rosters: Vec<Option<PreparedRoster>>,
 }
 
 /// One session's skill table: the parsed `skillData` value and its decoded
@@ -142,9 +145,11 @@ impl PreparedRace {
             Some(retail_initialization::PreparedInitialization::new(&horses, course, raw_skills,
                 bundled_parameters()?.get("parameters").ok_or("Missing retail parameters")?, paired_streams)?)
         } else { None };
+        let gate_roster_count = spec.horses.len();
         Ok(Self { spec, skills, initialization, retail_sections, retail_runtime, paired_streams,
             world_geometry, startup_pass, retain_all_frames: input.get("retainAllFrames").and_then(Value::as_bool) == Some(true),
-            gate_perm, signature: input.get("dataSignature").cloned(), roster: None })
+            gate_perm, signature: input.get("dataSignature").cloned(), roster: None,
+            gate_rosters: (0..gate_roster_count).map(|_| None).collect() })
     }
 
     /// Run one independent seed with every mutable solver, RNG, timer and
@@ -153,18 +158,73 @@ impl PreparedRace {
         self.run_value(seed, true).map(|value| Simulation { value })
     }
 
+    /// Run one seed against a per-run gate. The prepared request holds the
+    /// gate-0 field (request position k rides gate k, player at index 0), so a
+    /// build prepares once and every draw of the seed's gate reuses it. The
+    /// reply is byte-identical to a request prepared for that gate.
+    pub fn run_gated(&mut self, seed: i64, gate: i32) -> Result<Simulation, String> {
+        self.run_gated_value(seed, gate, true).map(|value| Simulation { value })
+    }
+
+    /// The gate-0 field at `gate`: the player moves to that gate and the other
+    /// runners fill the remaining gates in request order. Position k always
+    /// rides gate k, which is the layout the request builders emit.
+    fn gated_order(&self, gate: usize) -> Result<Vec<usize>, String> {
+        let count = self.spec.horses.len();
+        if gate >= count { return Err(format!("gate {gate} is outside the {count}-runner field")); }
+        Ok((0..count).map(|k| if k < gate { k + 1 } else if k == gate { 0 } else { k }).collect())
+    }
+
+    /// Reorder `horses` so position k holds the runner `order[k]` names.
+    fn reorder_horses(horses: &mut Vec<HorseInputSpec>, order: &[usize]) {
+        let mut slots: Vec<Option<HorseInputSpec>> = horses.drain(..).map(Some).collect();
+        for &source in order {
+            if let Some(horse) = slots.get_mut(source).and_then(Option::take) { horses.push(horse); }
+        }
+    }
+
+    fn run_gated_value(&mut self, seed: i64, gate: i32, capture_frames: bool) -> Result<Value, String> {
+        let gate = usize::try_from(gate).map_err(|_| "gate must be non-negative".to_string())?;
+        let order = self.gated_order(gate)?;
+        let mut inverse = vec![0usize; order.len()];
+        for (position, &source) in order.iter().enumerate() { inverse[source] = position; }
+        let player = std::mem::replace(&mut self.spec.player_horse_index, gate);
+        Self::reorder_horses(&mut self.spec.horses, &order);
+        // The request layout rides gate k at position k, so a reordered field
+        // needs its gate assignment rewritten to the new positions.
+        for (position, horse) in self.spec.horses.iter_mut().enumerate() { horse.gate_index = position as i32; }
+        let mut roster = self.gate_rosters[gate].take();
+        let result = self.run_core(seed, Some(&order), capture_frames, &mut roster);
+        self.gate_rosters[gate] = roster;
+        Self::reorder_horses(&mut self.spec.horses, &inverse);
+        for (position, horse) in self.spec.horses.iter_mut().enumerate() { horse.gate_index = position as i32; }
+        self.spec.player_horse_index = player;
+        result
+    }
+
     /// `run` as the worker's reply value. Without `capture_frames` the reply
     /// carries no replay frames or frame metadata; every other key is unchanged.
     pub(crate) fn run_value(&mut self, seed: i64, capture_frames: bool) -> Result<Value, String> {
+        let mut roster = self.roster.take();
+        let result = self.run_core(seed, None, capture_frames, &mut roster);
+        self.roster = roster;
+        result
+    }
+
+    fn run_core(&mut self, seed: i64, order: Option<&[usize]>, capture_frames: bool,
+                roster: &mut Option<PreparedRoster>) -> Result<Value, String> {
         self.spec.seed = seed;
         let initialization = self.initialization.as_ref().map(|plan| {
             let seed = i32::try_from(seed).map_err(|_| "Retail seed must be a signed 32-bit integer".to_string())?;
-            plan.initialize(seed)
+            match order {
+                Some(order) => plan.initialize_permuted(seed, order),
+                None => plan.initialize(seed),
+            }
         }).transpose()?;
         let mut value = race_solver_builder::with_skills(self.skills.clone(), || run_race(
             &self.spec, conditions(), initialization.as_ref(), self.retail_sections, self.retail_runtime,
             self.paired_streams, self.world_geometry.clone(), self.startup_pass, self.retain_all_frames, capture_frames, None,
-            &mut self.roster))?;
+            roster))?;
         if let Value::Object(map) = &mut value {
             map.insert("experimentalRetailInitialization".into(), Value::Bool(initialization.is_some()));
             // Only paired replies carry the key, so default-mode replies stay
@@ -196,6 +256,109 @@ impl Simulation {
     /// replay packet and JSON metadata. Existing capacity can be reused.
     pub fn into_binary(mut self, metadata: &mut String, packet: &mut Vec<u8>) {
         binary_replay::encode(&mut self.value, metadata, packet);
+    }
+}
+
+#[cfg(test)]
+mod gated_run_tests {
+    use super::*;
+
+    /// The app's field shape: request position k rides gate k. A gate-g field
+    /// puts the gate-0 player at position g and moves each mob one gate down.
+    fn gate_order(count: usize, gate: usize) -> Vec<usize> {
+        (0..count).map(|k| if k < gate { k + 1 } else if k == gate { 0 } else { k }).collect()
+    }
+
+    /// A request for one gate, rebuilt the way the app's field builder does it:
+    /// the same runners, the gate reassigned to each runner's new position.
+    fn gate_request(base: &Value, gate: usize) -> String {
+        let horses = base.get_array("horses").expect("example horses").to_vec();
+        let order = gate_order(horses.len(), gate);
+        let mut reordered = Vec::with_capacity(horses.len());
+        for (position, &source) in order.iter().enumerate() {
+            let mut horse = horses[source].clone();
+            if let Value::Object(map) = &mut horse {
+                map.insert("gateIndex".into(), json::num(position as f64));
+            }
+            reordered.push(horse);
+        }
+        let mut value = base.clone();
+        if let Value::Object(map) = &mut value {
+            map.insert("horses".into(), Value::Array(reordered));
+            map.insert("playerHorseIndex".into(), json::num(gate as f64));
+        }
+        json::to_string(&value)
+    }
+
+    /// A base request where the runners differ, so a wrong field order shows up
+    /// in the initialization draws.
+    fn distinct_field() -> Value {
+        let line = include_str!("../examples/race.jsonl").trim();
+        let mut base = json::parse(line).expect("example request parses");
+        let styles = ["Nige", "Senkou", "Sasi", "Oikomi", "Senkou"];
+        let skills = ["100011", "200011", "100031"];
+        let mut horses = base.get_array("horses").expect("example horses").to_vec();
+        for (index, horse) in horses.iter_mut().enumerate() {
+            if let Value::Object(map) = horse {
+                map.insert("speed".into(), json::num(900.0 + index as f64));
+                map.insert("strategy".into(), Value::String(styles[index % styles.len()].into()));
+                let entries: Vec<Value> = skills.iter().map(|id| json::obj(vec![
+                    ("skillId", json::num(id.parse::<f64>().unwrap_or(0.))),
+                    ("level", json::num(1.0)),
+                ])).collect();
+                map.insert("skills".into(), Value::Array(entries));
+            }
+        }
+        if let Value::Object(map) = &mut base {
+            map.insert("horses".into(), Value::Array(horses));
+            map.insert("playerHorseIndex".into(), json::num(0.0));
+            map.insert("experimentalRetailInitialization".into(), Value::Bool(true));
+        }
+        base
+    }
+
+    fn reply(race: &mut PreparedRace, seed: i64) -> String {
+        let mut out = String::new();
+        race.run(seed).expect("run").write_json(&mut out);
+        out
+    }
+
+    #[test]
+    fn gated_run_matches_a_request_prepared_for_that_gate() {
+        let base = distinct_field();
+        let count = base.get_array("horses").expect("example horses").len();
+        let mut gated = PreparedRace::new(&json::to_string(&base)).expect("gate-0 prepare");
+        for gate in 0..count {
+            let mut specific = PreparedRace::new(&gate_request(&base, gate)).expect("gate prepare");
+            for seed in [1i64, 20261115, 20261123] {
+                let expected = reply(&mut specific, seed);
+                let mut actual = String::new();
+                gated.run_gated(seed, gate as i32).expect("gated run").write_json(&mut actual);
+                if actual != expected {
+                    let at = actual.as_bytes().iter().zip(expected.as_bytes()).position(|(a, b)| a != b)
+                        .unwrap_or(actual.len().min(expected.len()));
+                    let from = at.saturating_sub(120);
+                    panic!("gate {gate} seed {seed} differs at {at} of {}/{}\nactual: {}\nexpected: {}",
+                        actual.len(), expected.len(),
+                        &actual[from..(at + 160).min(actual.len())], &expected[from..(at + 160).min(expected.len())]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gated_run_restores_the_gate_zero_field() {
+        let base = distinct_field();
+        let count = base.get_array("horses").expect("example horses").len();
+        let mut gated = PreparedRace::new(&json::to_string(&base)).expect("gate-0 prepare");
+        let mut reference = PreparedRace::new(&json::to_string(&base)).expect("second gate-0 prepare");
+        let mut actual = String::new();
+        gated.run_gated(20261115, (count - 1) as i32).expect("gated run").write_json(&mut actual);
+        let mut expected = String::new();
+        gated.run(20261115).expect("plain run").write_json(&mut expected);
+        let mut direct = String::new();
+        reference.run(20261115).expect("reference run").write_json(&mut direct);
+        assert_eq!(expected, direct, "a gated run leaves the gate-0 field in place");
     }
 }
 

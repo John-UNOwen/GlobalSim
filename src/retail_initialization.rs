@@ -456,9 +456,34 @@ impl PreparedInitialization {
     }
 
     pub(crate) fn initialize(&self, seed: i32) -> Result<Initialization, String> {
+        self.initialize_order(seed, None)
+    }
+
+    /// `initialize` for a different field order: `order[position]` names the
+    /// prepared horse that runs at that position. The draw sequence stays the
+    /// original field-wide pass order, so a gated field matches a preparation
+    /// built in that gate's order exactly.
+    pub(crate) fn initialize_permuted(&self, seed: i32, order: &[usize]) -> Result<Initialization, String> {
+        if order.len() != self.horses.len() {
+            return Err(format!("initialization order names {} of {} runners", order.len(), self.horses.len()));
+        }
+        self.initialize_order(seed, Some(order))
+    }
+
+    fn initialize_order(&self, seed: i32, order: Option<&[usize]>) -> Result<Initialization, String> {
+        let count = self.horses.len();
+        let at = |position: usize| -> Result<usize, String> {
+            match order {
+                Some(order) => order.get(position).copied()
+                    .filter(|&index| index < count)
+                    .ok_or_else(|| format!("initialization order index out of range at {position}")),
+                None => Ok(position),
+            }
+        };
         let mut rng = RetailRandom::new(seed);
-        let mut rows: Vec<_> = self.horses.iter().map(|_| HorseInitialization::default()).collect();
-        for (runner, (horse, row)) in self.horses.iter().zip(&mut rows).enumerate() {
+        let mut rows: Vec<_> = (0..count).map(|_| HorseInitialization::default()).collect();
+        for (runner, row) in rows.iter_mut().enumerate() {
+            let horse = &self.horses[at(runner)?];
             for trigger in &horse.triggers {
                 let draw_start = rng.draw_count;
                 let windows = trigger_windows(self.paired, seed, runner,
@@ -470,21 +495,23 @@ impl PreparedInitialization {
             }
         }
         let mut stages = BTreeMap::from([("after_triggers".into(), rng.draw_count)]);
-        for (horse, row) in self.horses.iter().zip(&mut rows) {
-            let coefficient = horse.force_coefficient;
+        for (position, row) in rows.iter_mut().enumerate() {
+            let coefficient = self.horses[at(position)?].force_coefficient;
             let offset = if coefficient > 0. { rng.real(0., self.force_span) }
                 else if coefficient < 0. { rng.real(-self.force_span, 0.) } else { 0. };
             row.force_in_move_coefficient = coefficient + offset;
         }
         stages.insert("after_ai".into(), rng.draw_count);
-        for (runner, (horse, row)) in self.horses.iter().zip(&mut rows).enumerate() {
+        for (runner, row) in rows.iter_mut().enumerate() {
+            let horse = &self.horses[at(runner)?];
             for (sid, checked) in &horse.skills {
                 let enabled = !checked || horse.wisdom_chance > wisdom_roll(self.paired, seed, runner, sid, &mut rng);
                 row.skill_enabled.insert(sid.clone(), enabled);
             }
         }
         stages.insert("after_wisdom".into(), rng.draw_count);
-        for (horse, row) in self.horses.iter().zip(&mut rows) {
+        for (position, row) in rows.iter_mut().enumerate() {
+            let horse = &self.horses[at(position)?];
             let mut multiplier = 1.0_f32;
             for (sid, modifiers) in &horse.delay_modifiers {
                 if row.skill_enabled[sid] {
