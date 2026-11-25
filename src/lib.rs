@@ -21,7 +21,7 @@ mod seed_sampling;
 // the C exports twice. See the `no-ffi-exports` feature.
 #[cfg(not(feature = "no-ffi-exports"))]
 mod ffi;
-pub use api::{PreparedRace, Simulation};
+pub use api::{clear_skill_table, register_skill_table, PreparedRace, Simulation};
 #[cfg(feature = "external-geometry")]
 mod geometry_registry;
 #[cfg(feature = "external-geometry")]
@@ -1782,3 +1782,4 @@ mod gate_order_tests {
         assert_eq!(out.get_i64("playerHorseIndex").unwrap(), 1);
     }
 }
+
