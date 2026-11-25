@@ -78,6 +78,18 @@ impl GpuRaces {
         self.ctx.device().name.clone()
     }
 
+    /// Full device identity: platform, name, driver version, compute units,
+    /// work-group limits and the fp configuration words the gate judged.
+    pub fn device_report(&self) -> &crate::gpu::DeviceReport {
+        self.ctx.device()
+    }
+
+    /// Local work size for the self-test's sweep. `None` restores the pinned
+    /// size. Grouping changes scheduling only, never arithmetic.
+    pub fn set_local_work_size(&mut self, size: Option<usize>) {
+        self.ctx.set_local_work_size(size);
+    }
+
     /// Register the app's course JSON (the text it feeds the CPU lane's
     /// `register_course_geometry`) as this instance's kernel geometry for the
     /// course, so both lanes flatten one copy. Injecting replaces any earlier
